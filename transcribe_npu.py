@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import gc
 import math
 import time
 from dataclasses import dataclass
@@ -266,11 +267,25 @@ def parse_args():
     p.add_argument('--output-suffix', default='')
     p.add_argument('--hotwords-file', default=str(DEFAULT_HOTWORDS_FILE))
     p.add_argument('--initial-prompt-file', default=str(DEFAULT_INITIAL_PROMPT_FILE))
-    p.add_argument('--diarize', action='store_true', help='Enable offline speaker diarization on CPU')
+    p.add_argument(
+        '--diarize',
+        action='store_true',
+        help='Enable hybrid speaker diarization (OpenVINO segmentation + CPU embedding/clustering)',
+    )
     p.add_argument('--num-speakers', type=int, default=-1, help='Known number of speakers, or -1 to detect automatically')
     p.add_argument('--speaker-threshold', type=float, default=0.5, help='Clustering threshold when speaker count is unknown')
     p.add_argument('--diarization-segmentation-model', default=str(DEFAULT_SEGMENTATION_MODEL))
     p.add_argument('--diarization-embedding-model', default=str(DEFAULT_EMBEDDING_MODEL))
+    p.add_argument(
+        '--diarization-device',
+        default='NPU',
+        help='OpenVINO device for speaker segmentation (default: NPU)',
+    )
+    p.add_argument(
+        '--diarization-no-fallback',
+        action='store_true',
+        help='Fail instead of falling back to CPU when diarization segmentation cannot use the requested device',
+    )
     return p.parse_args()
 
 
@@ -322,10 +337,15 @@ def main() -> int:
         print(f'Overlap    : {args.overlap_seconds:.1f} sec')
         print(f'Hotwords   : {"ON" if hotwords else "OFF"}')
         print(f'Init prompt: {"ON" if initial_prompt else "OFF"}')
-        print(f'Diarization: {"ON (CPU)" if args.diarize else "OFF"}')
         if args.diarize:
+            print(
+                'Diarization: ON '
+                f'(segmentation {args.diarization_device.upper()}, embedding/clustering CPU)'
+            )
             speaker_count = 'auto' if args.num_speakers < 0 else str(args.num_speakers)
             print(f'Speakers   : {speaker_count}')
+        else:
+            print('Diarization: OFF')
         print()
 
         total_started = time.perf_counter()
@@ -374,7 +394,17 @@ def main() -> int:
         print(f'      Transcription time: {clock(elapsed)} (RTF {rtf:.2f}x)')
 
         if args.diarize:
-            print(f'[5/{steps}] Separating speakers on CPU...')
+            # Release the large Whisper pipeline before loading the much smaller
+            # segmentation model on the NPU. This avoids keeping both compiled
+            # networks resident at the same time on memory-constrained NPUs.
+            del pipe
+            del config
+            gc.collect()
+
+            print(
+                f'[5/{steps}] Separating speakers '
+                f'(segmentation {args.diarization_device.upper()}, embedding/clustering CPU)...'
+            )
             from diarization import diarize_audio
             turns = diarize_audio(
                 audio,
@@ -382,6 +412,8 @@ def main() -> int:
                 Path(args.diarization_embedding_model),
                 num_speakers=args.num_speakers,
                 cluster_threshold=args.speaker_threshold,
+                device=args.diarization_device,
+                fallback_to_cpu=not args.diarization_no_fallback,
             )
             assign_speakers(segments, turns)
             speakers = sorted({turn.speaker for turn in turns})
