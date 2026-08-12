@@ -1,0 +1,10 @@
+# One term or phrase per line.
+# Lines beginning with # are ignored.
+# Example:
+# CANoe
+# CANalyzer
+# CAPL
+# AUTOSAR
+# UDS
+# ECU
+# DBC
