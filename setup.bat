@@ -56,8 +56,8 @@ echo ===========================================================================
 echo  Setup complete.
 echo  run_int8.bat          = NPU + INT8
 echo  run_fp16.bat          = NPU + FP16
-echo  run_int8_diarize.bat  = NPU INT8 + CPU speaker diarization
-echo  run_fp16_diarize.bat  = NPU FP16 + CPU speaker diarization
+echo  run_int8_diarize.bat  = NPU ASR + NPU segmentation + CPU embedding/clustering
+echo  run_fp16_diarize.bat  = NPU ASR + NPU segmentation + CPU embedding/clustering
 echo  run_fp16_compat.bat   = NPU + FP16 with Level Zero memory workaround
 echo  run_compare.bat       = INT8 then FP16 on one selected recording
 echo ==============================================================================
