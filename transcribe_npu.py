@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import gc
 import math
 import time
 from dataclasses import dataclass
@@ -17,6 +18,9 @@ DEFAULT_WINDOW_SECONDS = 120.0
 DEFAULT_OVERLAP_SECONDS = 4.0
 DEFAULT_HOTWORDS_FILE = APP_DIR / 'hotwords.txt'
 DEFAULT_INITIAL_PROMPT_FILE = APP_DIR / 'initial_prompt.txt'
+DEFAULT_DIARIZATION_DIR = APP_DIR / 'models' / 'diarization'
+DEFAULT_SEGMENTATION_MODEL = DEFAULT_DIARIZATION_DIR / 'sherpa-onnx-pyannote-segmentation-3-0' / 'model.onnx'
+DEFAULT_EMBEDDING_MODEL = DEFAULT_DIARIZATION_DIR / '3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx'
 
 
 @dataclass
@@ -24,12 +28,12 @@ class Segment:
     start: float
     end: float
     text: str
+    speaker: int | None = None
 
 
 def choose_file() -> Path | None:
     import tkinter as tk
     from tkinter import filedialog
-
     root = tk.Tk()
     root.withdraw()
     root.attributes('-topmost', True)
@@ -46,13 +50,9 @@ def choose_file() -> Path | None:
 
 def ensure_device(device: str) -> list[str]:
     import openvino as ov
-
     devices = list(ov.Core().available_devices)
     requested = device.upper()
-    ok = any(
-        str(d).upper() == requested or str(d).upper().startswith(requested + '.')
-        for d in devices
-    )
+    ok = any(str(d).upper() == requested or str(d).upper().startswith(requested + '.') for d in devices)
     if not ok:
         raise RuntimeError(f'OpenVINO device {device} was not found. Devices: {devices}')
     return devices
@@ -61,22 +61,18 @@ def ensure_device(device: str) -> list[str]:
 def decode_audio_16k_mono(input_path: Path) -> np.ndarray:
     import av
     from av.audio.resampler import AudioResampler
-
     container = av.open(str(input_path))
     try:
         stream = next((s for s in container.streams if s.type == 'audio'), None)
         if stream is None:
             raise RuntimeError('No audio stream found in the input file.')
-
         resampler = AudioResampler(format='fltp', layout='mono', rate=TARGET_SAMPLE_RATE)
         chunks: list[np.ndarray] = []
-
         for frame in container.decode(stream):
             for out_frame in resampler.resample(frame):
                 arr = out_frame.to_ndarray()
                 if arr.size:
                     chunks.append(np.asarray(arr, dtype=np.float32).reshape(-1))
-
         try:
             for out_frame in resampler.resample(None):
                 arr = out_frame.to_ndarray()
@@ -84,10 +80,8 @@ def decode_audio_16k_mono(input_path: Path) -> np.ndarray:
                     chunks.append(np.asarray(arr, dtype=np.float32).reshape(-1))
         except Exception:
             pass
-
         if not chunks:
             raise RuntimeError('Audio decoding produced no samples.')
-
         audio = np.concatenate(chunks).astype(np.float32, copy=False)
         peak = float(np.max(np.abs(audio))) if audio.size else 0.0
         if peak > 1.05:
@@ -132,17 +126,16 @@ def print_progress(processed: float, total: float, index: int, count: int, start
     filled = min(width, int(round(width * ratio)))
     bar = '#' * filled + '-' * (width - filled)
     elapsed = max(0.0, time.perf_counter() - started)
+    eta_text = ''
     if 0.0 < ratio < 1.0:
         eta = max(0.0, elapsed * (1.0 / ratio - 1.0))
         eta_text = f' ETA {clock(eta)}'
-    else:
-        eta_text = ' ETA 00:00' if ratio >= 1.0 else ''
+    elif ratio >= 1.0:
+        eta_text = ' ETA 00:00'
     print(
-        f'\r      [{bar}] {ratio * 100:5.1f}%  '
-        f'{clock(processed)} / {clock(total)}  '
+        f'\r      [{bar}] {ratio * 100:5.1f}%  {clock(processed)} / {clock(total)}  '
         f'window {index}/{count}{eta_text}',
-        end='',
-        flush=True,
+        end='', flush=True,
     )
 
 
@@ -157,7 +150,6 @@ def transcribe_windows(pipe, config, audio: np.ndarray, duration: float, window:
         core_end = min(duration, (idx + 1) * window)
         infer_start = max(0.0, core_start - (overlap if idx > 0 else 0.0))
         infer_end = min(duration, core_end + (overlap if idx + 1 < count else 0.0))
-
         sample_start = int(round(infer_start * TARGET_SAMPLE_RATE))
         sample_end = int(round(infer_end * TARGET_SAMPLE_RATE))
         chunk = audio[sample_start:sample_end]
@@ -191,23 +183,71 @@ def transcribe_windows(pipe, config, audio: np.ndarray, duration: float, window:
 
     print()
     segments.sort(key=lambda s: (s.start, s.end))
-    full_text = '\n'.join(s.text for s in segments if s.text.strip()).strip()
-    return full_text, segments
+    return segments
 
 
-def save_outputs(input_path: Path, text: str, segments: list[Segment], duration: float, suffix: str):
+def assign_speakers(segments: list[Segment], turns) -> None:
+    """Assign each ASR segment to the diarization turn with the largest time overlap."""
+    for seg in segments:
+        best_speaker = None
+        best_overlap = 0.0
+        seg_midpoint = (seg.start + seg.end) / 2.0
+
+        for turn in turns:
+            overlap = max(0.0, min(seg.end, turn.end) - max(seg.start, turn.start))
+            if overlap > best_overlap:
+                best_overlap = overlap
+                best_speaker = turn.speaker
+
+        if best_speaker is None:
+            for turn in turns:
+                if turn.start <= seg_midpoint <= turn.end:
+                    best_speaker = turn.speaker
+                    break
+
+        seg.speaker = best_speaker
+
+
+def speaker_label(speaker: int | None) -> str:
+    return '화자 ?' if speaker is None else f'화자 {speaker + 1}'
+
+
+def build_text(segments: list[Segment], diarized: bool) -> str:
+    if not diarized:
+        return '\n'.join(s.text for s in segments if s.text.strip()).strip()
+
+    lines: list[str] = []
+    marker = object()
+    previous_speaker: object | int | None = marker
+    for seg in segments:
+        if not seg.text.strip():
+            continue
+        if seg.speaker != previous_speaker:
+            if lines:
+                lines.append('')
+            lines.append(f'[{clock(seg.start)}] {speaker_label(seg.speaker)}')
+            previous_speaker = seg.speaker
+        lines.append(seg.text.strip())
+    return '\n'.join(lines).strip()
+
+
+def save_outputs(input_path: Path, segments: list[Segment], duration: float, suffix: str, *, diarized: bool):
     stem = input_path.stem + suffix
     txt_path = input_path.with_name(stem + '.txt')
     srt_path = input_path.with_name(stem + '.srt')
+    text = build_text(segments, diarized)
 
     txt_path.write_text(text.strip() + '\n', encoding='utf-8-sig')
     blocks = []
-    for idx, seg in enumerate(segments, start=1):
+    index = 1
+    for seg in segments:
         if not seg.text.strip():
             continue
-        blocks.append(
-            f'{idx}\n{srt_timestamp(seg.start)} --> {srt_timestamp(seg.end)}\n{seg.text.strip()}\n'
-        )
+        subtitle = seg.text.strip()
+        if diarized:
+            subtitle = f'[{speaker_label(seg.speaker)}] {subtitle}'
+        blocks.append(f'{index}\n{srt_timestamp(seg.start)} --> {srt_timestamp(seg.end)}\n{subtitle}\n')
+        index += 1
     if not blocks and text.strip():
         blocks.append(f'1\n{srt_timestamp(0)} --> {srt_timestamp(max(duration, 0.5))}\n{text.strip()}\n')
     srt_path.write_text('\n'.join(blocks), encoding='utf-8-sig')
@@ -227,6 +267,25 @@ def parse_args():
     p.add_argument('--output-suffix', default='')
     p.add_argument('--hotwords-file', default=str(DEFAULT_HOTWORDS_FILE))
     p.add_argument('--initial-prompt-file', default=str(DEFAULT_INITIAL_PROMPT_FILE))
+    p.add_argument(
+        '--diarize',
+        action='store_true',
+        help='Enable hybrid speaker diarization (OpenVINO segmentation + CPU embedding/clustering)',
+    )
+    p.add_argument('--num-speakers', type=int, default=-1, help='Known number of speakers, or -1 to detect automatically')
+    p.add_argument('--speaker-threshold', type=float, default=0.5, help='Clustering threshold when speaker count is unknown')
+    p.add_argument('--diarization-segmentation-model', default=str(DEFAULT_SEGMENTATION_MODEL))
+    p.add_argument('--diarization-embedding-model', default=str(DEFAULT_EMBEDDING_MODEL))
+    p.add_argument(
+        '--diarization-device',
+        default='NPU',
+        help='OpenVINO device for speaker segmentation (default: NPU)',
+    )
+    p.add_argument(
+        '--diarization-no-fallback',
+        action='store_true',
+        help='Fail instead of falling back to CPU when diarization segmentation cannot use the requested device',
+    )
     return p.parse_args()
 
 
@@ -240,6 +299,12 @@ def main() -> int:
         return 2
     if args.overlap_seconds < 0 or args.overlap_seconds >= args.window_seconds / 2:
         print('[ERROR] Invalid overlap.')
+        return 2
+    if args.num_speakers == 0 or args.num_speakers < -1:
+        print('[ERROR] --num-speakers must be -1 or at least 1.')
+        return 2
+    if not 0.0 < args.speaker_threshold <= 1.0:
+        print('[ERROR] --speaker-threshold must be in (0, 1].')
         return 2
 
     input_path = Path(args.input).expanduser().resolve() if args.input else choose_file()
@@ -260,7 +325,7 @@ def main() -> int:
 
     try:
         print('=' * 78)
-        print(' Korean Transcriber v6 - INT8 / FP16 comparison')
+        print(' Korean Transcriber v7 - optional speaker diarization')
         print('=' * 78)
         print(f'Input      : {input_path}')
         print(f'Model      : {model_dir}')
@@ -272,20 +337,29 @@ def main() -> int:
         print(f'Overlap    : {args.overlap_seconds:.1f} sec')
         print(f'Hotwords   : {"ON" if hotwords else "OFF"}')
         print(f'Init prompt: {"ON" if initial_prompt else "OFF"}')
+        if args.diarize:
+            print(
+                'Diarization: ON '
+                f'(segmentation {args.diarization_device.upper()}, embedding/clustering CPU)'
+            )
+            speaker_count = 'auto' if args.num_speakers < 0 else str(args.num_speakers)
+            print(f'Speakers   : {speaker_count}')
+        else:
+            print('Diarization: OFF')
         print()
 
         total_started = time.perf_counter()
         devices = ensure_device(args.device)
-        print(f'[1/5] Device check OK: {devices}')
+        steps = 6 if args.diarize else 5
+        print(f'[1/{steps}] Device check OK: {devices}')
 
-        print('[2/5] Decoding and resampling audio to 16 kHz mono...')
+        print(f'[2/{steps}] Decoding and resampling audio to 16 kHz mono...')
         audio = decode_audio_16k_mono(input_path)
         duration = len(audio) / TARGET_SAMPLE_RATE
         print(f'      Audio length: {clock(duration)} ({duration / 60.0:.1f} min)')
 
-        print(f'[3/5] Loading/compiling model on {args.device}...')
+        print(f'[3/{steps}] Loading/compiling model on {args.device}...')
         import openvino_genai as ov_genai
-
         pipeline_options = {}
         if args.device.upper().startswith('NPU') or args.device.upper().startswith('GPU'):
             safe_label = (args.model_label or 'model').lower()
@@ -293,7 +367,6 @@ def main() -> int:
             cache_dir = APP_DIR / f'.ov_cache_{safe_label}_{safe_device}'
             cache_dir.mkdir(parents=True, exist_ok=True)
             pipeline_options['CACHE_DIR'] = str(cache_dir)
-
         pipe = ov_genai.WhisperPipeline(str(model_dir), args.device, **pipeline_options)
         print('      Model ready.')
 
@@ -313,19 +386,44 @@ def main() -> int:
             print(f'      Initial prompt: {initial_prompt[:160]}{"..." if len(initial_prompt) > 160 else ""}')
 
         mode = 'Beam Search' if args.beams > 1 else 'Greedy'
-        print(f'[4/5] Transcribing Korean ({mode}, beams={args.beams})...')
+        print(f'[4/{steps}] Transcribing Korean ({mode}, beams={args.beams})...')
         transcribe_started = time.perf_counter()
-        full_text, segments = transcribe_windows(
-            pipe, config, audio, duration, args.window_seconds, args.overlap_seconds
-        )
+        segments = transcribe_windows(pipe, config, audio, duration, args.window_seconds, args.overlap_seconds)
         elapsed = time.perf_counter() - transcribe_started
         rtf = elapsed / duration if duration > 0 else 0.0
         print(f'      Transcription time: {clock(elapsed)} (RTF {rtf:.2f}x)')
 
-        print('[5/5] Saving TXT/SRT...')
-        txt_path, srt_path = save_outputs(
-            input_path, full_text, segments, duration, args.output_suffix
-        )
+        if args.diarize:
+            # Release the large Whisper pipeline before loading the much smaller
+            # segmentation model on the NPU. This avoids keeping both compiled
+            # networks resident at the same time on memory-constrained NPUs.
+            del pipe
+            del config
+            gc.collect()
+
+            print(
+                f'[5/{steps}] Separating speakers '
+                f'(segmentation {args.diarization_device.upper()}, embedding/clustering CPU)...'
+            )
+            from diarization import diarize_audio
+            turns = diarize_audio(
+                audio,
+                Path(args.diarization_segmentation_model),
+                Path(args.diarization_embedding_model),
+                num_speakers=args.num_speakers,
+                cluster_threshold=args.speaker_threshold,
+                device=args.diarization_device,
+                fallback_to_cpu=not args.diarization_no_fallback,
+            )
+            assign_speakers(segments, turns)
+            speakers = sorted({turn.speaker for turn in turns})
+            print(f'      Speaker turns: {len(turns)}, detected speakers: {len(speakers)}')
+            save_step = 6
+        else:
+            save_step = 5
+
+        print(f'[{save_step}/{steps}] Saving TXT/SRT...')
+        txt_path, srt_path = save_outputs(input_path, segments, duration, args.output_suffix, diarized=args.diarize)
         total_elapsed = time.perf_counter() - total_started
 
         print()
