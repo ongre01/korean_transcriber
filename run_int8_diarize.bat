@@ -30,9 +30,9 @@ if "%~2"=="" (
 )
 
 if "%~1"=="" (
-    ".venv\Scripts\python.exe" transcribe_npu.py --device NPU --beams 1 --model-dir "%MODEL%" --model-label INT8 --output-suffix "_int8_diarized" --diarize --num-speakers %SPEAKERS%
+    ".venv\Scripts\python.exe" transcribe_npu.py --device NPU --beams 1 --model-dir "%MODEL%" --model-label INT8 --output-suffix "_int8_diarized" --diarize --diarization-device NPU --num-speakers %SPEAKERS%
 ) else (
-    ".venv\Scripts\python.exe" transcribe_npu.py "%~1" --device NPU --beams 1 --model-dir "%MODEL%" --model-label INT8 --output-suffix "_int8_diarized" --diarize --num-speakers %SPEAKERS%
+    ".venv\Scripts\python.exe" transcribe_npu.py "%~1" --device NPU --beams 1 --model-dir "%MODEL%" --model-label INT8 --output-suffix "_int8_diarized" --diarize --diarization-device NPU --num-speakers %SPEAKERS%
 )
 
 echo.
