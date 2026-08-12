@@ -4,3 +4,4 @@ openvino-tokenizers==2026.3.0.0
 huggingface-hub>=0.34,<2
 av>=14.0.0,<19
 numpy>=1.26,<3
+sherpa-onnx>=1.10.28,<2
