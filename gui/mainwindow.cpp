@@ -1,4 +1,5 @@
 #include "mainwindow.h"
+#include "logging/LogDialog.h"
 #include "settings/SettingsDialog.h"
 #include "ui_mainwindow.h"
 
@@ -245,6 +246,8 @@ MainWindow::MainWindow(QWidget *parent)
             this, &MainWindow::recordingTimeChanged);
     connect(m_audioRecorder, &AudioRecorder::recordingLevelChanged,
             this, &MainWindow::recordingLevelChanged);
+    connect(m_audioRecorder, &AudioRecorder::recordingStarted,
+            this, &MainWindow::recordingStarted);
     connect(m_audioRecorder, &AudioRecorder::recordingStopped,
             this, &MainWindow::recordingFinished);
     connect(m_audioRecorder, &AudioRecorder::errorOccurred,
@@ -267,15 +270,30 @@ MainWindow::MainWindow(QWidget *parent)
             this, &MainWindow::processingCancelled);
     connect(m_backendProcess, &BackendProcess::errorOccurred,
             this, &MainWindow::processingFailed);
+    connect(m_backendProcess, &BackendProcess::standardErrorReceived,
+            this, &MainWindow::backendStandardErrorReceived);
+    connect(m_backendProcess, &BackendProcess::stopped,
+            this, &MainWindow::backendProcessStopped);
+    connect(m_backendProcess, &BackendProcess::commandStarted, this,
+            [this](const QString &command, const QString &workingDirectory) {
+                logInfo(tr("Python Command"),
+                        tr("%1\nWorking directory: %2")
+                            .arg(command, QDir::toNativeSeparators(workingDirectory)));
+            });
 
     QMenu *settingsMenu = menuBar()->addMenu(tr("설정"));
     m_settingsAction = settingsMenu->addAction(tr("설정..."));
     connect(m_settingsAction, &QAction::triggered, this, &MainWindow::handleSettings);
+    QMenu *toolsMenu = menuBar()->addMenu(tr("도구"));
+    m_viewLogsAction = toolsMenu->addAction(tr("상세 로그 보기..."));
+    connect(m_viewLogsAction, &QAction::triggered, this, &MainWindow::handleLogView);
 
     updateMicrophoneUi();
     updateInputFileUi();
     updateResultOutputUi();
     updateUiForState();
+    logInfo(tr("Application Start"));
+    logInfo(tr("Selected Audio Device"), selectedMicrophoneDescription());
 }
 
 MainWindow::~MainWindow()
@@ -347,6 +365,7 @@ void MainWindow::selectInputFile(const QString &filePath)
     }
 
     m_pendingInputFile = QFileInfo(selectedPath).absoluteFilePath();
+    logInfo(tr("Input File Selected"), QDir::toNativeSeparators(m_pendingInputFile));
     m_inputInspectionPending = true;
     ui->fileModeRadioButton->setChecked(true);
     updateInputFileUi();
@@ -374,16 +393,27 @@ void MainWindow::processingCompleted()
         m_resultOutputFile = resultFile.isFile()
             ? resultFile.absoluteFilePath()
             : QString();
+        logInfo(tr("Output File"),
+                tr("TXT: %1\nSRT: %2")
+                    .arg(QDir::toNativeSeparators(m_backendProcess->textResultFile()),
+                         QDir::toNativeSeparators(m_backendProcess->srtResultFile())));
         updateResultOutputUi();
-        setAppState(AppState::Completed);
+        setAppState(
+            AppState::Completed,
+            m_diarizationFallbackOccurred
+                ? tr("화자 분리 NPU를 사용할 수 없어 CPU로 대체하여 완료했습니다.")
+                : QString());
     }
 }
 
 void MainWindow::processingFailed(const QString &message)
 {
     if (m_state == AppState::Processing && !m_cancellationPending) {
+        logError(tr("Backend Error"), message);
         resetProcessingIndicators();
-        setAppState(AppState::Error, message);
+        const QString userMessage = backendUserMessage(message);
+        setAppState(AppState::Error, userMessage);
+        showOperationError(tr("전사 오류"), userMessage);
     }
 }
 
@@ -531,9 +561,17 @@ void MainWindow::handleTranscriptionStart()
 
     m_diarizationEnabledForRun = options.diarizationEnabled;
     m_cancellationPending = false;
+    m_diarizationFallbackOccurred = false;
+    m_backendStderrTail.clear();
     clearTranscript();
     resetProcessingIndicators();
     setAppState(AppState::Processing);
+    logInfo(tr("Transcription Start"),
+            tr("Input: %1\nDevice: %2\nDiarization: %3")
+                .arg(QDir::toNativeSeparators(options.inputFile),
+                     backendDeviceArgument(options.device),
+                     options.diarizationEnabled ? tr("ON") : tr("OFF")));
+    logInfo(tr("Model"), QDir::toNativeSeparators(options.modelDirectory));
     emit transcriptionStartRequested();
     m_backendProcess->start(options);
 }
@@ -547,6 +585,7 @@ void MainWindow::handleCancellation()
 
     m_cancellationPending = true;
     m_backendState = QStringLiteral("cancelling");
+    logInfo(tr("Transcription Cancel Requested"));
     ui->processingProgressBar->setRange(0, 0);
     updateUiForState();
     emit cancellationRequested();
@@ -665,6 +704,13 @@ void MainWindow::handleSettings()
     updateUiForState();
 }
 
+void MainWindow::handleLogView()
+{
+    auto *dialog = new LogDialog(m_logger.logDirectory(), this);
+    dialog->setAttribute(Qt::WA_DeleteOnClose);
+    dialog->show();
+}
+
 void MainWindow::updateSpeakerCountEnabled()
 {
     const bool optionsEnabled = m_state != AppState::Recording
@@ -710,6 +756,7 @@ void MainWindow::handleMicrophoneSelection(int index)
     if (m_audioRecorder->setInputDevice(
             ui->microphoneComboBox->itemData(index).toByteArray())) {
         saveSettings();
+        logInfo(tr("Selected Audio Device"), selectedMicrophoneDescription());
     }
 }
 
@@ -734,6 +781,14 @@ void MainWindow::recordingLevelChanged(float level)
         qBound(0, qRound(level * 100.0f), 100));
 }
 
+void MainWindow::recordingStarted()
+{
+    logInfo(tr("Recording Start"),
+            tr("Device: %1\nOutput: %2")
+                .arg(selectedMicrophoneDescription(),
+                     QDir::toNativeSeparators(m_audioRecorder->outputFile())));
+}
+
 void MainWindow::recordingFinished(const QString &filePath)
 {
     if (m_state != AppState::Recording) {
@@ -753,18 +808,23 @@ void MainWindow::recordingFinished(const QString &filePath)
     m_inputDurationMilliseconds = m_recordingDurationMilliseconds;
     m_settings.lastInputDirectory = recordedFile.absolutePath();
     saveSettings();
+    logInfo(tr("Recording Stop"), QDir::toNativeSeparators(m_currentInputFile));
+    logInfo(tr("Input File"), QDir::toNativeSeparators(m_currentInputFile));
     updateInputFileUi();
     setAppState(AppState::InputReady, tr("녹음 파일 준비 완료"));
 }
 
 void MainWindow::recordingFailed(const QString &message)
 {
+    logError(tr("Recording Error"), message);
     ui->inputLevelProgressBar->setValue(0);
+    const QString userMessage = recordingUserMessage(message);
     if (m_state == AppState::Recording) {
-        setAppState(AppState::Error, message);
+        setAppState(AppState::Error, userMessage);
     } else {
-        statusBar()->showMessage(message);
+        statusBar()->showMessage(userMessage);
     }
+    showOperationError(tr("녹음 오류"), userMessage);
 }
 
 void MainWindow::inputFileInspectionSucceeded(const AudioFileMetadata &metadata)
@@ -778,6 +838,11 @@ void MainWindow::inputFileInspectionSucceeded(const AudioFileMetadata &metadata)
     m_inputDurationMilliseconds = metadata.durationMilliseconds;
     m_settings.lastInputDirectory = QFileInfo(metadata.filePath).absolutePath();
     saveSettings();
+    logInfo(tr("Input File"),
+            tr("Path: %1\nDuration: %2\nSize: %3")
+                .arg(QDir::toNativeSeparators(metadata.filePath),
+                     formattedDuration(metadata.durationMilliseconds),
+                     formattedFileSize(metadata.sizeBytes)));
     m_pendingInputFile.clear();
     m_inputInspectionPending = false;
     updateInputFileUi();
@@ -794,9 +859,12 @@ void MainWindow::inputFileInspectionFailed(const QString &filePath, const QStrin
     m_pendingInputFile.clear();
     m_inputInspectionPending = false;
     updateInputFileUi();
-    const QString userMessage = tr("오디오 파일을 읽을 수 없습니다: %1").arg(message);
+    logError(tr("Input File Error"),
+             tr("File: %1\n%2").arg(QDir::toNativeSeparators(filePath), message));
+    const QString userMessage = fileUserMessage(message);
     setAppState(AppState::Error, userMessage);
     emit inputFileErrorOccurred(userMessage);
+    showOperationError(tr("입력 파일 오류"), userMessage);
 }
 
 void MainWindow::backendStateChanged(const QString &state)
@@ -806,6 +874,17 @@ void MainWindow::backendStateChanged(const QString &state)
     }
 
     m_backendState = state;
+    logInfo(tr("Backend State"), state);
+    if (state == QStringLiteral("loading_model")) {
+        logInfo(tr("Model Loading"), QDir::toNativeSeparators(m_settings.whisperModelDirectory));
+    } else if (state == QStringLiteral("transcribing")) {
+        logInfo(tr("Transcription Processing Started"));
+    } else if (state == QStringLiteral("diarization")) {
+        logInfo(tr("Diarization Start"),
+                tr("Device: %1; CPU fallback: %2")
+                    .arg(m_settings.diarizationDevice,
+                         m_settings.diarizationFallbackToCpu ? tr("enabled") : tr("disabled")));
+    }
     ui->processingProgressBar->setRange(0, 0);
     updateUiForState();
 }
@@ -837,6 +916,39 @@ void MainWindow::backendProgressTimeChanged(double processedSeconds, double tota
         tr("%1 / %2")
             .arg(formattedDuration(qRound64(processedSeconds * 1000.0)))
             .arg(formattedDuration(qRound64(totalSeconds * 1000.0))));
+}
+
+void MainWindow::backendStandardErrorReceived(const QByteArray &data)
+{
+    if (data.isEmpty()) {
+        return;
+    }
+
+    logInfo(tr("Backend stderr"), QString::fromUtf8(data));
+    m_backendStderrTail += QString::fromUtf8(data);
+    constexpr qsizetype maximumTailLength = 4096;
+    if (m_backendStderrTail.size() > maximumTailLength) {
+        m_backendStderrTail.remove(0, m_backendStderrTail.size() - maximumTailLength);
+    }
+
+    const QString diagnostics = m_backendStderrTail.toCaseFolded();
+    const bool fallbackToCpu = diagnostics.contains(QStringLiteral("falling back to cpu"))
+        || diagnostics.contains(QStringLiteral("falling back to openvino cpu"));
+    if (!m_diarizationFallbackOccurred && fallbackToCpu) {
+        m_diarizationFallbackOccurred = true;
+        logInfo(tr("Diarization Device Fallback"),
+                tr("NPU unavailable; speaker segmentation is continuing on CPU."));
+    }
+}
+
+void MainWindow::backendProcessStopped()
+{
+    // A protocol/process error is signalled before QProcess has necessarily
+    // exited.  Keep actions disabled until this terminal notification, then
+    // apply the normal Error-state policy so the user can try again.
+    if (m_state == AppState::Error) {
+        updateUiForState();
+    }
 }
 
 void MainWindow::transcriptionSegmentReceived(double start, double end,
@@ -951,7 +1063,122 @@ bool MainWindow::hasAvailableResult() const
 
 void MainWindow::showResultError(const QString &message)
 {
+    logError(tr("Result Output Error"), message);
     statusBar()->showMessage(tr("결과 저장 오류: %1").arg(message));
+}
+
+void MainWindow::logInfo(const QString &event, const QString &detail)
+{
+    if (m_logger.info(event, detail) || m_logWriteFailureReported) {
+        return;
+    }
+
+    m_logWriteFailureReported = true;
+    statusBar()->showMessage(
+        tr("로그 파일을 쓸 수 없습니다. 계속 작업할 수 있지만 상세 로그는 저장되지 않습니다."));
+}
+
+void MainWindow::logError(const QString &event, const QString &detail)
+{
+    if (m_logger.error(event, detail) || m_logWriteFailureReported) {
+        return;
+    }
+
+    m_logWriteFailureReported = true;
+    statusBar()->showMessage(
+        tr("로그 파일을 쓸 수 없습니다. 계속 작업할 수 있지만 상세 로그는 저장되지 않습니다."));
+}
+
+QString MainWindow::selectedMicrophoneDescription() const
+{
+    const QByteArray selectedId = m_audioRecorder->selectedInputDeviceId();
+    for (const AudioInputDevice &device : m_audioRecorder->inputDevices()) {
+        if (device.id == selectedId) {
+            return device.description;
+        }
+    }
+    return tr("사용 가능한 마이크 없음");
+}
+
+QString MainWindow::detailLogHint() const
+{
+    if (m_logWriteFailureReported) {
+        return tr("상세 로그를 저장하지 못했습니다. 로그 폴더의 쓰기 권한을 확인하세요.");
+    }
+    return tr("상세 로그는 도구 메뉴의 ‘상세 로그 보기’에서 확인할 수 있습니다.");
+}
+
+QString MainWindow::recordingUserMessage(const QString &detail) const
+{
+    const QString normalized = detail.toCaseFolded();
+    if (normalized.contains(QStringLiteral("권한"))
+        || normalized.contains(QStringLiteral("permission"))) {
+        return tr("마이크 접근 권한이 없습니다. 운영체제의 마이크 권한을 확인하세요.");
+    }
+    if (normalized.contains(QStringLiteral("마이크"))
+        || normalized.contains(QStringLiteral("microphone"))) {
+        return tr("사용 가능한 마이크를 찾거나 초기화할 수 없습니다. 연결 상태와 선택한 장치를 확인하세요.");
+    }
+    if (normalized.contains(QStringLiteral("wav"))
+        || normalized.contains(QStringLiteral("파일"))
+        || normalized.contains(QStringLiteral("folder"))) {
+        return tr("녹음 파일을 만들 수 없습니다. 저장 폴더의 경로와 쓰기 권한을 확인하세요.");
+    }
+    return tr("녹음을 시작하거나 유지할 수 없습니다. 오디오 장치 상태를 확인하세요.");
+}
+
+QString MainWindow::fileUserMessage(const QString &detail) const
+{
+    const QString normalized = detail.toCaseFolded();
+    if (normalized.contains(QStringLiteral("찾을 수 없"))
+        || normalized.contains(QStringLiteral("not found"))) {
+        return tr("입력 파일을 찾을 수 없습니다. 파일이 이동되거나 삭제되지 않았는지 확인하세요.");
+    }
+    if (normalized.contains(QStringLiteral("지원하지 않는"))
+        || normalized.contains(QStringLiteral("unsupported"))) {
+        return tr("지원하지 않는 파일 형식입니다. 지원되는 오디오 또는 비디오 파일을 선택하세요.");
+    }
+    return tr("오디오 파일을 읽거나 디코딩할 수 없습니다. 파일이 손상되지 않았는지 확인하세요.");
+}
+
+QString MainWindow::backendUserMessage(const QString &detail) const
+{
+    const QString normalized = detail.toCaseFolded();
+    if (normalized.contains(QStringLiteral("required python module"))
+        || normalized.contains(QStringLiteral("no module named"))
+        || normalized.contains(QStringLiteral("failed to start backend"))
+        || normalized.contains(QStringLiteral("python program"))) {
+        return tr("Python 실행 환경을 시작할 수 없습니다. Python 경로와 필수 모듈을 확인하세요.");
+    }
+    if (normalized.contains(QStringLiteral("input file not found"))) {
+        return tr("입력 파일을 찾을 수 없습니다. 파일이 이동되거나 삭제되지 않았는지 확인하세요.");
+    }
+    if (normalized.contains(QStringLiteral("audio decoding"))
+        || normalized.contains(QStringLiteral("decode"))) {
+        return tr("오디오를 디코딩할 수 없습니다. 파일 형식과 손상 여부를 확인하세요.");
+    }
+    if (normalized.contains(QStringLiteral("diarization"))
+        || normalized.contains(QStringLiteral("segmentation"))
+        || normalized.contains(QStringLiteral("embedding"))) {
+        return tr("화자 분리를 완료할 수 없습니다. 화자 분리 모델과 장치 설정을 확인하세요.");
+    }
+    if (normalized.contains(QStringLiteral("model directory"))
+        || normalized.contains(QStringLiteral("whisper model"))
+        || normalized.contains(QStringLiteral("whisper pipeline"))) {
+        return tr("음성 인식 모델을 불러올 수 없습니다. 모델 폴더와 OpenVINO 설정을 확인하세요.");
+    }
+    if (normalized.contains(QStringLiteral("device selection"))
+        || normalized.contains(QStringLiteral("openvino device"))
+        || normalized.contains(QStringLiteral("npu"))) {
+        return tr("선택한 AI 장치를 사용할 수 없습니다. 장치를 AUTO 또는 CPU로 바꿔 다시 시도하세요.");
+    }
+    return tr("음성 인식 처리 중 오류가 발생했습니다. 설정을 확인한 뒤 다시 시도하세요.");
+}
+
+void MainWindow::showOperationError(const QString &title, const QString &message)
+{
+    QMessageBox::warning(this, title,
+                         tr("%1\n\n%2").arg(message, detailLogHint()));
 }
 
 void MainWindow::applySettingsToUi()
@@ -995,6 +1222,7 @@ bool MainWindow::validateSettingsForRun(bool diarizationEnabled)
 {
     QString errorMessage;
     if (!m_settings.validateForRun(diarizationEnabled, &errorMessage)) {
+        logError(tr("Settings Error"), errorMessage);
         const QString message = tr("전사를 시작할 수 없습니다.\n%1\n\n설정 메뉴에서 값을 확인하세요.")
                                     .arg(errorMessage);
         QMessageBox::warning(this, tr("설정 확인"), message);
@@ -1004,6 +1232,7 @@ bool MainWindow::validateSettingsForRun(bool diarizationEnabled)
 
     const QString outputDirectory = QFileInfo(m_settings.outputDirectory).absoluteFilePath();
     if (!QDir().mkpath(outputDirectory) || !QFileInfo(outputDirectory).isDir()) {
+        logError(tr("Output Directory Error"), QDir::toNativeSeparators(outputDirectory));
         const QString message = tr("결과 출력 폴더를 만들 수 없습니다: %1\n\n설정 메뉴에서 다른 폴더를 선택하세요.")
                                     .arg(QDir::toNativeSeparators(outputDirectory));
         QMessageBox::warning(this, tr("설정 확인"), message);
@@ -1018,15 +1247,17 @@ void MainWindow::updateUiForState()
 {
     const bool hasInput = hasValidInput() && !m_inputInspectionPending;
     const AppActionPolicy policy = appActionPolicy(m_state, hasInput);
+    const bool backendBusy = m_backendProcess && m_backendProcess->isRunning();
     const bool controlsEnabled = m_state != AppState::Recording
         && m_state != AppState::Processing
-        && !m_inputInspectionPending;
+        && !m_inputInspectionPending
+        && !backendBusy;
 
     ui->recordStartButton->setEnabled(
-        policy.canStartRecording && !m_inputInspectionPending);
-    ui->fileSelectButton->setEnabled(policy.canSelectFile);
+        policy.canStartRecording && !m_inputInspectionPending && !backendBusy);
+    ui->fileSelectButton->setEnabled(policy.canSelectFile && !backendBusy);
     ui->recordStopButton->setEnabled(policy.canStopRecording);
-    ui->transcribeButton->setEnabled(policy.canStartTranscription);
+    ui->transcribeButton->setEnabled(policy.canStartTranscription && !backendBusy);
     ui->cancelButton->setEnabled(policy.canCancel && !m_cancellationPending);
 
     ui->recordingModeRadioButton->setEnabled(controlsEnabled);

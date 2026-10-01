@@ -49,6 +49,10 @@ signals:
     void cancelled();
     void errorOccurred(QString message);
     void standardErrorReceived(QByteArray data);
+    void commandStarted(QString command, QString workingDirectory);
+    // Emitted after QProcess has stopped, including after a failed run.  This
+    // lets the UI re-enable actions only when a previous process is gone.
+    void stopped();
 
 private:
     void resetRunState();

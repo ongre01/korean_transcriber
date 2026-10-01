@@ -2,6 +2,7 @@
 
 #include <QDir>
 #include <QFileInfo>
+#include <QRegularExpression>
 #include <QStringList>
 
 namespace {
@@ -23,6 +24,29 @@ QString stateName(BackendState state)
         return QStringLiteral("saving_result");
     }
     return {};
+}
+
+QString quotedCommandArgument(const QString &argument)
+{
+    if (!argument.isEmpty()
+        && !argument.contains(QRegularExpression(QStringLiteral("[\\s\\\"]")))) {
+        return argument;
+    }
+
+    QString escaped = argument;
+    escaped.replace(QStringLiteral("\\\""), QStringLiteral("\\\\\""));
+    return QStringLiteral("\"") + escaped + QStringLiteral("\"");
+}
+
+QString commandForLog(const QString &program, const QStringList &arguments)
+{
+    QStringList parts;
+    parts.reserve(arguments.size() + 1);
+    parts.append(quotedCommandArgument(program));
+    for (const QString &argument : arguments) {
+        parts.append(quotedCommandArgument(argument));
+    }
+    return parts.join(QLatin1Char(' '));
 }
 
 } // namespace
@@ -132,6 +156,8 @@ void BackendProcess::start(const TranscribeOptions &options)
     m_process.setProgram(m_pythonProgram);
     m_process.setArguments(arguments);
     m_process.setWorkingDirectory(QDir::cleanPath(processDirectory));
+    emit commandStarted(commandForLog(m_pythonProgram, arguments),
+                        m_process.workingDirectory());
     m_process.start();
 }
 
@@ -216,9 +242,9 @@ void BackendProcess::readStandardError()
         return;
     }
     m_standardError.append(data);
-    if (!m_cancellationRequested) {
-        emit standardErrorReceived(data);
-    }
+    // Diagnostics remain useful even for a user-cancelled process: Python can
+    // have already written a traceback or termination detail before exiting.
+    emit standardErrorReceived(data);
 }
 
 void BackendProcess::consumeCompleteLines()
@@ -295,6 +321,7 @@ void BackendProcess::processFinished(int exitCode, QProcess::ExitStatus exitStat
 
     if (m_cancellationRequested) {
         finishCancellation();
+        emit stopped();
         return;
     }
 
@@ -308,17 +335,20 @@ void BackendProcess::processFinished(int exitCode, QProcess::ExitStatus exitStat
     }
 
     if (m_terminalSignalEmitted) {
+        emit stopped();
         return;
     }
     if (exitStatus != QProcess::NormalExit) {
         failRun(QStringLiteral("Backend process crashed (exit code %1).").arg(exitCode),
                 false);
+        emit stopped();
         return;
     }
 
     QString errorMessage;
     if (!m_streamValidator.finish(exitCode, &errorMessage)) {
         failRun(QStringLiteral("Backend protocol error: %1").arg(errorMessage), false);
+        emit stopped();
         return;
     }
 
@@ -328,6 +358,7 @@ void BackendProcess::processFinished(int exitCode, QProcess::ExitStatus exitStat
     } else if (m_receivedError) {
         emit errorOccurred(m_backendError);
     }
+    emit stopped();
 }
 
 void BackendProcess::processError(QProcess::ProcessError error)

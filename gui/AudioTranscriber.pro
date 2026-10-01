@@ -26,6 +26,8 @@ SOURCES += \
     audio/WavWriter.cpp \
     backend/BackendProcess.cpp \
     input/AudioFileInfo.cpp \
+    logging/AppLogger.cpp \
+    logging/LogDialog.cpp \
     settings/Settings.cpp \
     settings/SettingsDialog.cpp
 
@@ -39,6 +41,8 @@ HEADERS += \
     backend/TranscriptSegment.h \
     backend/TranscribeOptions.h \
     input/AudioFileInfo.h \
+    logging/AppLogger.h \
+    logging/LogDialog.h \
     settings/Settings.h \
     settings/SettingsDialog.h
 
