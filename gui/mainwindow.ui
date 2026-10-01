@@ -7,13 +7,13 @@
     <x>0</x>
     <y>0</y>
     <width>900</width>
-    <height>780</height>
+    <height>840</height>
    </rect>
   </property>
   <property name="minimumSize">
    <size>
     <width>760</width>
-    <height>680</height>
+    <height>740</height>
    </size>
   </property>
   <property name="windowTitle">
@@ -197,7 +197,24 @@
          <item><property name="text"><string>GPU</string></property></item>
         </widget>
        </item>
-       <item row="1" column="0" colspan="5">
+       <item row="1" column="0">
+        <widget class="QLabel" name="hotwordsLabel">
+         <property name="text">
+          <string>핫워드</string>
+         </property>
+        </widget>
+       </item>
+       <item row="1" column="1" colspan="4">
+        <widget class="QPlainTextEdit" name="hotwordsTextEdit">
+         <property name="minimumSize">
+          <size><width>0</width><height>72</height></size>
+         </property>
+         <property name="placeholderText">
+          <string>핫워드를 한 줄에 하나씩 입력하세요. #으로 시작하는 줄은 주석으로 처리됩니다.</string>
+         </property>
+        </widget>
+       </item>
+       <item row="2" column="0" colspan="5">
         <layout class="QHBoxLayout" name="processingButtonLayout">
          <item>
           <spacer name="processingButtonLeftSpacer">
@@ -223,28 +240,35 @@
            <property name="sizeHint" stdset="0"><size><width>40</width><height>20</height></size></property>
           </spacer>
          </item>
-        </layout>
+       </layout>
        </item>
-       <item row="2" column="0">
+       <item row="3" column="0">
         <widget class="QLabel" name="processingStateLabel">
          <property name="text"><string>준비</string></property>
-        </widget>
+       </widget>
        </item>
-       <item row="2" column="1" colspan="4">
+       <item row="3" column="1" colspan="4">
         <widget class="QProgressBar" name="processingProgressBar">
          <property name="minimum"><number>0</number></property>
          <property name="maximum"><number>100</number></property>
          <property name="value"><number>0</number></property>
-        </widget>
+       </widget>
        </item>
-       <item row="3" column="0">
+       <item row="4" column="0">
         <widget class="QLabel" name="processingTimeTitleLabel">
          <property name="text"><string>처리 시간</string></property>
-        </widget>
+       </widget>
        </item>
-       <item row="3" column="1" colspan="4">
+       <item row="4" column="1" colspan="4">
         <widget class="QLabel" name="processingTimeLabel">
          <property name="text"><string>—</string></property>
+        </widget>
+       </item>
+       <item row="5" column="0" colspan="5">
+        <widget class="QLabel" name="hotwordsStatusLabel">
+         <property name="text">
+          <string>입력하면 자동 저장됩니다.</string>
+         </property>
         </widget>
        </item>
       </layout>

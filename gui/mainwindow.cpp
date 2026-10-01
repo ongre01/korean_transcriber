@@ -8,16 +8,20 @@
 #include <QCloseEvent>
 #include <QDesktopServices>
 #include <QDir>
+#include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QMessageBox>
 #include <QMenu>
 #include <QMenuBar>
+#include <QPlainTextEdit>
 #include <QSaveFile>
 #include <QStatusBar>
 #include <QStringList>
 #include <QTextCursor>
 #include <QSignalBlocker>
+#include <QStandardPaths>
+#include <QTimer>
 #include <QUrl>
 
 #include <algorithm>
@@ -139,6 +143,17 @@ QString engineAssetPath(const QString &relativePath)
     return QDir::cleanPath(candidates.constFirst());
 }
 
+QString userHotwordsFilePath()
+{
+    QString directory = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+    if (directory.isEmpty()) {
+        directory = QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation);
+    }
+    return directory.isEmpty()
+        ? QString()
+        : QDir(directory).filePath(QStringLiteral("hotwords.txt"));
+}
+
 BackendDevice backendDevice(const QString &name)
 {
     if (name.compare(QStringLiteral("NPU"), Qt::CaseInsensitive) == 0) {
@@ -186,8 +201,11 @@ MainWindow::MainWindow(QWidget *parent)
     , m_audioRecorder(new AudioRecorder(this))
     , m_audioFileInfo(new AudioFileInfo(this))
     , m_backendProcess(new BackendProcess(this))
+    , m_hotwordsSaveTimer(new QTimer(this))
 {
     ui->setupUi(this);
+    m_hotwordsSaveTimer->setSingleShot(true);
+    m_hotwordsSaveTimer->setInterval(400);
 
     m_settings = Settings::load();
     if (m_settings.pythonPath.isEmpty()) {
@@ -225,6 +243,15 @@ MainWindow::MainWindow(QWidget *parent)
             [this](const QString &) { saveSettings(); });
     connect(ui->deviceComboBox, &QComboBox::currentTextChanged, this,
             [this](const QString &) { saveSettings(); });
+    connect(ui->hotwordsTextEdit, &QPlainTextEdit::textChanged,
+            this, &MainWindow::scheduleHotwordsSave);
+    connect(m_hotwordsSaveTimer, &QTimer::timeout, this, [this]() {
+        QString errorMessage;
+        if (!saveHotwordsText(&errorMessage)) {
+            logError(tr("Hotwords Save Error"), errorMessage);
+            ui->hotwordsStatusLabel->setText(tr("자동 저장 실패: %1").arg(errorMessage));
+        }
+    });
     connect(ui->microphoneComboBox,
             qOverload<int>(&QComboBox::currentIndexChanged),
             this, &MainWindow::handleMicrophoneSelection);
@@ -512,6 +539,14 @@ void MainWindow::handleTranscriptionStart()
     const AppActionPolicy policy = appActionPolicy(
         m_state, hasValidInput() && !m_inputInspectionPending);
     if (!policy.canStartTranscription) {
+        return;
+    }
+
+    m_hotwordsSaveTimer->stop();
+    QString hotwordsError;
+    if (!saveHotwordsText(&hotwordsError)) {
+        logError(tr("Hotwords Save Error"), hotwordsError);
+        QMessageBox::warning(this, tr("Hotwords 저장 실패"), hotwordsError);
         return;
     }
 
@@ -1202,6 +1237,7 @@ void MainWindow::applySettingsToUi()
         && !m_audioRecorder->setInputDevice(m_settings.selectedMicrophoneId)) {
         m_stateMessage = tr("저장된 마이크를 찾을 수 없습니다. 현재 사용 가능한 마이크를 다시 선택하세요.");
     }
+    loadHotwordsText();
     updateSpeakerCountEnabled();
 }
 
@@ -1216,6 +1252,109 @@ void MainWindow::saveSettings()
     m_settings.diarizationEnabled = ui->diarizationCheckBox->isChecked();
     m_settings.speakerCount = ui->speakerCountComboBox->currentText();
     m_settings.save();
+}
+
+void MainWindow::scheduleHotwordsSave()
+{
+    m_hotwordsTextDirty = true;
+    ui->hotwordsStatusLabel->setText(tr("입력 내용 저장 중..."));
+    m_hotwordsSaveTimer->start();
+}
+
+void MainWindow::loadHotwordsText()
+{
+    const QSignalBlocker blocker(ui->hotwordsTextEdit);
+    ui->hotwordsTextEdit->clear();
+    m_hotwordsTextDirty = false;
+
+    const QString filePath = m_settings.hotwordsFile.trimmed();
+    if (filePath.isEmpty()) {
+        ui->hotwordsStatusLabel->setText(tr("입력하면 자동 저장됩니다."));
+        return;
+    }
+
+    QFile input(filePath);
+    if (!input.open(QIODevice::ReadOnly)) {
+        const QString errorMessage = tr("Hotwords 파일을 불러올 수 없습니다: %1")
+                                         .arg(input.errorString());
+        logError(tr("Hotwords Load Error"), errorMessage);
+        ui->hotwordsStatusLabel->setText(errorMessage);
+        return;
+    }
+
+    QString contents = QString::fromUtf8(input.readAll());
+    if (contents.startsWith(QChar::ByteOrderMark)) {
+        contents.remove(0, 1);
+    }
+    ui->hotwordsTextEdit->setPlainText(contents);
+    ui->hotwordsStatusLabel->setText(tr("저장된 핫워드를 불러왔습니다."));
+}
+
+bool MainWindow::saveHotwordsText(QString *errorMessage)
+{
+    if (!m_hotwordsTextDirty) {
+        if (errorMessage) {
+            errorMessage->clear();
+        }
+        return true;
+    }
+
+    QString filePath = m_settings.hotwordsFile.trimmed();
+    if (filePath.isEmpty()) {
+        filePath = userHotwordsFilePath();
+    }
+    if (filePath.isEmpty()) {
+        if (errorMessage) {
+            *errorMessage = tr("Hotwords 파일을 저장할 사용자 데이터 폴더를 찾을 수 없습니다.");
+        }
+        return false;
+    }
+
+    const QString absolutePath = QDir::cleanPath(QFileInfo(filePath).absoluteFilePath());
+    const QString directoryPath = QFileInfo(absolutePath).absolutePath();
+    if (!QDir().mkpath(directoryPath)) {
+        if (errorMessage) {
+            *errorMessage = tr("Hotwords 파일 폴더를 만들 수 없습니다: %1")
+                                .arg(QDir::toNativeSeparators(directoryPath));
+        }
+        return false;
+    }
+
+    QSaveFile output(absolutePath);
+    if (!output.open(QIODevice::WriteOnly)) {
+        if (errorMessage) {
+            *errorMessage = tr("Hotwords 파일을 저장할 수 없습니다: %1").arg(output.errorString());
+        }
+        return false;
+    }
+
+    QString contents = ui->hotwordsTextEdit->toPlainText();
+    if (!contents.isEmpty() && !contents.endsWith(QLatin1Char('\n'))) {
+        contents.append(QLatin1Char('\n'));
+    }
+    const QByteArray encodedContents = contents.toUtf8();
+    if (output.write(encodedContents) != encodedContents.size()) {
+        output.cancelWriting();
+        if (errorMessage) {
+            *errorMessage = tr("Hotwords 파일을 저장할 수 없습니다: %1").arg(output.errorString());
+        }
+        return false;
+    }
+    if (!output.commit()) {
+        if (errorMessage) {
+            *errorMessage = tr("Hotwords 파일을 저장할 수 없습니다: %1").arg(output.errorString());
+        }
+        return false;
+    }
+
+    m_settings.hotwordsFile = absolutePath;
+    m_hotwordsTextDirty = false;
+    saveSettings();
+    ui->hotwordsStatusLabel->setText(tr("자동 저장됨"));
+    if (errorMessage) {
+        errorMessage->clear();
+    }
+    return true;
 }
 
 bool MainWindow::validateSettingsForRun(bool diarizationEnabled)
@@ -1266,6 +1405,7 @@ void MainWindow::updateUiForState()
         controlsEnabled && !m_audioRecorder->inputDevices().isEmpty());
     ui->diarizationCheckBox->setEnabled(controlsEnabled);
     ui->deviceComboBox->setEnabled(controlsEnabled);
+    ui->hotwordsTextEdit->setEnabled(m_state != AppState::Processing && !backendBusy);
     if (m_settingsAction) {
         m_settingsAction->setEnabled(controlsEnabled);
     }
@@ -1310,6 +1450,11 @@ void MainWindow::closeEvent(QCloseEvent *event)
 
     if (m_audioRecorder) {
         m_audioRecorder->stopRecording();
+    }
+    m_hotwordsSaveTimer->stop();
+    QString hotwordsError;
+    if (!saveHotwordsText(&hotwordsError)) {
+        logError(tr("Hotwords Save Error"), hotwordsError);
     }
     saveSettings();
     QMainWindow::closeEvent(event);

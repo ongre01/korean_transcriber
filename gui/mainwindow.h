@@ -22,6 +22,7 @@ QT_END_NAMESPACE
 class QCloseEvent;
 class QAction;
 class LogDialog;
+class QTimer;
 
 class MainWindow : public QMainWindow
 {
@@ -82,6 +83,7 @@ private slots:
                                       int speaker, const QString &text);
     void backendStandardErrorReceived(const QByteArray &data);
     void backendProcessStopped();
+    void scheduleHotwordsSave();
 
 private:
     void clearTranscript();
@@ -92,6 +94,8 @@ private:
     void updateUiForState();
     void applySettingsToUi();
     void saveSettings();
+    void loadHotwordsText();
+    bool saveHotwordsText(QString *errorMessage = nullptr);
     bool validateSettingsForRun(bool diarizationEnabled);
     bool hasAvailableResult() const;
     void showResultError(const QString &message);
@@ -112,6 +116,7 @@ private:
     AudioRecorder *m_audioRecorder;
     AudioFileInfo *m_audioFileInfo;
     BackendProcess *m_backendProcess;
+    QTimer *m_hotwordsSaveTimer = nullptr;
     QAction *m_settingsAction = nullptr;
     QAction *m_viewLogsAction = nullptr;
     AppLogger m_logger;
@@ -126,6 +131,7 @@ private:
     bool m_closeRequested = false;
     bool m_diarizationFallbackOccurred = false;
     bool m_logWriteFailureReported = false;
+    bool m_hotwordsTextDirty = false;
     // Preserve the option used for the active/completed run. The checkbox can
     // be changed after completion without changing how that result is shown.
     bool m_diarizationEnabledForRun = false;
