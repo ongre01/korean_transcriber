@@ -1,4 +1,4 @@
-# TICKET-008: PCM WAV 저장 모듈
+# TICKET-007: 전사 시작과 결과 화면 연결
 
 ## Metadata
 
@@ -9,7 +9,7 @@
 
 ## Goal
 
-PCM WAV 저장 모듈을 완료하여 1차 음성 녹음·전사 앱의 해당 기능을 검증 가능한 상태로 제공한다.
+전사 시작과 결과 화면 연결을 완료하여 1차 음성 녹음·전사 앱의 해당 기능을 검증 가능한 상태로 제공한다.
 
 ## Background
 
@@ -19,14 +19,16 @@ PCM WAV 저장 모듈을 완료하여 1차 음성 녹음·전사 앱의 해당 �
 
 ## Source
 
-- `Qt_Widgets_음성_녹음_전사_UI_개발_사양서.md`: 7, 8절.
+- `Qt_Widgets_음성_녹음_전사_UI_개발_사양서.md`: 12, 13, 15, 16, 28절.
 - `AGENTS.md`: Development Guide, 기본 개발 환경, 구현 원칙.
+- `codegraph.db`: files/nodes 테이블의 `gui/mainwindow.cpp`, `gui/mainwindow.h` 경로/심볼.
 
 ## Requirements
 
-- 실제 PCM 형식에 맞는 WAV 헤더를 작성하고 녹음 종료 시 RIFF/data 길이를 갱신한다.
-- Mono Int16을 우선하되 장치가 지원하는 형식을 사용할 때 헤더와 바이트 스트림이 일치하도록 한다.
-- 파일 생성/쓰기/마무리 오류를 호출자에 반환하고 실패 파일을 성공 파일로 보고하지 않는다.
+- 현재 파일과 Device 기본 AUTO를 옵션 객체로 전달하고 Processing 상태로 전환한다.
+- segment를 시간순으로 관리하고 QTextEdit 또는 QPlainTextEdit에 타임스탬프와 텍스트를 표시한다.
+- 새 작업 시작 시 이전 결과를 구분/초기화하며 완료와 실패 상태를 반영한다.
+- 기본 결과는 읽기 전용이며 긴 음성 AI 처리와 decode를 GUI에서 수행하지 않는다.
 
 ## Implementation Scope
 
@@ -42,39 +44,41 @@ PCM WAV 저장 모듈을 완료하여 1차 음성 녹음·전사 앱의 해당 �
 
 ## Dependencies
 
-- TICKET-001
+- TICKET-002
+- TICKET-005
+- TICKET-006
 
 ## Acceptance Criteria
 
-- [ ] 샘플 PCM을 저장한 WAV의 채널/샘플레이트/비트수/데이터 길이가 실제 데이터와 일치한다.
-- [ ] Python decode_audio_16k_mono 경로에서 저장 WAV를 decode할 수 있다.
+- [ ] 선택 파일 전사 결과가 시간과 함께 표시된다.
+- [ ] 실행 중 UI가 응답하며 같은 작업이 중복 실행되지 않는다.
+- [ ] 새 작업 결과가 이전 작업 결과와 섞이지 않는다.
 
 ## Test Requirements
 
 ### Normal Cases
 
-- 44.1/48 kHz PCM 저장 후 재열기.
+- 파일→전사→완료 전체 흐름.
 
 ### Error Cases
 
-- 쓰기 권한 없음, 쓰기 중 실패.
+- Backend 실패 후 재실행.
 
 ### Edge Cases
 
-- 데이터 없음, RIFF 크기 한계에 대한 명시적 거부 또는 정책.
+- 빈 결과, 긴 텍스트, HTML처럼 보이는 텍스트의 원문 표시.
 
 ## Files
 
 ### Existing
 
-None — 이 티켓의 전용 모듈은 첨부 인덱스에서 확인되지 않음. 구현 전에 실제 저장소를 확인한다.
+- `gui/mainwindow.cpp` — DB 인덱스에서 확인; 소스 본문은 별도 확인 필요.
+- `gui/mainwindow.h` — DB 인덱스에서 확인; 소스 본문은 별도 확인 필요.
 
 ### To Create
 
-- `gui/audio/WavWriter.h` — 제안 경로.
-- `gui/audio/WavWriter.cpp` — 제안 경로.
-- `tests/gui/test_wav_writer.cpp` — 제안 경로.
+None — 기존 파일 또는 선행 티켓에서 생성한 관련 파일을 수정한다.
 
 ## Open Questions
 
-- 지원 PCM 형식과 RIFF 한계 정책은 장치 및 제품 요구에 맞춰 명시한다.
+- 현재 UI가 어느 정도 구현되었는지는 DB만으로 확정할 수 없으므로 기존 동작 확인 후 부족한 부분만 변경한다.

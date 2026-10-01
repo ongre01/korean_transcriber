@@ -1,4 +1,4 @@
-# TICKET-008: PCM WAV 저장 모듈
+# TICKET-010: 녹음 UI 및 자동 입력 파일 전환
 
 ## Metadata
 
@@ -9,7 +9,7 @@
 
 ## Goal
 
-PCM WAV 저장 모듈을 완료하여 1차 음성 녹음·전사 앱의 해당 기능을 검증 가능한 상태로 제공한다.
+녹음 UI 및 자동 입력 파일 전환을 완료하여 1차 음성 녹음·전사 앱의 해당 기능을 검증 가능한 상태로 제공한다.
 
 ## Background
 
@@ -19,14 +19,15 @@ PCM WAV 저장 모듈을 완료하여 1차 음성 녹음·전사 앱의 해당 �
 
 ## Source
 
-- `Qt_Widgets_음성_녹음_전사_UI_개발_사양서.md`: 7, 8절.
+- `Qt_Widgets_음성_녹음_전사_UI_개발_사양서.md`: 5, 8, 17, 18, 30절.
 - `AGENTS.md`: Development Guide, 기본 개발 환경, 구현 원칙.
+- `codegraph.db`: files/nodes 테이블의 `gui/mainwindow.cpp` 경로/심볼.
 
 ## Requirements
 
-- 실제 PCM 형식에 맞는 WAV 헤더를 작성하고 녹음 종료 시 RIFF/data 길이를 갱신한다.
-- Mono Int16을 우선하되 장치가 지원하는 형식을 사용할 때 헤더와 바이트 스트림이 일치하도록 한다.
-- 파일 생성/쓰기/마무리 오류를 호출자에 반환하고 실패 파일을 성공 파일로 보고하지 않는다.
+- 마이크 목록/선택, 녹음 시작/중지, HH:MM:SS 시간, 레벨 표시를 AudioRecorder에 연결한다.
+- 프로그램 데이터 경로 recordings/에 recording_YYYYMMDD_HHMMSS.wav를 생성한다. 파일 충돌 시 기존 파일을 덮어쓰지 않는다.
+- 녹음 성공 종료 후 파일 정보를 갱신하고 InputReady로 전환한다. 녹음 중 전사/파일 변경을 막는다.
 
 ## Implementation Scope
 
@@ -42,39 +43,40 @@ PCM WAV 저장 모듈을 완료하여 1차 음성 녹음·전사 앱의 해당 �
 
 ## Dependencies
 
-- TICKET-001
+- TICKET-002
+- TICKET-006
+- TICKET-009
 
 ## Acceptance Criteria
 
-- [ ] 샘플 PCM을 저장한 WAV의 채널/샘플레이트/비트수/데이터 길이가 실제 데이터와 일치한다.
-- [ ] Python decode_audio_16k_mono 경로에서 저장 WAV를 decode할 수 있다.
+- [ ] 녹음 종료 직후 별도 파일 선택 없이 전사를 시작할 수 있다.
+- [ ] 시간 증가와 입력 레벨이 보이고 중지 시 더 이상 갱신되지 않는다.
+- [ ] 녹음 실패 파일이 입력으로 자동 설정되지 않는다.
 
 ## Test Requirements
 
 ### Normal Cases
 
-- 44.1/48 kHz PCM 저장 후 재열기.
+- 녹음→중지→전사.
 
 ### Error Cases
 
-- 쓰기 권한 없음, 쓰기 중 실패.
+- 출력 디렉터리 생성 실패, 녹음 실패.
 
 ### Edge Cases
 
-- 데이터 없음, RIFF 크기 한계에 대한 명시적 거부 또는 정책.
+- 같은 초의 연속 녹음, 무음, 매우 짧은 녹음.
 
 ## Files
 
 ### Existing
 
-None — 이 티켓의 전용 모듈은 첨부 인덱스에서 확인되지 않음. 구현 전에 실제 저장소를 확인한다.
+- `gui/mainwindow.cpp` — DB 인덱스에서 확인; 소스 본문은 별도 확인 필요.
 
 ### To Create
 
-- `gui/audio/WavWriter.h` — 제안 경로.
-- `gui/audio/WavWriter.cpp` — 제안 경로.
-- `tests/gui/test_wav_writer.cpp` — 제안 경로.
+None — 기존 파일 또는 선행 티켓에서 생성한 관련 파일을 수정한다.
 
 ## Open Questions
 
-- 지원 PCM 형식과 RIFF 한계 정책은 장치 및 제품 요구에 맞춰 명시한다.
+- 충돌 시 접미 번호 사용은 기존 파일 보존을 위한 구현 제안이다.

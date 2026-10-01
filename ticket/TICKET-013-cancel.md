@@ -1,4 +1,4 @@
-# TICKET-008: PCM WAV 저장 모듈
+# TICKET-013: 전사 취소와 프로세스 수명 관리
 
 ## Metadata
 
@@ -9,7 +9,7 @@
 
 ## Goal
 
-PCM WAV 저장 모듈을 완료하여 1차 음성 녹음·전사 앱의 해당 기능을 검증 가능한 상태로 제공한다.
+전사 취소와 프로세스 수명 관리을 완료하여 1차 음성 녹음·전사 앱의 해당 기능을 검증 가능한 상태로 제공한다.
 
 ## Background
 
@@ -19,14 +19,16 @@ PCM WAV 저장 모듈을 완료하여 1차 음성 녹음·전사 앱의 해당 �
 
 ## Source
 
-- `Qt_Widgets_음성_녹음_전사_UI_개발_사양서.md`: 7, 8절.
+- `Qt_Widgets_음성_녹음_전사_UI_개발_사양서.md`: 20, 25절.
 - `AGENTS.md`: Development Guide, 기본 개발 환경, 구현 원칙.
+- `codegraph.db`: files/nodes 테이블의 `gui/mainwindow.cpp` 경로/심볼.
 
 ## Requirements
 
-- 실제 PCM 형식에 맞는 WAV 헤더를 작성하고 녹음 종료 시 RIFF/data 길이를 갱신한다.
-- Mono Int16을 우선하되 장치가 지원하는 형식을 사용할 때 헤더와 바이트 스트림이 일치하도록 한다.
-- 파일 생성/쓰기/마무리 오류를 호출자에 반환하고 실패 파일을 성공 파일로 보고하지 않는다.
+- 취소 시 terminate를 호출하고 비동기 타이머 만료 후 살아 있으면 kill을 호출한다.
+- 프로세스 종료 확인 후 유효 입력이 있으면 InputReady, 없으면 Idle로 복구한다. 입력 음성 파일은 삭제하지 않는다.
+- 취소와 완료 경합에서 종결 상태를 한 번만 적용하고 다음 작업에 이전 이벤트가 유입되지 않도록 한다.
+- 창 종료 시 진행 중 프로세스와 녹음 리소스가 남지 않도록 관련 소유 객체와 연계한다.
 
 ## Implementation Scope
 
@@ -42,39 +44,39 @@ PCM WAV 저장 모듈을 완료하여 1차 음성 녹음·전사 앱의 해당 �
 
 ## Dependencies
 
-- TICKET-001
+- TICKET-005
+- TICKET-007
 
 ## Acceptance Criteria
 
-- [ ] 샘플 PCM을 저장한 WAV의 채널/샘플레이트/비트수/데이터 길이가 실제 데이터와 일치한다.
-- [ ] Python decode_audio_16k_mono 경로에서 저장 WAV를 decode할 수 있다.
+- [ ] terminate에 응답하는 대역과 무시하는 대역 모두 취소 후 프로세스가 종료된다.
+- [ ] 취소 후 입력 파일 내용이 변경되지 않고 재전사 가능하다.
+- [ ] 늦은 completed가 취소 결과를 완료로 바꾸지 않는다.
 
 ## Test Requirements
 
 ### Normal Cases
 
-- 44.1/48 kHz PCM 저장 후 재열기.
+- 실행 중 취소와 재시작.
 
 ### Error Cases
 
-- 쓰기 권한 없음, 쓰기 중 실패.
+- terminate 무응답→kill.
 
 ### Edge Cases
 
-- 데이터 없음, RIFF 크기 한계에 대한 명시적 거부 또는 정책.
+- 시작 직후 취소, 완료와 동시 취소, 반복 취소, 창 종료.
 
 ## Files
 
 ### Existing
 
-None — 이 티켓의 전용 모듈은 첨부 인덱스에서 확인되지 않음. 구현 전에 실제 저장소를 확인한다.
+- `gui/mainwindow.cpp` — DB 인덱스에서 확인; 소스 본문은 별도 확인 필요.
 
 ### To Create
 
-- `gui/audio/WavWriter.h` — 제안 경로.
-- `gui/audio/WavWriter.cpp` — 제안 경로.
-- `tests/gui/test_wav_writer.cpp` — 제안 경로.
+- `tests/gui/test_backend_cancel.cpp` — 제안 경로.
 
 ## Open Questions
 
-- 지원 PCM 형식과 RIFF 한계 정책은 장치 및 제품 요구에 맞춰 명시한다.
+- 강제 종료 대기 시간 및 부분 출력 파일 보존 정책은 사양서에 없어 구현 시 명시한다.

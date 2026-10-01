@@ -1,4 +1,4 @@
-# TICKET-008: PCM WAV 저장 모듈
+# TICKET-012: 진행률과 처리 단계 표시
 
 ## Metadata
 
@@ -9,7 +9,7 @@
 
 ## Goal
 
-PCM WAV 저장 모듈을 완료하여 1차 음성 녹음·전사 앱의 해당 기능을 검증 가능한 상태로 제공한다.
+진행률과 처리 단계 표시을 완료하여 1차 음성 녹음·전사 앱의 해당 기능을 검증 가능한 상태로 제공한다.
 
 ## Background
 
@@ -19,14 +19,15 @@ PCM WAV 저장 모듈을 완료하여 1차 음성 녹음·전사 앱의 해당 �
 
 ## Source
 
-- `Qt_Widgets_음성_녹음_전사_UI_개발_사양서.md`: 7, 8절.
+- `Qt_Widgets_음성_녹음_전사_UI_개발_사양서.md`: 19절.
 - `AGENTS.md`: Development Guide, 기본 개발 환경, 구현 원칙.
+- `codegraph.db`: files/nodes 테이블의 `gui/mainwindow.cpp`, `engine/transcribe_npu.py` 경로/심볼.
 
 ## Requirements
 
-- 실제 PCM 형식에 맞는 WAV 헤더를 작성하고 녹음 종료 시 RIFF/data 길이를 갱신한다.
-- Mono Int16을 우선하되 장치가 지원하는 형식을 사용할 때 헤더와 바이트 스트림이 일치하도록 한다.
-- 파일 생성/쓰기/마무리 오류를 호출자에 반환하고 실패 파일을 성공 파일로 보고하지 않는다.
+- Preparing/Loading Model/Decoding Audio/Transcribing/Diarization/Saving Result/Completed 단계를 UI에 반영한다.
+- 기존 print_progress/transcribe_windows 구현을 확인하여 진행 이벤트를 제공하고 콘솔 문자열을 Qt에서 분석하지 않는다.
+- 신뢰할 진행 수치가 없으면 불확정 표시를 사용한다. 처리 시간/전체 시간은 엔진이 제공한 값으로 표시한다.
 
 ## Implementation Scope
 
@@ -42,39 +43,41 @@ PCM WAV 저장 모듈을 완료하여 1차 음성 녹음·전사 앱의 해당 �
 
 ## Dependencies
 
-- TICKET-001
+- TICKET-003
+- TICKET-007
+- TICKET-011
 
 ## Acceptance Criteria
 
-- [ ] 샘플 PCM을 저장한 WAV의 채널/샘플레이트/비트수/데이터 길이가 실제 데이터와 일치한다.
-- [ ] Python decode_audio_16k_mono 경로에서 저장 WAV를 decode할 수 있다.
+- [ ] 단계와 0~100 진행률이 이벤트에 따라 갱신된다.
+- [ ] 100% 및 Completed는 저장 성공 이후에만 표시된다.
+- [ ] 진행 정보를 계산할 수 없는 단계는 임의 백분율을 표시하지 않는다.
 
 ## Test Requirements
 
 ### Normal Cases
 
-- 44.1/48 kHz PCM 저장 후 재열기.
+- 단계/시간/진행률 fixture.
 
 ### Error Cases
 
-- 쓰기 권한 없음, 쓰기 중 실패.
+- 범위 밖 값 및 실패 직전 진행 이벤트.
 
 ### Edge Cases
 
-- 데이터 없음, RIFF 크기 한계에 대한 명시적 거부 또는 정책.
+- 전체 시간 0, 지연 이벤트, 새 작업 시 초기화.
 
 ## Files
 
 ### Existing
 
-None — 이 티켓의 전용 모듈은 첨부 인덱스에서 확인되지 않음. 구현 전에 실제 저장소를 확인한다.
+- `gui/mainwindow.cpp` — DB 인덱스에서 확인; 소스 본문은 별도 확인 필요.
+- `engine/transcribe_npu.py` — DB 인덱스에서 확인; 소스 본문은 별도 확인 필요.
 
 ### To Create
 
-- `gui/audio/WavWriter.h` — 제안 경로.
-- `gui/audio/WavWriter.cpp` — 제안 경로.
-- `tests/gui/test_wav_writer.cpp` — 제안 경로.
+None — 기존 파일 또는 선행 티켓에서 생성한 관련 파일을 수정한다.
 
 ## Open Questions
 
-- 지원 PCM 형식과 RIFF 한계 정책은 장치 및 제품 요구에 맞춰 명시한다.
+- 실제 진행 콜백 제공 방식은 원본 코드 확인이 필요하다.

@@ -1,4 +1,4 @@
-# TICKET-008: PCM WAV 저장 모듈
+# TICKET-001: 기존 GUI 보존 및 qmake 빌드 구성
 
 ## Metadata
 
@@ -9,7 +9,7 @@
 
 ## Goal
 
-PCM WAV 저장 모듈을 완료하여 1차 음성 녹음·전사 앱의 해당 기능을 검증 가능한 상태로 제공한다.
+기존 GUI 보존 및 qmake 빌드 구성을 완료하여 1차 음성 녹음·전사 앱의 해당 기능을 검증 가능한 상태로 제공한다.
 
 ## Background
 
@@ -19,14 +19,15 @@ PCM WAV 저장 모듈을 완료하여 1차 음성 녹음·전사 앱의 해당 �
 
 ## Source
 
-- `Qt_Widgets_음성_녹음_전사_UI_개발_사양서.md`: 7, 8절.
+- `Qt_Widgets_음성_녹음_전사_UI_개발_사양서.md`: 23, 24, 31절.
 - `AGENTS.md`: Development Guide, 기본 개발 환경, 구현 원칙.
+- `codegraph.db`: files/nodes 테이블의 `gui/main.cpp`, `gui/mainwindow.cpp`, `gui/mainwindow.h` 경로/심볼.
 
 ## Requirements
 
-- 실제 PCM 형식에 맞는 WAV 헤더를 작성하고 녹음 종료 시 RIFF/data 길이를 갱신한다.
-- Mono Int16을 우선하되 장치가 지원하는 형식을 사용할 때 헤더와 바이트 스트림이 일치하도록 한다.
-- 파일 생성/쓰기/마무리 오류를 호출자에 반환하고 실패 파일을 성공 파일로 보고하지 않는다.
+- 실제 저장소의 .pro, .ui, 리소스를 먼저 확인하고 기존 MainWindow를 확장한다. 사양서의 src/MainWindow.cpp 예시로 불필요한 이동이나 중복 클래스를 만들지 않는다.
+- Qt Widgets, Multimedia, C++17, TARGET=AudioTranscriber를 qmake에 설정한다.
+- 실제 Qt 버전과 대상 OS를 기록하고 해당 버전에 맞는 오디오 구현을 선택한다.
 
 ## Implementation Scope
 
@@ -42,39 +43,39 @@ PCM WAV 저장 모듈을 완료하여 1차 음성 녹음·전사 앱의 해당 �
 
 ## Dependencies
 
-- TICKET-001
+None
 
 ## Acceptance Criteria
 
-- [ ] 샘플 PCM을 저장한 WAV의 채널/샘플레이트/비트수/데이터 길이가 실제 데이터와 일치한다.
-- [ ] Python decode_audio_16k_mono 경로에서 저장 WAV를 decode할 수 있다.
+- [ ] 선택한 Qt 환경에서 qmake 빌드 후 기존 창이 실행된다.
+- [ ] 기존 Python 엔진 파일과 CLI 진입점이 보존된다.
 
 ## Test Requirements
 
 ### Normal Cases
 
-- 44.1/48 kHz PCM 저장 후 재열기.
+- clean build 및 창 실행.
 
 ### Error Cases
 
-- 쓰기 권한 없음, 쓰기 중 실패.
+- Multimedia 미설치 시 의존성 원인이 빌드 기록에 드러난다.
 
 ### Edge Cases
 
-- 데이터 없음, RIFF 크기 한계에 대한 명시적 거부 또는 정책.
+- 기존 폼과 신규 클래스의 중복 등록이 없다.
 
 ## Files
 
 ### Existing
 
-None — 이 티켓의 전용 모듈은 첨부 인덱스에서 확인되지 않음. 구현 전에 실제 저장소를 확인한다.
+- `gui/main.cpp` — DB 인덱스에서 확인; 소스 본문은 별도 확인 필요.
+- `gui/mainwindow.cpp` — DB 인덱스에서 확인; 소스 본문은 별도 확인 필요.
+- `gui/mainwindow.h` — DB 인덱스에서 확인; 소스 본문은 별도 확인 필요.
 
 ### To Create
 
-- `gui/audio/WavWriter.h` — 제안 경로.
-- `gui/audio/WavWriter.cpp` — 제안 경로.
-- `tests/gui/test_wav_writer.cpp` — 제안 경로.
+- `gui/AudioTranscriber.pro` — 제안 경로.
 
 ## Open Questions
 
-- 지원 PCM 형식과 RIFF 한계 정책은 장치 및 제품 요구에 맞춰 명시한다.
+- 대상 OS와 Qt 버전은 첨부에 확정되어 있지 않다. Qt 5/6 양쪽 지원이 필수인지 구현 전에 결정한다.

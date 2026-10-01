@@ -1,4 +1,4 @@
-# TICKET-008: PCM WAV 저장 모듈
+# TICKET-006: 기존 음성 파일 선택과 메타데이터
 
 ## Metadata
 
@@ -9,7 +9,7 @@
 
 ## Goal
 
-PCM WAV 저장 모듈을 완료하여 1차 음성 녹음·전사 앱의 해당 기능을 검증 가능한 상태로 제공한다.
+기존 음성 파일 선택과 메타데이터을 완료하여 1차 음성 녹음·전사 앱의 해당 기능을 검증 가능한 상태로 제공한다.
 
 ## Background
 
@@ -19,14 +19,15 @@ PCM WAV 저장 모듈을 완료하여 1차 음성 녹음·전사 앱의 해당 �
 
 ## Source
 
-- `Qt_Widgets_음성_녹음_전사_UI_개발_사양서.md`: 7, 8절.
+- `Qt_Widgets_음성_녹음_전사_UI_개발_사양서.md`: 9, 25절.
 - `AGENTS.md`: Development Guide, 기본 개발 환경, 구현 원칙.
+- `codegraph.db`: files/nodes 테이블의 `gui/mainwindow.cpp` 경로/심볼.
 
 ## Requirements
 
-- 실제 PCM 형식에 맞는 WAV 헤더를 작성하고 녹음 종료 시 RIFF/data 길이를 갱신한다.
-- Mono Int16을 우선하되 장치가 지원하는 형식을 사용할 때 헤더와 바이트 스트림이 일치하도록 한다.
-- 파일 생성/쓰기/마무리 오류를 호출자에 반환하고 실패 파일을 성공 파일로 보고하지 않는다.
+- QFileDialog에서 wav/mp3/m4a/aac/flac/ogg/mp4 필터를 제공한다. 확장자만으로 decode 성공을 보장하지 않는다.
+- 파일 이름/경로/크기/재생 시간을 표시하고 유효한 선택을 CurrentInputFile에 반영한다.
+- 재생 시간 조회는 Python PyAV 또는 비동기 조회를 사용하여 GUI를 막지 않는다. 전사 이벤트와 혼동하지 않는 메타데이터 경로를 구현한다.
 
 ## Implementation Scope
 
@@ -42,39 +43,40 @@ PCM WAV 저장 모듈을 완료하여 1차 음성 녹음·전사 앱의 해당 �
 
 ## Dependencies
 
-- TICKET-001
+- TICKET-002
+- TICKET-005
 
 ## Acceptance Criteria
 
-- [ ] 샘플 PCM을 저장한 WAV의 채널/샘플레이트/비트수/데이터 길이가 실제 데이터와 일치한다.
-- [ ] Python decode_audio_16k_mono 경로에서 저장 WAV를 decode할 수 있다.
+- [ ] 선택한 파일 정보가 표시되고 InputReady에서 전사 버튼이 활성화된다.
+- [ ] 대화상자 취소 시 기존 입력이 유지된다.
+- [ ] 실제 decode 실패는 사용자 오류로 이어지고 GUI가 종료되지 않는다.
 
 ## Test Requirements
 
 ### Normal Cases
 
-- 44.1/48 kHz PCM 저장 후 재열기.
+- WAV/MP3/M4A 실제 fixture.
 
 ### Error Cases
 
-- 쓰기 권한 없음, 쓰기 중 실패.
+- 삭제된 파일, 손상된 파일.
 
 ### Edge Cases
 
-- 데이터 없음, RIFF 크기 한계에 대한 명시적 거부 또는 정책.
+- 공백/한글 경로, 재생시간 조회 실패, 조회 중 새 파일 선택.
 
 ## Files
 
 ### Existing
 
-None — 이 티켓의 전용 모듈은 첨부 인덱스에서 확인되지 않음. 구현 전에 실제 저장소를 확인한다.
+- `gui/mainwindow.cpp` — DB 인덱스에서 확인; 소스 본문은 별도 확인 필요.
 
 ### To Create
 
-- `gui/audio/WavWriter.h` — 제안 경로.
-- `gui/audio/WavWriter.cpp` — 제안 경로.
-- `tests/gui/test_wav_writer.cpp` — 제안 경로.
+- `gui/input/AudioFileInfo.h` — 제안 경로.
+- `gui/input/AudioFileInfo.cpp` — 제안 경로.
 
 ## Open Questions
 
-- 지원 PCM 형식과 RIFF 한계 정책은 장치 및 제품 요구에 맞춰 명시한다.
+- 메타데이터 조회 계약은 TICKET-003과 호환되는 추가 명령으로 정하는 제안이다.

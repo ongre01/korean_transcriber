@@ -1,4 +1,4 @@
-# TICKET-008: PCM WAV 저장 모듈
+# TICKET-003: 전사 데이터와 Bridge 이벤트 계약
 
 ## Metadata
 
@@ -9,7 +9,7 @@
 
 ## Goal
 
-PCM WAV 저장 모듈을 완료하여 1차 음성 녹음·전사 앱의 해당 기능을 검증 가능한 상태로 제공한다.
+전사 데이터와 Bridge 이벤트 계약을 완료하여 1차 음성 녹음·전사 앱의 해당 기능을 검증 가능한 상태로 제공한다.
 
 ## Background
 
@@ -19,14 +19,16 @@ PCM WAV 저장 모듈을 완료하여 1차 음성 녹음·전사 앱의 해당 �
 
 ## Source
 
-- `Qt_Widgets_음성_녹음_전사_UI_개발_사양서.md`: 7, 8절.
+- `Qt_Widgets_음성_녹음_전사_UI_개발_사양서.md`: 11, 12, 13, 15, 19절.
 - `AGENTS.md`: Development Guide, 기본 개발 환경, 구현 원칙.
+- `codegraph.db`: files/nodes 테이블의 `engine/transcribe_npu.py` 경로/심볼.
 
 ## Requirements
 
-- 실제 PCM 형식에 맞는 WAV 헤더를 작성하고 녹음 종료 시 RIFF/data 길이를 갱신한다.
-- Mono Int16을 우선하되 장치가 지원하는 형식을 사용할 때 헤더와 바이트 스트림이 일치하도록 한다.
-- 파일 생성/쓰기/마무리 오류를 호출자에 반환하고 실패 파일을 성공 파일로 보고하지 않는다.
+- state/progress/segment/completed/error를 UTF-8 JSON Lines로 정의하고 필수 필드, 타입, 정상 종료 조건을 명시한다.
+- segment의 start/end/speaker/text 및 화자 미지정 표현을 정의한다. DB의 speaker_label 시그니처는 int|None을 허용하므로 사양서 int와의 매핑을 명시한다.
+- Device=AUTO/NPU/CPU/GPU, 화자 수 Auto/2/3/4/5, 출력 경로 및 모델 옵션의 인자 계약을 정의한다.
+- stdout는 프로토콜 전용, stderr는 진단 전용으로 분리하고 진행률이 불명확한 단계의 표현을 정한다.
 
 ## Implementation Scope
 
@@ -46,35 +48,36 @@ PCM WAV 저장 모듈을 완료하여 1차 음성 녹음·전사 앱의 해당 �
 
 ## Acceptance Criteria
 
-- [ ] 샘플 PCM을 저장한 WAV의 채널/샘플레이트/비트수/데이터 길이가 실제 데이터와 일치한다.
-- [ ] Python decode_audio_16k_mono 경로에서 저장 WAV를 decode할 수 있다.
+- [ ] 동일한 정상/오류 이벤트 fixture를 Python과 Qt가 같은 의미로 해석할 수 있다.
+- [ ] Auto와 미지정 화자의 매핑 및 completed 출력 경로 해석 기준이 문서와 타입에 명시된다.
 
 ## Test Requirements
 
 ### Normal Cases
 
-- 44.1/48 kHz PCM 저장 후 재열기.
+- 한글 segment와 완료 이벤트 fixture.
 
 ### Error Cases
 
-- 쓰기 권한 없음, 쓰기 중 실패.
+- 필수 필드 누락/잘못된 타입을 거부.
 
 ### Edge Cases
 
-- 데이터 없음, RIFF 크기 한계에 대한 명시적 거부 또는 정책.
+- 화자 미지정, 빈 segment 목록, 진행률 미확정.
 
 ## Files
 
 ### Existing
 
-None — 이 티켓의 전용 모듈은 첨부 인덱스에서 확인되지 않음. 구현 전에 실제 저장소를 확인한다.
+- `engine/transcribe_npu.py` — DB 인덱스에서 확인; 소스 본문은 별도 확인 필요.
 
 ### To Create
 
-- `gui/audio/WavWriter.h` — 제안 경로.
-- `gui/audio/WavWriter.cpp` — 제안 경로.
-- `tests/gui/test_wav_writer.cpp` — 제안 경로.
+- `gui/backend/TranscriptSegment.h` — 제안 경로.
+- `gui/backend/TranscribeOptions.h` — 제안 경로.
+- `engine/backend_protocol.md` — 제안 경로.
 
 ## Open Questions
 
-- 지원 PCM 형식과 RIFF 한계 정책은 장치 및 제품 요구에 맞춰 명시한다.
+- 진행 시간 필드는 사양서 예시에 없으므로 19절의 처리 시간 표시를 위해 계약 확장이 필요하다.
+- 실제 CLI 옵션과 종료 코드는 소스 확인 후 확정한다.

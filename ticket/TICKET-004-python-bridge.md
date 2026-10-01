@@ -1,4 +1,4 @@
-# TICKET-008: PCM WAV 저장 모듈
+# TICKET-004: 기존 STT를 재사용하는 Python Bridge
 
 ## Metadata
 
@@ -9,7 +9,7 @@
 
 ## Goal
 
-PCM WAV 저장 모듈을 완료하여 1차 음성 녹음·전사 앱의 해당 기능을 검증 가능한 상태로 제공한다.
+기존 STT를 재사용하는 Python Bridge을 완료하여 1차 음성 녹음·전사 앱의 해당 기능을 검증 가능한 상태로 제공한다.
 
 ## Background
 
@@ -19,14 +19,16 @@ PCM WAV 저장 모듈을 완료하여 1차 음성 녹음·전사 앱의 해당 �
 
 ## Source
 
-- `Qt_Widgets_음성_녹음_전사_UI_개발_사양서.md`: 7, 8절.
+- `Qt_Widgets_음성_녹음_전사_UI_개발_사양서.md`: 2, 10, 11, 31절.
 - `AGENTS.md`: Development Guide, 기본 개발 환경, 구현 원칙.
+- `codegraph.db`: files/nodes 테이블의 `engine/transcribe_npu.py` 경로/심볼.
 
 ## Requirements
 
-- 실제 PCM 형식에 맞는 WAV 헤더를 작성하고 녹음 종료 시 RIFF/data 길이를 갱신한다.
-- Mono Int16을 우선하되 장치가 지원하는 형식을 사용할 때 헤더와 바이트 스트림이 일치하도록 한다.
-- 파일 생성/쓰기/마무리 오류를 호출자에 반환하고 실패 파일을 성공 파일로 보고하지 않는다.
+- decode_audio_16k_mono/transcribe_windows/save_outputs 등의 실제 구현을 먼저 읽고 최소 변경으로 기존 STT를 호출한다.
+- input/device/model/output 옵션을 계약에 맞게 받아 단계/진행/segment/완료 이벤트를 flush해서 출력한다.
+- 사람용 콘솔 출력은 stdout 프로토콜에 섞지 않는다. 기존 CLI 실행은 보존한다.
+- 모델/모듈/디코드/파이프라인 실패를 error 이벤트와 실패 종료로 전달하고 완료는 결과 저장 성공 후에만 발행한다.
 
 ## Implementation Scope
 
@@ -42,39 +44,39 @@ PCM WAV 저장 모듈을 완료하여 1차 음성 녹음·전사 앱의 해당 �
 
 ## Dependencies
 
-- TICKET-001
+- TICKET-003
 
 ## Acceptance Criteria
 
-- [ ] 샘플 PCM을 저장한 WAV의 채널/샘플레이트/비트수/데이터 길이가 실제 데이터와 일치한다.
-- [ ] Python decode_audio_16k_mono 경로에서 저장 WAV를 decode할 수 있다.
+- [ ] 음성 fixture 입력으로 TXT 결과와 유효한 JSON Lines가 생성된다.
+- [ ] 기존 CLI가 기존 입력으로 계속 실행되고 출력에 회귀가 없다.
+- [ ] 각 실패 경로에서 completed가 발행되지 않는다.
 
 ## Test Requirements
 
 ### Normal Cases
 
-- 44.1/48 kHz PCM 저장 후 재열기.
+- 엔진 대역으로 이벤트 순서와 결과 경로 검증, 모델 환경에서 실제 짧은 음성 전사.
 
 ### Error Cases
 
-- 쓰기 권한 없음, 쓰기 중 실패.
+- 없는 입력/모델, decode 예외, 저장 실패.
 
 ### Edge Cases
 
-- 데이터 없음, RIFF 크기 한계에 대한 명시적 거부 또는 정책.
+- 한글·공백 경로, 무음/빈 결과.
 
 ## Files
 
 ### Existing
 
-None — 이 티켓의 전용 모듈은 첨부 인덱스에서 확인되지 않음. 구현 전에 실제 저장소를 확인한다.
+- `engine/transcribe_npu.py` — DB 인덱스에서 확인; 소스 본문은 별도 확인 필요.
 
 ### To Create
 
-- `gui/audio/WavWriter.h` — 제안 경로.
-- `gui/audio/WavWriter.cpp` — 제안 경로.
-- `tests/gui/test_wav_writer.cpp` — 제안 경로.
+- `engine/backend_bridge.py` — 제안 경로.
+- `tests/test_backend_bridge.py` — 제안 경로.
 
 ## Open Questions
 
-- 지원 PCM 형식과 RIFF 한계 정책은 장치 및 제품 요구에 맞춰 명시한다.
+- DB는 함수 존재와 시그니처만 제공한다. 콜백 제공 여부, 반환값, AUTO/fallback 정책은 실제 소스를 확인해야 한다.

@@ -1,4 +1,4 @@
-# TICKET-008: PCM WAV 저장 모듈
+# TICKET-005: 비동기 QProcess 실행과 JSON Lines 수신
 
 ## Metadata
 
@@ -9,7 +9,7 @@
 
 ## Goal
 
-PCM WAV 저장 모듈을 완료하여 1차 음성 녹음·전사 앱의 해당 기능을 검증 가능한 상태로 제공한다.
+비동기 QProcess 실행과 JSON Lines 수신을 완료하여 1차 음성 녹음·전사 앱의 해당 기능을 검증 가능한 상태로 제공한다.
 
 ## Background
 
@@ -19,14 +19,15 @@ PCM WAV 저장 모듈을 완료하여 1차 음성 녹음·전사 앱의 해당 �
 
 ## Source
 
-- `Qt_Widgets_음성_녹음_전사_UI_개발_사양서.md`: 7, 8절.
+- `Qt_Widgets_음성_녹음_전사_UI_개발_사양서.md`: 10, 11, 12, 25절.
 - `AGENTS.md`: Development Guide, 기본 개발 환경, 구현 원칙.
 
 ## Requirements
 
-- 실제 PCM 형식에 맞는 WAV 헤더를 작성하고 녹음 종료 시 RIFF/data 길이를 갱신한다.
-- Mono Int16을 우선하되 장치가 지원하는 형식을 사용할 때 헤더와 바이트 스트림이 일치하도록 한다.
-- 파일 생성/쓰기/마무리 오류를 호출자에 반환하고 실패 파일을 성공 파일로 보고하지 않는다.
+- QProcess 신호로 시작/stdout/stderr/종료를 관리하고 메인 스레드에서 waitForFinished 등 동기 대기를 하지 않는다.
+- Python 프로그램 경로와 QStringList 인자를 분리하고 working directory를 명시한다.
+- 바이트 버퍼로 분할 줄과 UTF-8 경계를 보존하고 JSON 파싱 후 typed signal을 발행한다.
+- errorOccurred/비정상 exit/completed 누락을 작업 실패로 처리하고 완료 신호를 중복 발행하지 않는다.
 
 ## Implementation Scope
 
@@ -43,25 +44,28 @@ PCM WAV 저장 모듈을 완료하여 1차 음성 녹음·전사 앱의 해당 �
 ## Dependencies
 
 - TICKET-001
+- TICKET-003
+- TICKET-004
 
 ## Acceptance Criteria
 
-- [ ] 샘플 PCM을 저장한 WAV의 채널/샘플레이트/비트수/데이터 길이가 실제 데이터와 일치한다.
-- [ ] Python decode_audio_16k_mono 경로에서 저장 WAV를 decode할 수 있다.
+- [ ] 모의 Bridge가 지연 출력 중에도 창이 조작 가능하다.
+- [ ] 한 번에 여러 줄 및 여러 번에 나뉜 한 줄이 각각 정확히 한 번 전달된다.
+- [ ] 실행 실패와 비정상 종료가 오류 신호로 전달된다.
 
 ## Test Requirements
 
 ### Normal Cases
 
-- 44.1/48 kHz PCM 저장 후 재열기.
+- state/progress/segment/completed 연속 수신.
 
 ### Error Cases
 
-- 쓰기 권한 없음, 쓰기 중 실패.
+- Python 경로 없음, malformed JSON, crash.
 
 ### Edge Cases
 
-- 데이터 없음, RIFF 크기 한계에 대한 명시적 거부 또는 정책.
+- UTF-8 문자 분할, 줄 끝 CRLF, 마지막 버퍼와 중복 완료.
 
 ## Files
 
@@ -71,10 +75,10 @@ None — 이 티켓의 전용 모듈은 첨부 인덱스에서 확인되지 않�
 
 ### To Create
 
-- `gui/audio/WavWriter.h` — 제안 경로.
-- `gui/audio/WavWriter.cpp` — 제안 경로.
-- `tests/gui/test_wav_writer.cpp` — 제안 경로.
+- `gui/backend/BackendProcess.h` — 제안 경로.
+- `gui/backend/BackendProcess.cpp` — 제안 경로.
+- `tests/gui/test_backend_process.cpp` — 제안 경로.
 
 ## Open Questions
 
-- 지원 PCM 형식과 RIFF 한계 정책은 장치 및 제품 요구에 맞춰 명시한다.
+- 미지 이벤트 정책은 TICKET-003 계약을 따른다.

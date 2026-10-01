@@ -1,15 +1,15 @@
-# TICKET-008: PCM WAV 저장 모듈
+# TICKET-017: 1차 완료 기준 통합 검증
 
 ## Metadata
 
-- Type: Feature
+- Type: Test
 - Size: Medium
 - Status: TODO
 - Priority: P0
 
 ## Goal
 
-PCM WAV 저장 모듈을 완료하여 1차 음성 녹음·전사 앱의 해당 기능을 검증 가능한 상태로 제공한다.
+1차 완료 기준 통합 검증을 완료하여 1차 음성 녹음·전사 앱의 해당 기능을 검증 가능한 상태로 제공한다.
 
 ## Background
 
@@ -19,14 +19,15 @@ PCM WAV 저장 모듈을 완료하여 1차 음성 녹음·전사 앱의 해당 �
 
 ## Source
 
-- `Qt_Widgets_음성_녹음_전사_UI_개발_사양서.md`: 7, 8절.
+- `Qt_Widgets_음성_녹음_전사_UI_개발_사양서.md`: 26, 28, 30, 31절.
 - `AGENTS.md`: Development Guide, 기본 개발 환경, 구현 원칙.
 
 ## Requirements
 
-- 실제 PCM 형식에 맞는 WAV 헤더를 작성하고 녹음 종료 시 RIFF/data 길이를 갱신한다.
-- Mono Int16을 우선하되 장치가 지원하는 형식을 사용할 때 헤더와 바이트 스트림이 일치하도록 한다.
-- 파일 생성/쓰기/마무리 오류를 호출자에 반환하고 실패 파일을 성공 파일로 보고하지 않는다.
+- 사양서 30절의 15개 완료 기준을 각각 테스트 절차, 입력, 기대 결과, 실행 환경, 실제 결과와 연결한다.
+- 파일 입력 및 녹음 입력, 화자 ON/OFF, UI 응답, 진행/취소, 저장, Backend 오류 흐름을 검증한다.
+- 실제 마이크/AI 모델/Device가 필요한 검증과 대역 테스트를 구분하고 환경이 없는 항목은 미실행으로 기록한다.
+- 기존 Python CLI 및 qmake clean build 회귀를 확인한다.
 
 ## Implementation Scope
 
@@ -42,26 +43,31 @@ PCM WAV 저장 모듈을 완료하여 1차 음성 녹음·전사 앱의 해당 �
 
 ## Dependencies
 
-- TICKET-001
+- TICKET-012
+- TICKET-013
+- TICKET-014
+- TICKET-015
+- TICKET-016
 
 ## Acceptance Criteria
 
-- [ ] 샘플 PCM을 저장한 WAV의 채널/샘플레이트/비트수/데이터 길이가 실제 데이터와 일치한다.
-- [ ] Python decode_audio_16k_mono 경로에서 저장 WAV를 decode할 수 있다.
+- [ ] 15개 완료 기준 전부에 검증 기록이 있다. 미실행을 통과로 기록하지 않는다.
+- [ ] 지원 환경의 녹음→전사와 파일→화자 분리→TXT 저장이 통과한다.
+- [ ] 실패/취소 후 재실행 및 기존 CLI 회귀 결과가 기록된다.
 
 ## Test Requirements
 
 ### Normal Cases
 
-- 44.1/48 kHz PCM 저장 후 재열기.
+- 실제 짧은 WAV/MP3/M4A 및 마이크 전사.
 
 ### Error Cases
 
-- 쓰기 권한 없음, 쓰기 중 실패.
+- 모델/모듈/Python 없음, 손상 파일, NPU 불가, 저장 실패.
 
 ### Edge Cases
 
-- 데이터 없음, RIFF 크기 한계에 대한 명시적 거부 또는 정책.
+- 한글 경로, 연속 작업, 긴 음성, 빠른 취소.
 
 ## Files
 
@@ -71,10 +77,9 @@ None — 이 티켓의 전용 모듈은 첨부 인덱스에서 확인되지 않�
 
 ### To Create
 
-- `gui/audio/WavWriter.h` — 제안 경로.
-- `gui/audio/WavWriter.cpp` — 제안 경로.
-- `tests/gui/test_wav_writer.cpp` — 제안 경로.
+- `tests/acceptance/first_release.md` — 제안 경로.
+- `tests/fixtures/README.md` — 제안 경로.
 
 ## Open Questions
 
-- 지원 PCM 형식과 RIFF 한계 정책은 장치 및 제품 요구에 맞춰 명시한다.
+- 대상 OS/Qt/실제 NPU 환경은 TICKET-001의 확정 범위를 따른다.
