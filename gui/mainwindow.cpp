@@ -184,15 +184,9 @@ MainWindow::MainWindow(QWidget *parent)
     connect(m_audioRecorder, &AudioRecorder::inputDevicesChanged,
             this, &MainWindow::updateMicrophoneUi);
     connect(m_audioRecorder, &AudioRecorder::recordingTimeChanged,
-            this, [this](qint64 milliseconds) {
-                m_recordingDurationMilliseconds = milliseconds;
-                ui->recordingTimeLabel->setText(formattedDuration(milliseconds));
-            });
+            this, &MainWindow::recordingTimeChanged);
     connect(m_audioRecorder, &AudioRecorder::recordingLevelChanged,
-            this, [this](float level) {
-                ui->inputLevelProgressBar->setValue(
-                    qBound(0, qRound(level * 100.0f), 100));
-            });
+            this, &MainWindow::recordingLevelChanged);
     connect(m_audioRecorder, &AudioRecorder::recordingStopped,
             this, &MainWindow::recordingFinished);
     connect(m_audioRecorder, &AudioRecorder::errorOccurred,
@@ -464,8 +458,33 @@ void MainWindow::handleMicrophoneSelection(int index)
         ui->microphoneComboBox->itemData(index).toByteArray());
 }
 
+void MainWindow::recordingTimeChanged(qint64 milliseconds)
+{
+    if (m_state != AppState::Recording) {
+        return;
+    }
+
+    m_recordingDurationMilliseconds = qMax<qint64>(0, milliseconds);
+    ui->recordingTimeLabel->setText(
+        formattedDuration(m_recordingDurationMilliseconds));
+}
+
+void MainWindow::recordingLevelChanged(float level)
+{
+    if (m_state != AppState::Recording) {
+        return;
+    }
+
+    ui->inputLevelProgressBar->setValue(
+        qBound(0, qRound(level * 100.0f), 100));
+}
+
 void MainWindow::recordingFinished(const QString &filePath)
 {
+    if (m_state != AppState::Recording) {
+        return;
+    }
+
     const QFileInfo recordedFile(filePath);
     if (!recordedFile.exists() || !recordedFile.isFile()) {
         recordingFailed(tr("녹음 파일이 생성되지 않았습니다."));

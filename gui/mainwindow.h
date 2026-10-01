@@ -57,6 +57,8 @@ private slots:
     void updateSpeakerCountEnabled();
     void updateMicrophoneUi();
     void handleMicrophoneSelection(int index);
+    void recordingTimeChanged(qint64 milliseconds);
+    void recordingLevelChanged(float level);
     void recordingFinished(const QString &filePath);
     void recordingFailed(const QString &message);
     void inputFileInspectionSucceeded(const AudioFileMetadata &metadata);

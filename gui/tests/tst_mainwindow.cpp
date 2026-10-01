@@ -4,6 +4,7 @@
 #include <QPushButton>
 #include <QLabel>
 #include <QFile>
+#include <QProgressBar>
 #include <QSignalSpy>
 #include <QTemporaryDir>
 #include <QTemporaryFile>
@@ -21,6 +22,9 @@ private slots:
     void normalTransitionAndDuplicateClickGuard();
     void errorAllowsRetry();
     void recordingClickGuard();
+    void recordingIndicatorsStopUpdatingAfterRecording();
+    void completedRecordingBecomesTranscribableInput();
+    void failedRecordingKeepsPreviousInput();
     void selectedFileMetadataIsDisplayed();
     void cancelledSelectionKeepsCurrentInput();
     void decodeFailureKeepsPreviousInput();
@@ -222,6 +226,102 @@ void MainWindowTest::recordingClickGuard()
 
     stopButton->click();
     QCOMPARE(window.appState(), AppState::Idle);
+}
+
+void MainWindowTest::recordingIndicatorsStopUpdatingAfterRecording()
+{
+    MainWindow window;
+    auto *timeLabel = window.findChild<QLabel *>("recordingTimeLabel");
+    auto *levelBar = window.findChild<QProgressBar *>("inputLevelProgressBar");
+    QVERIFY(timeLabel);
+    QVERIFY(levelBar);
+
+    window.setAppState(AppState::Recording);
+    QVERIFY(QMetaObject::invokeMethod(
+        &window, "recordingTimeChanged", Q_ARG(qint64, qint64(3723000))));
+    QVERIFY(QMetaObject::invokeMethod(
+        &window, "recordingLevelChanged", Q_ARG(float, 0.42f)));
+    QCOMPARE(timeLabel->text(), QStringLiteral("01:02:03"));
+    QCOMPARE(levelBar->value(), 42);
+
+    window.setAppState(AppState::Idle);
+    QVERIFY(QMetaObject::invokeMethod(
+        &window, "recordingTimeChanged", Q_ARG(qint64, qint64(9999000))));
+    QVERIFY(QMetaObject::invokeMethod(
+        &window, "recordingLevelChanged", Q_ARG(float, 0.99f)));
+    QCOMPARE(timeLabel->text(), QStringLiteral("01:02:03"));
+    QCOMPARE(levelBar->value(), 42);
+}
+
+void MainWindowTest::completedRecordingBecomesTranscribableInput()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString recordedPath = createAudioFixture(
+        directory, QStringLiteral("ui_success.wav"));
+    QVERIFY(!recordedPath.isEmpty());
+
+    MainWindow window;
+    configureBackendMock(window);
+    auto *transcribeButton = window.findChild<QPushButton *>("transcribeButton");
+    auto *nameLabel = window.findChild<QLabel *>("fileNameValueLabel");
+    auto *durationLabel = window.findChild<QLabel *>("fileDurationValueLabel");
+    auto *levelBar = window.findChild<QProgressBar *>("inputLevelProgressBar");
+    QVERIFY(transcribeButton);
+    QVERIFY(nameLabel);
+    QVERIFY(durationLabel);
+    QVERIFY(levelBar);
+
+    window.setAppState(AppState::Recording);
+    QVERIFY(QMetaObject::invokeMethod(
+        &window, "recordingTimeChanged", Q_ARG(qint64, qint64(3210))));
+    QVERIFY(QMetaObject::invokeMethod(
+        &window, "recordingLevelChanged", Q_ARG(float, 0.75f)));
+    QVERIFY(QMetaObject::invokeMethod(
+        &window, "recordingLevelChanged", Q_ARG(float, 0.0f)));
+    QVERIFY(QMetaObject::invokeMethod(
+        &window, "recordingFinished", Q_ARG(QString, recordedPath)));
+
+    QCOMPARE(window.appState(), AppState::InputReady);
+    QCOMPARE(QFileInfo(window.currentInputFile()).canonicalFilePath(),
+             QFileInfo(recordedPath).canonicalFilePath());
+    QCOMPARE(nameLabel->text(), QStringLiteral("ui_success.wav"));
+    QCOMPARE(durationLabel->text(), QStringLiteral("00:00:03"));
+    QCOMPARE(levelBar->value(), 0);
+    QVERIFY(transcribeButton->isEnabled());
+
+    transcribeButton->click();
+    QCOMPARE(window.appState(), AppState::Processing);
+    QTRY_COMPARE_WITH_TIMEOUT(window.appState(), AppState::Completed, 5000);
+}
+
+void MainWindowTest::failedRecordingKeepsPreviousInput()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString previousPath = createAudioFixture(
+        directory, QStringLiteral("previous.wav"));
+    const QString stalePath = createAudioFixture(
+        directory, QStringLiteral("stale.wav"));
+    const QString failedPath = directory.filePath(QStringLiteral("failed.wav"));
+    QVERIFY(!previousPath.isEmpty());
+    QVERIFY(!stalePath.isEmpty());
+
+    MainWindow window;
+    window.setCurrentInputFile(previousPath);
+    window.setAppState(AppState::Recording);
+    QVERIFY(QMetaObject::invokeMethod(
+        &window, "recordingFinished", Q_ARG(QString, failedPath)));
+
+    QCOMPARE(window.appState(), AppState::Error);
+    QCOMPARE(QFileInfo(window.currentInputFile()).canonicalFilePath(),
+             QFileInfo(previousPath).canonicalFilePath());
+    QVERIFY(!QFileInfo::exists(failedPath));
+
+    window.setAppState(AppState::InputReady);
+    QVERIFY(QMetaObject::invokeMethod(
+        &window, "recordingFinished", Q_ARG(QString, stalePath)));
+    QCOMPARE(window.currentInputFile(), QFileInfo(previousPath).absoluteFilePath());
 }
 
 void MainWindowTest::selectedFileMetadataIsDisplayed()
