@@ -9,6 +9,7 @@ import math
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 import numpy as np
 
@@ -48,9 +49,14 @@ def choose_file() -> Path | None:
     return Path(filename) if filename else None
 
 
-def ensure_device(device: str) -> list[str]:
+def available_devices() -> list[str]:
     import openvino as ov
-    devices = list(ov.Core().available_devices)
+
+    return list(ov.Core().available_devices)
+
+
+def ensure_device(device: str) -> list[str]:
+    devices = available_devices()
     requested = device.upper()
     ok = any(str(d).upper() == requested or str(d).upper().startswith(requested + '.') for d in devices)
     if not ok:
@@ -139,11 +145,28 @@ def print_progress(processed: float, total: float, index: int, count: int, start
     )
 
 
-def transcribe_windows(pipe, config, audio: np.ndarray, duration: float, window: float, overlap: float):
+def transcribe_windows(
+    pipe,
+    config,
+    audio: np.ndarray,
+    duration: float,
+    window: float,
+    overlap: float,
+    *,
+    progress_callback: Callable[[float, float, int, int], None] | None = None,
+    console_progress: bool = True,
+):
     count = max(1, math.ceil(duration / window))
     segments: list[Segment] = []
     started = time.perf_counter()
-    print_progress(0.0, duration, 0, count, started)
+
+    def report_progress(processed: float, index: int) -> None:
+        if console_progress:
+            print_progress(processed, duration, index, count, started)
+        if progress_callback is not None:
+            progress_callback(processed, duration, index, count)
+
+    report_progress(0.0, 0)
 
     for idx in range(count):
         core_start = idx * window
@@ -179,9 +202,10 @@ def transcribe_windows(pipe, config, audio: np.ndarray, duration: float, window:
             if fallback:
                 segments.append(Segment(core_start, core_end, fallback))
 
-        print_progress(core_end, duration, idx + 1, count, started)
+        report_progress(core_end, idx + 1)
 
-    print()
+    if console_progress:
+        print()
     segments.sort(key=lambda s: (s.start, s.end))
     return segments
 
@@ -231,10 +255,19 @@ def build_text(segments: list[Segment], diarized: bool) -> str:
     return '\n'.join(lines).strip()
 
 
-def save_outputs(input_path: Path, segments: list[Segment], duration: float, suffix: str, *, diarized: bool):
+def save_outputs(
+    input_path: Path,
+    segments: list[Segment],
+    duration: float,
+    suffix: str,
+    *,
+    diarized: bool,
+    output_dir: Path | None = None,
+):
     stem = input_path.stem + suffix
-    txt_path = input_path.with_name(stem + '.txt')
-    srt_path = input_path.with_name(stem + '.srt')
+    destination = input_path.parent if output_dir is None else Path(output_dir)
+    txt_path = destination / (stem + '.txt')
+    srt_path = destination / (stem + '.srt')
     text = build_text(segments, diarized)
 
     txt_path.write_text(text.strip() + '\n', encoding='utf-8-sig')
@@ -252,6 +285,35 @@ def save_outputs(input_path: Path, segments: list[Segment], duration: float, suf
         blocks.append(f'1\n{srt_timestamp(0)} --> {srt_timestamp(max(duration, 0.5))}\n{text.strip()}\n')
     srt_path.write_text('\n'.join(blocks), encoding='utf-8-sig')
     return txt_path, srt_path
+
+
+def load_whisper_pipeline(model_dir: Path, device: str, model_label: str = ''):
+    import openvino_genai as ov_genai
+
+    pipeline_options = {}
+    if device.upper().startswith('NPU') or device.upper().startswith('GPU'):
+        safe_label = (model_label or 'model').lower()
+        safe_device = device.upper().replace('.', '_')
+        cache_dir = APP_DIR / f'.ov_cache_{safe_label}_{safe_device}'
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        pipeline_options['CACHE_DIR'] = str(cache_dir)
+    return ov_genai.WhisperPipeline(str(model_dir), device, **pipeline_options)
+
+
+def configure_generation(pipe, language: str, beams: int, hotwords: str, initial_prompt: str):
+    config = pipe.get_generation_config()
+    config.language = language
+    config.task = 'transcribe'
+    config.return_timestamps = True
+    config.num_beams = beams
+    config.num_beam_groups = 1
+    config.num_return_sequences = 1
+    config.do_sample = False
+    if hotwords:
+        config.hotwords = hotwords
+    if initial_prompt:
+        config.initial_prompt = initial_prompt
+    return config
 
 
 def parse_args():
@@ -359,30 +421,19 @@ def main() -> int:
         print(f'      Audio length: {clock(duration)} ({duration / 60.0:.1f} min)')
 
         print(f'[3/{steps}] Loading/compiling model on {args.device}...')
-        import openvino_genai as ov_genai
-        pipeline_options = {}
-        if args.device.upper().startswith('NPU') or args.device.upper().startswith('GPU'):
-            safe_label = (args.model_label or 'model').lower()
-            safe_device = args.device.upper().replace('.', '_')
-            cache_dir = APP_DIR / f'.ov_cache_{safe_label}_{safe_device}'
-            cache_dir.mkdir(parents=True, exist_ok=True)
-            pipeline_options['CACHE_DIR'] = str(cache_dir)
-        pipe = ov_genai.WhisperPipeline(str(model_dir), args.device, **pipeline_options)
+        pipe = load_whisper_pipeline(model_dir, args.device, args.model_label)
         print('      Model ready.')
 
-        config = pipe.get_generation_config()
-        config.language = args.language
-        config.task = 'transcribe'
-        config.return_timestamps = True
-        config.num_beams = args.beams
-        config.num_beam_groups = 1
-        config.num_return_sequences = 1
-        config.do_sample = False
+        config = configure_generation(
+            pipe,
+            args.language,
+            args.beams,
+            hotwords,
+            initial_prompt,
+        )
         if hotwords:
-            config.hotwords = hotwords
             print(f'      Hotwords: {hotwords[:160]}{"..." if len(hotwords) > 160 else ""}')
         if initial_prompt:
-            config.initial_prompt = initial_prompt
             print(f'      Initial prompt: {initial_prompt[:160]}{"..." if len(initial_prompt) > 160 else ""}')
 
         mode = 'Beam Search' if args.beams > 1 else 'Greedy'
