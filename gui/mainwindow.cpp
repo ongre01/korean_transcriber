@@ -1,10 +1,15 @@
 #include "mainwindow.h"
 #include "ui_mainwindow.h"
 
+#include <QCoreApplication>
 #include <QDir>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QStatusBar>
+#include <QStringList>
+#include <QTextCursor>
+
+#include <algorithm>
 
 namespace {
 QString statusText(AppState state)
@@ -73,14 +78,81 @@ bool sameFilePath(const QString &left, const QString &right)
     return leftPath == rightPath;
 #endif
 }
+
+QString engineAssetPath(const QString &relativePath)
+{
+    QStringList candidates;
+    candidates << QDir::current().absoluteFilePath(
+        QStringLiteral("engine/%1").arg(relativePath));
+
+    QDir applicationDirectory(QCoreApplication::applicationDirPath());
+    for (int depth = 0; depth < 6; ++depth) {
+        candidates << applicationDirectory.absoluteFilePath(
+            QStringLiteral("engine/%1").arg(relativePath));
+        if (!applicationDirectory.cdUp()) {
+            break;
+        }
+    }
+
+    for (const QString &candidate : candidates) {
+        const QFileInfo asset(candidate);
+        if (asset.exists()) {
+            const QString canonicalPath = asset.canonicalFilePath();
+            return canonicalPath.isEmpty() ? asset.absoluteFilePath() : canonicalPath;
+        }
+    }
+
+    return QDir::cleanPath(candidates.constFirst());
+}
+
+BackendDevice backendDevice(const QString &name)
+{
+    if (name.compare(QStringLiteral("NPU"), Qt::CaseInsensitive) == 0) {
+        return BackendDevice::Npu;
+    }
+    if (name.compare(QStringLiteral("CPU"), Qt::CaseInsensitive) == 0) {
+        return BackendDevice::Cpu;
+    }
+    if (name.compare(QStringLiteral("GPU"), Qt::CaseInsensitive) == 0) {
+        return BackendDevice::Gpu;
+    }
+    return BackendDevice::Auto;
+}
+
+QString formattedTimestamp(double seconds)
+{
+    const qint64 totalSeconds = static_cast<qint64>(seconds);
+    const qint64 hours = totalSeconds / 3600;
+    const qint64 minutes = totalSeconds / 60 % 60;
+    const qint64 remainingSeconds = totalSeconds % 60;
+    return QStringLiteral("%1:%2:%3")
+        .arg(hours, 2, 10, QLatin1Char('0'))
+        .arg(minutes, 2, 10, QLatin1Char('0'))
+        .arg(remainingSeconds, 2, 10, QLatin1Char('0'));
+}
+
+QString formattedTranscriptSegment(const TranscriptSegment &segment)
+{
+    QString heading = QStringLiteral("[%1]").arg(formattedTimestamp(segment.startTime));
+    if (segment.speaker) {
+        heading += MainWindow::tr(" Speaker %1").arg(*segment.speaker);
+    }
+    return heading + QLatin1Char('\n') + segment.text;
+}
 } // namespace
 
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
     , ui(new Ui::MainWindow)
     , m_audioFileInfo(new AudioFileInfo(this))
+    , m_backendProcess(new BackendProcess(this))
 {
     ui->setupUi(this);
+
+    const QString bridgeScript = engineAssetPath(QStringLiteral("backend_bridge.py"));
+    m_backendProcess->setPythonProgram(m_audioFileInfo->pythonProgram());
+    m_backendProcess->setBridgeScript(bridgeScript);
+    m_backendProcess->setWorkingDirectory(QFileInfo(bridgeScript).absolutePath());
 
     connect(ui->recordStartButton, &QPushButton::clicked,
             this, &MainWindow::handleRecordStart);
@@ -98,6 +170,12 @@ MainWindow::MainWindow(QWidget *parent)
             this, &MainWindow::inputFileInspectionSucceeded);
     connect(m_audioFileInfo, &AudioFileInfo::inspectionFailed,
             this, &MainWindow::inputFileInspectionFailed);
+    connect(m_backendProcess, &BackendProcess::segmentReceived,
+            this, &MainWindow::transcriptionSegmentReceived);
+    connect(m_backendProcess, &BackendProcess::completed,
+            this, &MainWindow::processingCompleted);
+    connect(m_backendProcess, &BackendProcess::errorOccurred,
+            this, &MainWindow::processingFailed);
 
     updateInputFileUi();
     updateUiForState();
@@ -129,6 +207,11 @@ bool MainWindow::hasValidInput() const
 AudioFileInfo *MainWindow::audioFileInfo() const noexcept
 {
     return m_audioFileInfo;
+}
+
+BackendProcess *MainWindow::backendProcess() const noexcept
+{
+    return m_backendProcess;
 }
 
 void MainWindow::setCurrentInputFile(const QString &filePath)
@@ -263,8 +346,16 @@ void MainWindow::handleTranscriptionStart()
         return;
     }
 
+    TranscribeOptions options;
+    options.inputFile = m_currentInputFile;
+    options.device = backendDevice(ui->deviceComboBox->currentText());
+    options.modelDirectory = engineAssetPath(
+        QStringLiteral("models/whisper-large-v3-turbo-int8"));
+
+    clearTranscript();
     setAppState(AppState::Processing);
     emit transcriptionStartRequested();
+    m_backendProcess->start(options);
 }
 
 void MainWindow::handleCancellation()
@@ -314,6 +405,62 @@ void MainWindow::inputFileInspectionFailed(const QString &filePath, const QStrin
     const QString userMessage = tr("오디오 파일을 읽을 수 없습니다: %1").arg(message);
     setAppState(AppState::Error, userMessage);
     emit inputFileErrorOccurred(userMessage);
+}
+
+void MainWindow::transcriptionSegmentReceived(double start, double end,
+                                              int speaker, const QString &text)
+{
+    if (m_state != AppState::Processing) {
+        return;
+    }
+
+    TranscriptSegment segment;
+    segment.startTime = start;
+    segment.endTime = end;
+    if (speaker > 0) {
+        segment.speaker = speaker;
+    }
+    segment.text = text;
+
+    const auto insertionPoint = std::upper_bound(
+        m_transcriptSegments.begin(), m_transcriptSegments.end(), segment.startTime,
+        [](double startTime, const TranscriptSegment &existing) {
+            return startTime < existing.startTime;
+        });
+    const bool appendToEnd = insertionPoint == m_transcriptSegments.end();
+    const bool hasPreviousSegments = !m_transcriptSegments.isEmpty();
+    m_transcriptSegments.insert(insertionPoint, segment);
+
+    if (!appendToEnd) {
+        updateTranscriptUi();
+        return;
+    }
+
+    QTextCursor cursor(ui->resultTextEdit->document());
+    cursor.movePosition(QTextCursor::End);
+    if (hasPreviousSegments) {
+        cursor.insertText(QStringLiteral("\n\n"));
+    }
+    cursor.insertText(formattedTranscriptSegment(segment));
+}
+
+void MainWindow::clearTranscript()
+{
+    m_transcriptSegments.clear();
+    ui->resultTextEdit->clear();
+}
+
+void MainWindow::updateTranscriptUi()
+{
+    QStringList blocks;
+    blocks.reserve(m_transcriptSegments.size());
+    for (const TranscriptSegment &segment : m_transcriptSegments) {
+        blocks.append(formattedTranscriptSegment(segment));
+    }
+
+    // setPlainText intentionally prevents transcript text that resembles HTML
+    // from being interpreted as rich text.
+    ui->resultTextEdit->setPlainText(blocks.join(QStringLiteral("\n\n")));
 }
 
 void MainWindow::updateInputFileUi()

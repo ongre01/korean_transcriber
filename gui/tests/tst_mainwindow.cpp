@@ -8,6 +8,7 @@
 #include <QTemporaryDir>
 #include <QTemporaryFile>
 #include <QTest>
+#include <QTextEdit>
 
 class MainWindowTest : public QObject
 {
@@ -24,6 +25,9 @@ private slots:
     void cancelledSelectionKeepsCurrentInput();
     void decodeFailureKeepsPreviousInput();
     void newerSelectionWins();
+    void newRunReplacesPreviousTranscript();
+    void emptyResultDoesNotReusePreviousTranscript();
+    void longTranscriptTextIsPreserved();
 };
 
 namespace {
@@ -49,6 +53,15 @@ void configureMetadataMock(MainWindow &window)
     window.audioFileInfo()->setPythonProgram(pythonProgram());
     window.audioFileInfo()->setProbeScript(
         QFINDTESTDATA("fixtures/mock_audio_metadata.py"));
+}
+
+void configureBackendMock(MainWindow &window)
+{
+    const QString script = QFINDTESTDATA("fixtures/mock_backend_process.py");
+    QVERIFY2(!script.isEmpty(), "The mock backend script was not found");
+    window.backendProcess()->setPythonProgram(pythonProgram());
+    window.backendProcess()->setBridgeScript(script);
+    window.backendProcess()->setWorkingDirectory(QFileInfo(script).absolutePath());
 }
 } // namespace
 
@@ -128,17 +141,23 @@ void MainWindowTest::buttonPolicy()
 
 void MainWindowTest::normalTransitionAndDuplicateClickGuard()
 {
-    QTemporaryFile inputFile;
-    QVERIFY(inputFile.open());
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString inputPath = createAudioFixture(directory, QStringLiteral("ui_success.wav"));
+    QVERIFY(!inputPath.isEmpty());
 
     MainWindow window;
+    configureBackendMock(window);
     QCOMPARE(window.appState(), AppState::Idle);
 
-    window.setCurrentInputFile(inputFile.fileName());
+    window.setCurrentInputFile(inputPath);
     QCOMPARE(window.appState(), AppState::InputReady);
 
     auto *transcribeButton = window.findChild<QPushButton *>("transcribeButton");
+    auto *resultTextEdit = window.findChild<QTextEdit *>("resultTextEdit");
     QVERIFY(transcribeButton);
+    QVERIFY(resultTextEdit);
+    QVERIFY(resultTextEdit->isReadOnly());
     QSignalSpy startSpy(&window, &MainWindow::transcriptionStartRequested);
 
     transcribeButton->click();
@@ -149,30 +168,39 @@ void MainWindowTest::normalTransitionAndDuplicateClickGuard()
     QCOMPARE(window.appState(), AppState::Processing);
     QCOMPARE(startSpy.count(), 1);
 
-    window.processingCompleted();
-    QCOMPARE(window.appState(), AppState::Completed);
+    QTRY_COMPARE_WITH_TIMEOUT(window.appState(), AppState::Completed, 5000);
     QVERIFY(transcribeButton->isEnabled());
+    QCOMPARE(resultTextEdit->toPlainText(),
+             QStringLiteral("[00:00:02]\n첫 번째 & 원문\n\n"
+                            "[00:00:12] Speaker 2\n<b>두 번째</b>"));
 }
 
 void MainWindowTest::errorAllowsRetry()
 {
-    QTemporaryFile inputFile;
-    QVERIFY(inputFile.open());
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString failurePath = createAudioFixture(
+        directory, QStringLiteral("ui_failure.wav"));
+    const QString successPath = createAudioFixture(
+        directory, QStringLiteral("ui_success.wav"));
+    QVERIFY(!failurePath.isEmpty());
+    QVERIFY(!successPath.isEmpty());
 
     MainWindow window;
-    window.setCurrentInputFile(inputFile.fileName());
+    configureBackendMock(window);
+    window.setCurrentInputFile(failurePath);
 
     auto *transcribeButton = window.findChild<QPushButton *>("transcribeButton");
     QVERIFY(transcribeButton);
     QSignalSpy startSpy(&window, &MainWindow::transcriptionStartRequested);
 
     transcribeButton->click();
-    window.processingFailed(QStringLiteral("mock failure"));
-    QCOMPARE(window.appState(), AppState::Error);
+    QTRY_COMPARE_WITH_TIMEOUT(window.appState(), AppState::Error, 5000);
     QVERIFY(transcribeButton->isEnabled());
 
+    window.setCurrentInputFile(successPath);
     transcribeButton->click();
-    QCOMPARE(window.appState(), AppState::Processing);
+    QTRY_COMPARE_WITH_TIMEOUT(window.appState(), AppState::Completed, 5000);
     QCOMPARE(startSpy.count(), 2);
 }
 
@@ -291,6 +319,92 @@ void MainWindowTest::newerSelectionWins()
     QTest::qWait(800);
     QCOMPARE(QFileInfo(window.currentInputFile()).canonicalFilePath(),
              QFileInfo(latestPath).canonicalFilePath());
+}
+
+void MainWindowTest::newRunReplacesPreviousTranscript()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString firstPath = createAudioFixture(
+        directory, QStringLiteral("ui_success.wav"));
+    const QString secondPath = createAudioFixture(
+        directory, QStringLiteral("ui_second.wav"));
+    QVERIFY(!firstPath.isEmpty());
+    QVERIFY(!secondPath.isEmpty());
+
+    MainWindow window;
+    configureBackendMock(window);
+    auto *transcribeButton = window.findChild<QPushButton *>("transcribeButton");
+    auto *resultTextEdit = window.findChild<QTextEdit *>("resultTextEdit");
+    QVERIFY(transcribeButton);
+    QVERIFY(resultTextEdit);
+
+    window.setCurrentInputFile(firstPath);
+    transcribeButton->click();
+    QTRY_COMPARE_WITH_TIMEOUT(window.appState(), AppState::Completed, 5000);
+    QVERIFY(resultTextEdit->toPlainText().contains(QStringLiteral("첫 번째")));
+
+    window.setCurrentInputFile(secondPath);
+    transcribeButton->click();
+    QCOMPARE(window.appState(), AppState::Processing);
+    QVERIFY(resultTextEdit->toPlainText().isEmpty());
+    QTRY_COMPARE_WITH_TIMEOUT(window.appState(), AppState::Completed, 5000);
+    QCOMPARE(resultTextEdit->toPlainText(),
+             QStringLiteral("[00:00:03] Speaker 1\n새 작업"));
+}
+
+void MainWindowTest::emptyResultDoesNotReusePreviousTranscript()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString firstPath = createAudioFixture(
+        directory, QStringLiteral("ui_second.wav"));
+    const QString emptyPath = createAudioFixture(
+        directory, QStringLiteral("ui_empty.wav"));
+    QVERIFY(!firstPath.isEmpty());
+    QVERIFY(!emptyPath.isEmpty());
+
+    MainWindow window;
+    configureBackendMock(window);
+    auto *transcribeButton = window.findChild<QPushButton *>("transcribeButton");
+    auto *resultTextEdit = window.findChild<QTextEdit *>("resultTextEdit");
+    QVERIFY(transcribeButton);
+    QVERIFY(resultTextEdit);
+
+    window.setCurrentInputFile(firstPath);
+    transcribeButton->click();
+    QTRY_COMPARE_WITH_TIMEOUT(window.appState(), AppState::Completed, 5000);
+    QVERIFY(!resultTextEdit->toPlainText().isEmpty());
+
+    window.setCurrentInputFile(emptyPath);
+    transcribeButton->click();
+    QTRY_COMPARE_WITH_TIMEOUT(window.appState(), AppState::Completed, 5000);
+    QVERIFY(resultTextEdit->toPlainText().isEmpty());
+}
+
+void MainWindowTest::longTranscriptTextIsPreserved()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString inputPath = createAudioFixture(
+        directory, QStringLiteral("ui_long.wav"));
+    QVERIFY(!inputPath.isEmpty());
+
+    MainWindow window;
+    configureBackendMock(window);
+    auto *transcribeButton = window.findChild<QPushButton *>("transcribeButton");
+    auto *resultTextEdit = window.findChild<QTextEdit *>("resultTextEdit");
+    QVERIFY(transcribeButton);
+    QVERIFY(resultTextEdit);
+
+    window.setCurrentInputFile(inputPath);
+    transcribeButton->click();
+    QTRY_COMPARE_WITH_TIMEOUT(window.appState(), AppState::Completed, 5000);
+
+    const QString result = resultTextEdit->toPlainText();
+    QVERIFY(result.size() > 20000);
+    QVERIFY(result.startsWith(QStringLiteral("[00:00:01]\n<start>")));
+    QVERIFY(result.endsWith(QStringLiteral("<end>")));
 }
 
 QTEST_MAIN(MainWindowTest)

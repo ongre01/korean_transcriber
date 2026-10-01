@@ -9,11 +9,16 @@ INCLUDEPATH += ..
 SOURCES += \
     tst_mainwindow.cpp \
     ../mainwindow.cpp \
+    ../backend/BackendProcess.cpp \
     ../input/AudioFileInfo.cpp
 
 HEADERS += \
     ../mainwindow.h \
     ../app/AppState.h \
+    ../backend/BackendEvent.h \
+    ../backend/BackendProcess.h \
+    ../backend/TranscriptSegment.h \
+    ../backend/TranscribeOptions.h \
     ../input/AudioFileInfo.h
 
 FORMS += \

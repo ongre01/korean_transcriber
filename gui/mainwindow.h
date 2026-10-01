@@ -2,10 +2,13 @@
 #define MAINWINDOW_H
 
 #include "app/AppState.h"
+#include "backend/BackendProcess.h"
+#include "backend/TranscriptSegment.h"
 #include "input/AudioFileInfo.h"
 
 #include <QMainWindow>
 #include <QString>
+#include <QVector>
 
 QT_BEGIN_NAMESPACE
 namespace Ui {
@@ -25,6 +28,7 @@ public:
     QString currentInputFile() const;
     bool hasValidInput() const;
     AudioFileInfo *audioFileInfo() const noexcept;
+    BackendProcess *backendProcess() const noexcept;
 
 public slots:
     void setCurrentInputFile(const QString &filePath);
@@ -51,18 +55,24 @@ private slots:
     void updateSpeakerCountEnabled();
     void inputFileInspectionSucceeded(const AudioFileMetadata &metadata);
     void inputFileInspectionFailed(const QString &filePath, const QString &message);
+    void transcriptionSegmentReceived(double start, double end,
+                                      int speaker, const QString &text);
 
 private:
+    void clearTranscript();
+    void updateTranscriptUi();
     void updateInputFileUi();
     void updateUiForState();
 
     Ui::MainWindow *ui;
     AudioFileInfo *m_audioFileInfo;
+    BackendProcess *m_backendProcess;
     AppState m_state = AppState::Idle;
     QString m_currentInputFile;
     QString m_pendingInputFile;
     qint64 m_inputDurationMilliseconds = -1;
     bool m_inputInspectionPending = false;
     QString m_stateMessage;
+    QVector<TranscriptSegment> m_transcriptSegments;
 };
 #endif // MAINWINDOW_H
