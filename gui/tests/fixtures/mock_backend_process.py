@@ -19,6 +19,8 @@ parser = argparse.ArgumentParser(add_help=False)
 parser.add_argument("--input", required=True)
 parser.add_argument("--device")
 parser.add_argument("--model-dir")
+parser.add_argument("--diarization", action="store_true")
+parser.add_argument("--num-speakers")
 args, _unknown = parser.parse_known_args()
 
 if Path.cwd() != Path(__file__).resolve().parent:
@@ -39,6 +41,23 @@ def validate_ui_options():
     if not args.model_dir:
         write_line({"type": "error", "message": "UI model directory was not passed"})
         raise SystemExit(11)
+
+
+def validate_diarization_options(expected_speaker_count):
+    validate_ui_options()
+    if not args.diarization:
+        write_line({"type": "error", "message": "UI diarization was not enabled"})
+        raise SystemExit(12)
+    if args.num_speakers != expected_speaker_count:
+        write_line({"type": "error", "message": "UI speaker count was not passed"})
+        raise SystemExit(13)
+
+
+def validate_diarization_is_off():
+    validate_ui_options()
+    if args.diarization or args.num_speakers is not None:
+        write_line({"type": "error", "message": "UI unexpectedly enabled diarization"})
+        raise SystemExit(14)
 
 if scenario == "normal":
     write_line({"type": "state", "value": "preparing"}, b"\r\n")
@@ -140,6 +159,77 @@ elif scenario == "ui_success":
     write_line(
         {"type": "completed", "text_file": "C:/ui.txt", "srt_file": "C:/ui.srt"}
     )
+elif scenario == "ui_off":
+    validate_diarization_is_off()
+    # The GUI must suppress this label because the run was started with
+    # diarization off, even if a malformed backend supplied one.
+    write_line(
+        {
+            "type": "segment",
+            "start": 2.0,
+            "end": 3.0,
+            "speaker": 1,
+            "text": "라벨 없는 결과",
+        }
+    )
+    write_line(
+        {"type": "completed", "text_file": "C:/off.txt", "srt_file": "C:/off.srt"}
+    )
+elif scenario == "ui_diarization_auto":
+    validate_diarization_options("auto")
+    write_line(
+        {
+            "type": "segment",
+            "start": 1.0,
+            "end": 2.0,
+            "speaker": 1,
+            "text": "자동 화자",
+        }
+    )
+    write_line(
+        {
+            "type": "segment",
+            "start": 2.0,
+            "end": 3.0,
+            "speaker": None,
+            "text": "미지정 화자",
+        }
+    )
+    write_line(
+        {"type": "completed", "text_file": "C:/auto.txt", "srt_file": "C:/auto.srt"}
+    )
+elif scenario == "ui_diarization_fixed":
+    validate_diarization_options("2")
+    write_line(
+        {
+            "type": "segment",
+            "start": 1.0,
+            "end": 2.0,
+            "speaker": 1,
+            "text": "첫 번째 화자",
+        }
+    )
+    write_line(
+        {
+            "type": "segment",
+            "start": 2.0,
+            "end": 3.0,
+            "speaker": 2,
+            "text": "두 번째 화자",
+        }
+    )
+    write_line(
+        {"type": "completed", "text_file": "C:/fixed.txt", "srt_file": "C:/fixed.srt"}
+    )
+elif scenario == "ui_diarization_missing_model":
+    validate_diarization_options("2")
+    write_line(
+        {
+            "type": "error",
+            "message": "Speaker diarization failed: Speaker segmentation model not found",
+        }
+    )
+    raise SystemExit(3)
 elif scenario == "ui_second":
     validate_ui_options()
     write_line(

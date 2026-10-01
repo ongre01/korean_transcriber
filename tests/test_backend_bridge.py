@@ -233,8 +233,79 @@ class BackendBridgeTest(unittest.TestCase):
         self.assertEqual(engine.assigned_turns[0].speaker, 0)
         segments = [event for event in events if isinstance(event, SegmentEvent)]
         self.assertEqual([event.speaker for event in segments], [1, 1])
+        self.assertEqual([event.text for event in segments], [
+            "안녕하세요.", "회의를 시작합니다."
+        ])
+        self.assertEqual(len(segments), len(engine.segments))
         states = [event.value.value for event in events if isinstance(event, StateEvent)]
         self.assertIn("diarization", states)
+
+    def test_diarization_off_never_calls_diarizer_or_emits_speakers(self):
+        called = False
+
+        def diarize(*_args, **_kwargs):
+            nonlocal called
+            called = True
+            raise AssertionError("diarization must not run when disabled")
+
+        exit_code, events, _diagnostic, engine = self.invoke(
+            None, diarize_function=diarize
+        )
+
+        self.assertEqual(exit_code, 0)
+        self.assertFalse(called)
+        self.assertIsNone(engine.assigned_turns)
+        segments = [event for event in events if isinstance(event, SegmentEvent)]
+        self.assertEqual([event.speaker for event in segments], [None, None])
+        states = [event.value.value for event in events if isinstance(event, StateEvent)]
+        self.assertNotIn("diarization", states)
+
+    def test_diarization_maps_fixed_count_and_emits_final_segments_once(self):
+        call = {}
+
+        def diarize(_audio, _segmentation, _embedding, **kwargs):
+            call.update(kwargs)
+            return [SimpleNamespace(start=0.0, end=2.0, speaker=0)]
+
+        exit_code, events, _diagnostic, engine = self.invoke(
+            None,
+            "--diarization",
+            "--num-speakers",
+            "2",
+            diarize_function=diarize,
+        )
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(call["num_speakers"], 2)
+        segments = [event for event in events if isinstance(event, SegmentEvent)]
+        self.assertEqual(len(segments), len(engine.segments))
+        self.assertEqual([event.text for event in segments], [
+            "안녕하세요.", "회의를 시작합니다."
+        ])
+        self.assertEqual([event.speaker for event in segments], [1, 1])
+
+    def test_missing_diarization_model_emits_error_and_a_retry_can_succeed(self):
+        def missing_model(*_args, **_kwargs):
+            raise RuntimeError("Speaker segmentation model not found")
+
+        exit_code, events, _diagnostic, engine = self.invoke(
+            None, "--diarization", diarize_function=missing_model
+        )
+
+        self.assertEqual(exit_code, 1)
+        self.assertIsInstance(events[-1], ErrorEvent)
+        self.assertIn("Speaker diarization failed", events[-1].message)
+        self.assertFalse(any(isinstance(event, CompletedEvent) for event in events))
+        self.assertIsNone(engine.assigned_turns)
+
+        def diarize(_audio, _segmentation, _embedding, **_kwargs):
+            return [SimpleNamespace(start=0.0, end=2.0, speaker=0)]
+
+        retry_exit_code, retry_events, _diagnostic, _engine = self.invoke(
+            None, "--diarization", diarize_function=diarize
+        )
+        self.assertEqual(retry_exit_code, 0)
+        self.assertIsInstance(retry_events[-1], CompletedEvent)
 
     def test_empty_transcript_is_a_successful_completed_stream(self):
         engine = FakeEngine()

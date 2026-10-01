@@ -1,6 +1,8 @@
 #include "app/AppState.h"
 #include "mainwindow.h"
 
+#include <QCheckBox>
+#include <QComboBox>
 #include <QPushButton>
 #include <QLabel>
 #include <QFile>
@@ -32,6 +34,8 @@ private slots:
     void newRunReplacesPreviousTranscript();
     void emptyResultDoesNotReusePreviousTranscript();
     void longTranscriptTextIsPreserved();
+    void diarizationOptionsAndTranscriptLabels();
+    void diarizationModelFailureAllowsRetry();
 };
 
 namespace {
@@ -176,7 +180,7 @@ void MainWindowTest::normalTransitionAndDuplicateClickGuard()
     QVERIFY(transcribeButton->isEnabled());
     QCOMPARE(resultTextEdit->toPlainText(),
              QStringLiteral("[00:00:02]\n첫 번째 & 원문\n\n"
-                            "[00:00:12] Speaker 2\n<b>두 번째</b>"));
+                            "[00:00:12]\n<b>두 번째</b>"));
 }
 
 void MainWindowTest::errorAllowsRetry()
@@ -450,7 +454,7 @@ void MainWindowTest::newRunReplacesPreviousTranscript()
     QVERIFY(resultTextEdit->toPlainText().isEmpty());
     QTRY_COMPARE_WITH_TIMEOUT(window.appState(), AppState::Completed, 5000);
     QCOMPARE(resultTextEdit->toPlainText(),
-             QStringLiteral("[00:00:03] Speaker 1\n새 작업"));
+             QStringLiteral("[00:00:03]\n새 작업"));
 }
 
 void MainWindowTest::emptyResultDoesNotReusePreviousTranscript()
@@ -505,6 +509,92 @@ void MainWindowTest::longTranscriptTextIsPreserved()
     QVERIFY(result.size() > 20000);
     QVERIFY(result.startsWith(QStringLiteral("[00:00:01]\n<start>")));
     QVERIFY(result.endsWith(QStringLiteral("<end>")));
+}
+
+void MainWindowTest::diarizationOptionsAndTranscriptLabels()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString offPath = createAudioFixture(directory, QStringLiteral("ui_off.wav"));
+    const QString autoPath = createAudioFixture(
+        directory, QStringLiteral("ui_diarization_auto.wav"));
+    const QString fixedPath = createAudioFixture(
+        directory, QStringLiteral("ui_diarization_fixed.wav"));
+    QVERIFY(!offPath.isEmpty());
+    QVERIFY(!autoPath.isEmpty());
+    QVERIFY(!fixedPath.isEmpty());
+
+    MainWindow window;
+    configureBackendMock(window);
+    auto *transcribeButton = window.findChild<QPushButton *>("transcribeButton");
+    auto *diarizationCheckBox = window.findChild<QCheckBox *>("diarizationCheckBox");
+    auto *speakerCountComboBox = window.findChild<QComboBox *>("speakerCountComboBox");
+    auto *resultTextEdit = window.findChild<QTextEdit *>("resultTextEdit");
+    QVERIFY(transcribeButton);
+    QVERIFY(diarizationCheckBox);
+    QVERIFY(speakerCountComboBox);
+    QVERIFY(resultTextEdit);
+    QVERIFY(!speakerCountComboBox->isEnabled());
+
+    window.setCurrentInputFile(offPath);
+    transcribeButton->click();
+    QTRY_COMPARE_WITH_TIMEOUT(window.appState(), AppState::Completed, 5000);
+    QCOMPARE(resultTextEdit->toPlainText(),
+             QStringLiteral("[00:00:02]\n라벨 없는 결과"));
+
+    diarizationCheckBox->setChecked(true);
+    QVERIFY(speakerCountComboBox->isEnabled());
+    QCOMPARE(speakerCountComboBox->currentText(), QStringLiteral("Auto"));
+    window.setCurrentInputFile(autoPath);
+    transcribeButton->click();
+    QVERIFY(!diarizationCheckBox->isEnabled());
+    QVERIFY(!speakerCountComboBox->isEnabled());
+    QTRY_COMPARE_WITH_TIMEOUT(window.appState(), AppState::Completed, 5000);
+    QCOMPARE(resultTextEdit->toPlainText(),
+             QStringLiteral("[00:00:01] Speaker 1\n자동 화자\n\n"
+                            "[00:00:02] Speaker ?\n미지정 화자"));
+
+    speakerCountComboBox->setCurrentText(QStringLiteral("2"));
+    window.setCurrentInputFile(fixedPath);
+    transcribeButton->click();
+    QTRY_COMPARE_WITH_TIMEOUT(window.appState(), AppState::Completed, 5000);
+    QCOMPARE(resultTextEdit->toPlainText(),
+             QStringLiteral("[00:00:01] Speaker 1\n첫 번째 화자\n\n"
+                            "[00:00:02] Speaker 2\n두 번째 화자"));
+}
+
+void MainWindowTest::diarizationModelFailureAllowsRetry()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString failurePath = createAudioFixture(
+        directory, QStringLiteral("ui_diarization_missing_model.wav"));
+    const QString retryPath = createAudioFixture(
+        directory, QStringLiteral("ui_diarization_fixed.wav"));
+    QVERIFY(!failurePath.isEmpty());
+    QVERIFY(!retryPath.isEmpty());
+
+    MainWindow window;
+    configureBackendMock(window);
+    auto *transcribeButton = window.findChild<QPushButton *>("transcribeButton");
+    auto *diarizationCheckBox = window.findChild<QCheckBox *>("diarizationCheckBox");
+    auto *speakerCountComboBox = window.findChild<QComboBox *>("speakerCountComboBox");
+    QVERIFY(transcribeButton);
+    QVERIFY(diarizationCheckBox);
+    QVERIFY(speakerCountComboBox);
+
+    diarizationCheckBox->setChecked(true);
+    speakerCountComboBox->setCurrentText(QStringLiteral("2"));
+    window.setCurrentInputFile(failurePath);
+    transcribeButton->click();
+    QTRY_COMPARE_WITH_TIMEOUT(window.appState(), AppState::Error, 5000);
+    QVERIFY(transcribeButton->isEnabled());
+    QVERIFY(diarizationCheckBox->isEnabled());
+    QVERIFY(speakerCountComboBox->isEnabled());
+
+    window.setCurrentInputFile(retryPath);
+    transcribeButton->click();
+    QTRY_COMPARE_WITH_TIMEOUT(window.appState(), AppState::Completed, 5000);
 }
 
 QTEST_MAIN(MainWindowTest)

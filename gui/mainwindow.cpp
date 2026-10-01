@@ -132,11 +132,16 @@ QString formattedTimestamp(double seconds)
         .arg(remainingSeconds, 2, 10, QLatin1Char('0'));
 }
 
-QString formattedTranscriptSegment(const TranscriptSegment &segment)
+QString formattedTranscriptSegment(const TranscriptSegment &segment,
+                                   bool showSpeaker)
 {
     QString heading = QStringLiteral("[%1]").arg(formattedTimestamp(segment.startTime));
-    if (segment.speaker) {
-        heading += MainWindow::tr(" Speaker %1").arg(*segment.speaker);
+    if (showSpeaker) {
+        if (segment.speaker) {
+            heading += MainWindow::tr(" Speaker %1").arg(*segment.speaker);
+        } else {
+            heading += MainWindow::tr(" Speaker ?");
+        }
     }
     return heading + QLatin1Char('\n') + segment.text;
 }
@@ -394,7 +399,22 @@ void MainWindow::handleTranscriptionStart()
     options.device = backendDevice(ui->deviceComboBox->currentText());
     options.modelDirectory = engineAssetPath(
         QStringLiteral("models/whisper-large-v3-turbo-int8"));
+    options.diarizationEnabled = ui->diarizationCheckBox->isChecked();
+    if (options.diarizationEnabled) {
+        const QString speakerCount = ui->speakerCountComboBox->currentText().trimmed();
+        if (speakerCount.compare(QStringLiteral("Auto"), Qt::CaseInsensitive) != 0) {
+            bool isNumber = false;
+            const int value = speakerCount.toInt(&isNumber);
+            if (!isNumber) {
+                const QString message = tr("화자 수 옵션이 올바르지 않습니다.");
+                setAppState(AppState::Error, message);
+                return;
+            }
+            options.speakerCount = value;
+        }
+    }
 
+    m_diarizationEnabledForRun = options.diarizationEnabled;
     clearTranscript();
     setAppState(AppState::Processing);
     emit transcriptionStartRequested();
@@ -574,7 +594,7 @@ void MainWindow::transcriptionSegmentReceived(double start, double end,
     if (hasPreviousSegments) {
         cursor.insertText(QStringLiteral("\n\n"));
     }
-    cursor.insertText(formattedTranscriptSegment(segment));
+    cursor.insertText(formattedTranscriptSegment(segment, m_diarizationEnabledForRun));
 }
 
 void MainWindow::clearTranscript()
@@ -588,7 +608,7 @@ void MainWindow::updateTranscriptUi()
     QStringList blocks;
     blocks.reserve(m_transcriptSegments.size());
     for (const TranscriptSegment &segment : m_transcriptSegments) {
-        blocks.append(formattedTranscriptSegment(segment));
+        blocks.append(formattedTranscriptSegment(segment, m_diarizationEnabledForRun));
     }
 
     // setPlainText intentionally prevents transcript text that resembles HTML

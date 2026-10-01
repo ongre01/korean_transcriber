@@ -181,6 +181,11 @@ void BackendProtocolTest::transcribeOptionsContract()
     QCOMPARE(autoArguments.at(autoArguments.indexOf(QStringLiteral("--num-speakers")) + 1),
              QStringLiteral("auto"));
 
+    options.diarizationEnabled = false;
+    const QStringList noDiarizationArguments = options.toBridgeArguments();
+    QVERIFY(!noDiarizationArguments.contains(QStringLiteral("--diarization")));
+    QVERIFY(!noDiarizationArguments.contains(QStringLiteral("--num-speakers")));
+
     options.speakerCount = 1;
     QVERIFY(!options.isValid(&error));
 }

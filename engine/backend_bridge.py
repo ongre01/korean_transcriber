@@ -336,6 +336,10 @@ def run_bridge(
 
         _call("Speaker diarization failed", perform_diarization)
 
+    # Segment events are emitted only after optional diarization has finished.
+    # This is the bridge contract: provisional STT segments are never sent and
+    # then resent with speaker labels, so every finalized segment appears at
+    # most once in the Qt transcript.
     for segment in segments:
         text = str(segment.text).strip()
         if not text:

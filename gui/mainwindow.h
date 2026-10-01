@@ -82,6 +82,9 @@ private:
     qint64 m_inputDurationMilliseconds = -1;
     qint64 m_recordingDurationMilliseconds = 0;
     bool m_inputInspectionPending = false;
+    // Preserve the option used for the active/completed run. The checkbox can
+    // be changed after completion without changing how that result is shown.
+    bool m_diarizationEnabledForRun = false;
     QString m_stateMessage;
     QVector<TranscriptSegment> m_transcriptSegments;
 };
