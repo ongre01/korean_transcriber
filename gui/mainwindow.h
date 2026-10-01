@@ -2,6 +2,7 @@
 #define MAINWINDOW_H
 
 #include "app/AppState.h"
+#include "audio/AudioRecorder.h"
 #include "backend/BackendProcess.h"
 #include "backend/TranscriptSegment.h"
 #include "input/AudioFileInfo.h"
@@ -27,6 +28,7 @@ public:
     AppState appState() const noexcept;
     QString currentInputFile() const;
     bool hasValidInput() const;
+    AudioRecorder *audioRecorder() const noexcept;
     AudioFileInfo *audioFileInfo() const noexcept;
     BackendProcess *backendProcess() const noexcept;
 
@@ -53,6 +55,10 @@ private slots:
     void handleTranscriptionStart();
     void handleCancellation();
     void updateSpeakerCountEnabled();
+    void updateMicrophoneUi();
+    void handleMicrophoneSelection(int index);
+    void recordingFinished(const QString &filePath);
+    void recordingFailed(const QString &message);
     void inputFileInspectionSucceeded(const AudioFileMetadata &metadata);
     void inputFileInspectionFailed(const QString &filePath, const QString &message);
     void transcriptionSegmentReceived(double start, double end,
@@ -65,12 +71,14 @@ private:
     void updateUiForState();
 
     Ui::MainWindow *ui;
+    AudioRecorder *m_audioRecorder;
     AudioFileInfo *m_audioFileInfo;
     BackendProcess *m_backendProcess;
     AppState m_state = AppState::Idle;
     QString m_currentInputFile;
     QString m_pendingInputFile;
     qint64 m_inputDurationMilliseconds = -1;
+    qint64 m_recordingDurationMilliseconds = 0;
     bool m_inputInspectionPending = false;
     QString m_stateMessage;
     QVector<TranscriptSegment> m_transcriptSegments;

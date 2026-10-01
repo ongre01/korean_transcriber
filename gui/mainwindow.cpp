@@ -8,6 +8,7 @@
 #include <QStatusBar>
 #include <QStringList>
 #include <QTextCursor>
+#include <QSignalBlocker>
 
 #include <algorithm>
 
@@ -144,6 +145,7 @@ QString formattedTranscriptSegment(const TranscriptSegment &segment)
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
     , ui(new Ui::MainWindow)
+    , m_audioRecorder(new AudioRecorder(this))
     , m_audioFileInfo(new AudioFileInfo(this))
     , m_backendProcess(new BackendProcess(this))
 {
@@ -166,6 +168,35 @@ MainWindow::MainWindow(QWidget *parent)
             this, &MainWindow::handleCancellation);
     connect(ui->diarizationCheckBox, &QCheckBox::toggled,
             this, &MainWindow::updateSpeakerCountEnabled);
+    connect(ui->microphoneComboBox,
+            qOverload<int>(&QComboBox::currentIndexChanged),
+            this, &MainWindow::handleMicrophoneSelection);
+    connect(this, &MainWindow::recordingStartRequested,
+            m_audioRecorder,
+            [this]() {
+                if (m_state == AppState::Recording) {
+                    m_audioRecorder->startRecording();
+                }
+            },
+            Qt::QueuedConnection);
+    connect(this, &MainWindow::recordingStopRequested,
+            m_audioRecorder, &AudioRecorder::stopRecording);
+    connect(m_audioRecorder, &AudioRecorder::inputDevicesChanged,
+            this, &MainWindow::updateMicrophoneUi);
+    connect(m_audioRecorder, &AudioRecorder::recordingTimeChanged,
+            this, [this](qint64 milliseconds) {
+                m_recordingDurationMilliseconds = milliseconds;
+                ui->recordingTimeLabel->setText(formattedDuration(milliseconds));
+            });
+    connect(m_audioRecorder, &AudioRecorder::recordingLevelChanged,
+            this, [this](float level) {
+                ui->inputLevelProgressBar->setValue(
+                    qBound(0, qRound(level * 100.0f), 100));
+            });
+    connect(m_audioRecorder, &AudioRecorder::recordingStopped,
+            this, &MainWindow::recordingFinished);
+    connect(m_audioRecorder, &AudioRecorder::errorOccurred,
+            this, &MainWindow::recordingFailed);
     connect(m_audioFileInfo, &AudioFileInfo::inspectionSucceeded,
             this, &MainWindow::inputFileInspectionSucceeded);
     connect(m_audioFileInfo, &AudioFileInfo::inspectionFailed,
@@ -177,12 +208,16 @@ MainWindow::MainWindow(QWidget *parent)
     connect(m_backendProcess, &BackendProcess::errorOccurred,
             this, &MainWindow::processingFailed);
 
+    updateMicrophoneUi();
     updateInputFileUi();
     updateUiForState();
 }
 
 MainWindow::~MainWindow()
 {
+    if (m_audioRecorder) {
+        m_audioRecorder->stopRecording();
+    }
     delete m_audioFileInfo;
     m_audioFileInfo = nullptr;
     delete ui;
@@ -202,6 +237,11 @@ bool MainWindow::hasValidInput() const
 {
     const QFileInfo inputFile(m_currentInputFile);
     return inputFile.exists() && inputFile.isFile();
+}
+
+AudioRecorder *MainWindow::audioRecorder() const noexcept
+{
+    return m_audioRecorder;
 }
 
 AudioFileInfo *MainWindow::audioFileInfo() const noexcept
@@ -287,6 +327,9 @@ void MainWindow::handleRecordStart()
     }
 
     ui->recordingModeRadioButton->setChecked(true);
+    m_recordingDurationMilliseconds = 0;
+    ui->recordingTimeLabel->setText(formattedDuration(0));
+    ui->inputLevelProgressBar->setValue(0);
     setAppState(AppState::Recording);
     emit recordingStartRequested();
 }
@@ -298,8 +341,14 @@ void MainWindow::handleRecordStop()
         return;
     }
 
-    setAppState(hasValidInput() ? AppState::InputReady : AppState::Idle);
     emit recordingStopRequested();
+    // A real recording finishes synchronously and recordingFinished() or
+    // recordingFailed() chooses the resulting state. A very fast start/stop
+    // can cancel before the queued start runs, in which case no recorder signal
+    // is emitted and the previous input state is restored here.
+    if (m_state == AppState::Recording) {
+        setAppState(hasValidInput() ? AppState::InputReady : AppState::Idle);
+    }
 }
 
 void MainWindow::handleFileSelection()
@@ -375,6 +424,71 @@ void MainWindow::updateSpeakerCountEnabled()
         && m_state != AppState::Processing;
     ui->speakerCountComboBox->setEnabled(
         optionsEnabled && ui->diarizationCheckBox->isChecked());
+}
+
+void MainWindow::updateMicrophoneUi()
+{
+    const QSignalBlocker blocker(ui->microphoneComboBox);
+    ui->microphoneComboBox->clear();
+
+    const QList<AudioInputDevice> devices = m_audioRecorder->inputDevices();
+    if (devices.isEmpty()) {
+        ui->microphoneComboBox->addItem(tr("사용 가능한 마이크 없음"));
+    } else {
+        const QByteArray selectedId = m_audioRecorder->selectedInputDeviceId();
+        int selectedIndex = 0;
+        for (const AudioInputDevice &device : devices) {
+            const QString label = device.isDefault
+                ? tr("%1 (기본)").arg(device.description)
+                : device.description;
+            ui->microphoneComboBox->addItem(label, device.id);
+            if (device.id == selectedId) {
+                selectedIndex = ui->microphoneComboBox->count() - 1;
+            }
+        }
+        ui->microphoneComboBox->setCurrentIndex(selectedIndex);
+    }
+
+    const bool controlsEnabled = m_state != AppState::Recording
+        && m_state != AppState::Processing
+        && !m_inputInspectionPending;
+    ui->microphoneComboBox->setEnabled(controlsEnabled && !devices.isEmpty());
+}
+
+void MainWindow::handleMicrophoneSelection(int index)
+{
+    if (index < 0) {
+        return;
+    }
+    m_audioRecorder->setInputDevice(
+        ui->microphoneComboBox->itemData(index).toByteArray());
+}
+
+void MainWindow::recordingFinished(const QString &filePath)
+{
+    const QFileInfo recordedFile(filePath);
+    if (!recordedFile.exists() || !recordedFile.isFile()) {
+        recordingFailed(tr("녹음 파일이 생성되지 않았습니다."));
+        return;
+    }
+
+    m_audioFileInfo->cancel();
+    m_pendingInputFile.clear();
+    m_inputInspectionPending = false;
+    m_currentInputFile = recordedFile.absoluteFilePath();
+    m_inputDurationMilliseconds = m_recordingDurationMilliseconds;
+    updateInputFileUi();
+    setAppState(AppState::InputReady, tr("녹음 파일 준비 완료"));
+}
+
+void MainWindow::recordingFailed(const QString &message)
+{
+    ui->inputLevelProgressBar->setValue(0);
+    if (m_state == AppState::Recording) {
+        setAppState(AppState::Error, message);
+    } else {
+        statusBar()->showMessage(message);
+    }
 }
 
 void MainWindow::inputFileInspectionSucceeded(const AudioFileMetadata &metadata)
@@ -507,7 +621,8 @@ void MainWindow::updateUiForState()
 
     ui->recordingModeRadioButton->setEnabled(controlsEnabled);
     ui->fileModeRadioButton->setEnabled(controlsEnabled);
-    ui->microphoneComboBox->setEnabled(controlsEnabled);
+    ui->microphoneComboBox->setEnabled(
+        controlsEnabled && !m_audioRecorder->inputDevices().isEmpty());
     ui->diarizationCheckBox->setEnabled(controlsEnabled);
     ui->deviceComboBox->setEnabled(controlsEnabled);
     updateSpeakerCountEnabled();
