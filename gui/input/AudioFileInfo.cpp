@@ -20,7 +20,32 @@ namespace {
 QString defaultPythonProgram()
 {
     const QString configured = QString::fromLocal8Bit(qgetenv("PYTHON")).trimmed();
-    return configured.isEmpty() ? QStringLiteral("python") : configured;
+    if (!configured.isEmpty()) {
+        return configured;
+    }
+
+    QStringList candidates;
+    candidates << QDir::current().absoluteFilePath(
+        QStringLiteral("engine/.venv/Scripts/python.exe"));
+
+    QDir applicationDirectory(QCoreApplication::applicationDirPath());
+    for (int depth = 0; depth < 6; ++depth) {
+        candidates << applicationDirectory.absoluteFilePath(
+            QStringLiteral("engine/.venv/Scripts/python.exe"));
+        if (!applicationDirectory.cdUp()) {
+            break;
+        }
+    }
+
+    for (const QString &candidate : candidates) {
+        const QFileInfo python(candidate);
+        if (python.isFile()) {
+            const QString canonicalPath = python.canonicalFilePath();
+            return canonicalPath.isEmpty() ? python.absoluteFilePath() : canonicalPath;
+        }
+    }
+
+    return QStringLiteral("python");
 }
 
 QString defaultProbeScript()
