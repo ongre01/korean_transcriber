@@ -322,7 +322,11 @@ MainWindow::MainWindow(QWidget *parent)
     connect(m_backendProcess, &BackendProcess::warningOccurred, this,
             [this](const QString &message) {
                 logInfo(tr("Backend Warning"), message);
-                ui->initialPromptStatusLabel->setText(message);
+                if (message.contains(QStringLiteral("핫워드"))) {
+                    ui->hotwordsStatusLabel->setText(message);
+                } else {
+                    ui->initialPromptStatusLabel->setText(message);
+                }
                 statusBar()->showMessage(message);
             });
     connect(m_backendProcess, &BackendProcess::errorOccurred,

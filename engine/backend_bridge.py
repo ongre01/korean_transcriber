@@ -215,6 +215,12 @@ def resolve_device(engine, requested: str) -> str:
     raise RuntimeError(f"No supported OpenVINO device was found. Devices: {devices}")
 
 
+def npu_hotwords_need_word_timestamps(selected_device: str, hotwords: str) -> bool:
+    """Return whether the NPU pipeline needs prompt-token decoder capacity."""
+
+    return bool(hotwords.strip()) and _matches_device(selected_device, "NPU")
+
+
 def _emit_transcription_progress(
     writer: EventWriter,
     processed: float,
@@ -284,6 +290,12 @@ def run_bridge(
             Path(args.initial_prompt_file).expanduser().resolve()
         ),
     )
+    npu_hotwords = npu_hotwords_need_word_timestamps(device, hotwords)
+    if npu_hotwords:
+        writer.warning(
+            "핫워드를 적용하기 위해 NPU 단어 타임스탬프 모드를 사용합니다. "
+            "최초 모델 준비 시간이 길어질 수 있습니다."
+        )
 
     writer.state("decoding_audio")
     writer.progress(None)
@@ -297,7 +309,12 @@ def run_bridge(
     writer.progress(None)
     pipe = _call(
         "Whisper model could not be loaded",
-        lambda: engine.load_whisper_pipeline(model_dir, device, args.model_label),
+        lambda: engine.load_whisper_pipeline(
+            model_dir,
+            device,
+            args.model_label,
+            word_timestamps=npu_hotwords,
+        ),
     )
     initial_prompt_plan = _call(
         "Initial prompt validation failed",
@@ -312,6 +329,7 @@ def run_bridge(
             args.language,
             args.beams,
             hotwords,
+            word_timestamps=npu_hotwords,
         ),
     )
 

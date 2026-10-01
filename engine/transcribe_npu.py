@@ -368,7 +368,13 @@ def save_outputs(
     return txt_path, srt_path
 
 
-def load_whisper_pipeline(model_dir: Path, device: str, model_label: str = ''):
+def load_whisper_pipeline(
+    model_dir: Path,
+    device: str,
+    model_label: str = '',
+    *,
+    word_timestamps: bool = False,
+):
     import openvino_genai as ov_genai
 
     pipeline_options = {}
@@ -378,10 +384,21 @@ def load_whisper_pipeline(model_dir: Path, device: str, model_label: str = ''):
         cache_dir = APP_DIR / f'.ov_cache_{safe_label}_{safe_device}'
         cache_dir.mkdir(parents=True, exist_ok=True)
         pipeline_options['CACHE_DIR'] = str(cache_dir)
+    if word_timestamps:
+        # On the NPU stateful Whisper pipeline this compiles the decoder with
+        # room for hotword/initial-prompt tokens.
+        pipeline_options['word_timestamps'] = True
     return ov_genai.WhisperPipeline(str(model_dir), device, **pipeline_options)
 
 
-def configure_generation(pipe, language: str, beams: int, hotwords: str):
+def configure_generation(
+    pipe,
+    language: str,
+    beams: int,
+    hotwords: str,
+    *,
+    word_timestamps: bool = False,
+):
     config = pipe.get_generation_config()
     config.language = language
     config.task = 'transcribe'
@@ -392,6 +409,8 @@ def configure_generation(pipe, language: str, beams: int, hotwords: str):
     config.do_sample = False
     if hotwords:
         config.hotwords = hotwords
+    if word_timestamps:
+        config.word_timestamps = True
     # Do not touch ``initial_prompt`` until the OpenVINO Whisper implementation
     # can handle it without the reproducible tensor-range inference failure.
     # Assigning even an empty value activates the faulty runtime path.

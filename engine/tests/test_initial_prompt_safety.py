@@ -57,13 +57,21 @@ class InitialPromptSafetyTests(unittest.TestCase):
         self.assertEqual(plan.maximum_token_count, 384)
         self.assertIn("허용 길이를 초과", plan.warning)
 
-    def test_generation_config_does_not_assign_initial_prompt(self) -> None:
+    def test_generation_config_assigns_hotwords_but_not_initial_prompt(self) -> None:
         pipe = FakePipe()
 
-        config = engine.configure_generation(pipe, "<|ko|>", 1, "")
+        config = engine.configure_generation(
+            pipe,
+            "<|ko|>",
+            1,
+            "회의 용어",
+            word_timestamps=True,
+        )
 
         self.assertIs(config, pipe.config)
         self.assertFalse(hasattr(config, "initial_prompt"))
+        self.assertEqual(config.hotwords, "회의 용어")
+        self.assertTrue(config.word_timestamps)
 
 
 if __name__ == "__main__":

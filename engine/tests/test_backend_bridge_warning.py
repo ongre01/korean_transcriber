@@ -13,7 +13,7 @@ ENGINE_DIR = Path(__file__).resolve().parents[1]
 if str(ENGINE_DIR) not in sys.path:
     sys.path.insert(0, str(ENGINE_DIR))
 
-from backend_bridge import EventWriter, run_bridge
+from backend_bridge import EventWriter, npu_hotwords_need_word_timestamps, run_bridge
 from backend_protocol import WarningEvent, parse_event_line
 
 
@@ -22,6 +22,7 @@ class FakeEngine:
 
     def __init__(self) -> None:
         self.configure_arguments = None
+        self.pipeline_arguments = None
 
     def available_devices(self):
         return ["NPU"]
@@ -31,19 +32,24 @@ class FakeEngine:
         return self.available_devices()
 
     def read_optional_text(self, path: Path) -> str:
-        return "회의 용어" if path.name == "initial_prompt.txt" else ""
+        if path.name == "initial_prompt.txt":
+            return "회의 용어"
+        if path.name == "hotwords.txt":
+            return "핫워드"
+        return ""
 
     def decode_audio_16k_mono(self, _input_path: Path):
         return [0.0] * self.TARGET_SAMPLE_RATE
 
-    def load_whisper_pipeline(self, _model_dir: Path, _device: str, _label: str):
+    def load_whisper_pipeline(self, *arguments, **keyword_arguments):
+        self.pipeline_arguments = (arguments, keyword_arguments)
         return object()
 
     def prepare_initial_prompt(self, _pipe, _prompt: str):
         return SimpleNamespace(warning="초기 프롬프트를 안전하게 제외했습니다.")
 
-    def configure_generation(self, *arguments):
-        self.configure_arguments = arguments
+    def configure_generation(self, *arguments, **keyword_arguments):
+        self.configure_arguments = (arguments, keyword_arguments)
         return object()
 
     def transcribe_windows(self, _pipe, _config, _audio, duration, _window, _overlap,
@@ -69,7 +75,12 @@ class FakeEngine:
 
 
 class BackendBridgeWarningTests(unittest.TestCase):
-    def test_bridge_emits_warning_and_continues_without_initial_prompt_argument(self) -> None:
+    def test_npu_hotword_mode_is_limited_to_nonempty_hotwords_on_npu(self) -> None:
+        self.assertTrue(npu_hotwords_need_word_timestamps("NPU", "회의 용어"))
+        self.assertFalse(npu_hotwords_need_word_timestamps("NPU", "   "))
+        self.assertFalse(npu_hotwords_need_word_timestamps("CPU", "회의 용어"))
+
+    def test_bridge_enables_npu_word_timestamps_for_hotwords_and_emits_warning(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             input_path = root / "input.wav"
@@ -107,8 +118,13 @@ class BackendBridgeWarningTests(unittest.TestCase):
 
         events = [parse_event_line(line) for line in output.getvalue().splitlines()]
         self.assertEqual(exit_code, 0)
-        self.assertTrue(any(isinstance(event, WarningEvent) for event in events))
-        self.assertEqual(len(engine.configure_arguments), 4)
+        warnings = [event for event in events if isinstance(event, WarningEvent)]
+        self.assertEqual(len(warnings), 2)
+        self.assertEqual(engine.pipeline_arguments[0][1], "NPU")
+        self.assertTrue(engine.pipeline_arguments[1]["word_timestamps"])
+        self.assertEqual(len(engine.configure_arguments[0]), 4)
+        self.assertEqual(engine.configure_arguments[0][3], "핫워드")
+        self.assertTrue(engine.configure_arguments[1]["word_timestamps"])
 
 
 if __name__ == "__main__":
