@@ -21,12 +21,14 @@ greaterThan(QT_MAJOR_VERSION, 5) {
 
 SOURCES += \
     main.cpp \
-    mainwindow.cpp
+    mainwindow.cpp \
+    backend/BackendProcess.cpp
 
 HEADERS += \
     mainwindow.h \
     app/AppState.h \
     backend/BackendEvent.h \
+    backend/BackendProcess.h \
     backend/TranscriptSegment.h \
     backend/TranscribeOptions.h
 
