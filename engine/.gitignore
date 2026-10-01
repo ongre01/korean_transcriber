@@ -1,0 +1,65 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Packaging and build output
+build/
+dist/
+*.egg-info/
+
+# Downloaded OpenVINO models and compilation caches
+/models/*
+!/models/README.txt
+/.ov_cache_*/
+
+# Local audio and video inputs
+*.wav
+*.mp3
+*.m4a
+*.aac
+*.flac
+*.ogg
+*.opus
+*.mp4
+*.mov
+*.mkv
+*.webm
+
+# Generated transcripts
+*_int8.txt
+*_int8.srt
+*_fp16.txt
+*_fp16.srt
+*_fp16_compat.txt
+*_fp16_compat.srt
+
+# Logs and temporary files
+*.log
+*.tmp
+*.temp
+~$*
+
+# Local environment files
+.env
+.env.*
+!.env.example
+
+# Editor and operating-system files
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+Desktop.ini

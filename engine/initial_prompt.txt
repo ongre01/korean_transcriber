@@ -1,0 +1,3 @@
+# Optional context prompt. Lines beginning with # are ignored.
+# Example:
+# This meeting discusses CANoe, CAPL, UDS and AUTOSAR.
