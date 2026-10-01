@@ -8,11 +8,13 @@ INCLUDEPATH += ..
 
 SOURCES += \
     tst_mainwindow.cpp \
-    ../mainwindow.cpp
+    ../mainwindow.cpp \
+    ../input/AudioFileInfo.cpp
 
 HEADERS += \
     ../mainwindow.h \
-    ../app/AppState.h
+    ../app/AppState.h \
+    ../input/AudioFileInfo.h
 
 FORMS += \
     ../mainwindow.ui

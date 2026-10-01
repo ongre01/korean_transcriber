@@ -2,7 +2,10 @@
 #include "mainwindow.h"
 
 #include <QPushButton>
+#include <QLabel>
+#include <QFile>
 #include <QSignalSpy>
+#include <QTemporaryDir>
 #include <QTemporaryFile>
 #include <QTest>
 
@@ -17,7 +20,37 @@ private slots:
     void normalTransitionAndDuplicateClickGuard();
     void errorAllowsRetry();
     void recordingClickGuard();
+    void selectedFileMetadataIsDisplayed();
+    void cancelledSelectionKeepsCurrentInput();
+    void decodeFailureKeepsPreviousInput();
+    void newerSelectionWins();
 };
+
+namespace {
+QString pythonProgram()
+{
+    const QString configured = QString::fromLocal8Bit(qgetenv("PYTHON")).trimmed();
+    return configured.isEmpty() ? QStringLiteral("python") : configured;
+}
+
+QString createAudioFixture(const QTemporaryDir &directory, const QString &name)
+{
+    const QString path = directory.filePath(name);
+    QFile file(path);
+    if (!file.open(QIODevice::WriteOnly) || file.write("fixture") < 0) {
+        return QString();
+    }
+    file.close();
+    return path;
+}
+
+void configureMetadataMock(MainWindow &window)
+{
+    window.audioFileInfo()->setPythonProgram(pythonProgram());
+    window.audioFileInfo()->setProbeScript(
+        QFINDTESTDATA("fixtures/mock_audio_metadata.py"));
+}
+} // namespace
 
 void MainWindowTest::initTestCase()
 {
@@ -161,6 +194,103 @@ void MainWindowTest::recordingClickGuard()
 
     stopButton->click();
     QCOMPARE(window.appState(), AppState::Idle);
+}
+
+void MainWindowTest::selectedFileMetadataIsDisplayed()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString inputPath = createAudioFixture(
+        directory, QStringLiteral("회의 자료 01.wav"));
+    QVERIFY(!inputPath.isEmpty());
+
+    MainWindow window;
+    configureMetadataMock(window);
+    auto *transcribeButton = window.findChild<QPushButton *>("transcribeButton");
+    auto *recordButton = window.findChild<QPushButton *>("recordStartButton");
+    auto *fileButton = window.findChild<QPushButton *>("fileSelectButton");
+    auto *nameLabel = window.findChild<QLabel *>("fileNameValueLabel");
+    auto *pathLabel = window.findChild<QLabel *>("filePathValueLabel");
+    auto *durationLabel = window.findChild<QLabel *>("fileDurationValueLabel");
+    auto *sizeLabel = window.findChild<QLabel *>("fileSizeValueLabel");
+    QVERIFY(transcribeButton);
+    QVERIFY(recordButton);
+    QVERIFY(fileButton);
+    QVERIFY(nameLabel);
+    QVERIFY(pathLabel);
+    QVERIFY(durationLabel);
+    QVERIFY(sizeLabel);
+
+    window.selectInputFile(inputPath);
+    QVERIFY(!transcribeButton->isEnabled());
+    QVERIFY(!recordButton->isEnabled());
+    QVERIFY(fileButton->isEnabled());
+    QCOMPARE(durationLabel->text(), QStringLiteral("확인 중..."));
+
+    QTRY_COMPARE_WITH_TIMEOUT(window.appState(), AppState::InputReady, 5000);
+    QCOMPARE(QFileInfo(window.currentInputFile()).canonicalFilePath(),
+             QFileInfo(inputPath).canonicalFilePath());
+    QCOMPARE(nameLabel->text(), QStringLiteral("회의 자료 01.wav"));
+    QCOMPARE(pathLabel->text(), QFileInfo(inputPath).absoluteFilePath());
+    QCOMPARE(durationLabel->text(), QStringLiteral("00:01:05"));
+    QCOMPARE(sizeLabel->text(), QStringLiteral("7 bytes"));
+    QVERIFY(transcribeButton->isEnabled());
+}
+
+void MainWindowTest::cancelledSelectionKeepsCurrentInput()
+{
+    QTemporaryFile currentFile;
+    QVERIFY(currentFile.open());
+
+    MainWindow window;
+    window.setCurrentInputFile(currentFile.fileName());
+    const QString before = window.currentInputFile();
+    window.selectInputFile(QString());
+
+    QCOMPARE(window.currentInputFile(), before);
+    QCOMPARE(window.appState(), AppState::InputReady);
+}
+
+void MainWindowTest::decodeFailureKeepsPreviousInput()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString currentPath = createAudioFixture(directory, QStringLiteral("current.wav"));
+    const QString corruptPath = createAudioFixture(directory, QStringLiteral("corrupt.wav"));
+
+    MainWindow window;
+    configureMetadataMock(window);
+    window.setCurrentInputFile(currentPath);
+    QSignalSpy errorSpy(&window, &MainWindow::inputFileErrorOccurred);
+
+    window.selectInputFile(corruptPath);
+    QTRY_COMPARE_WITH_TIMEOUT(window.appState(), AppState::Error, 5000);
+    QCOMPARE(errorSpy.count(), 1);
+    QCOMPARE(QFileInfo(window.currentInputFile()).canonicalFilePath(),
+             QFileInfo(currentPath).canonicalFilePath());
+    auto *transcribeButton = window.findChild<QPushButton *>("transcribeButton");
+    QVERIFY(transcribeButton);
+    QVERIFY(transcribeButton->isEnabled());
+}
+
+void MainWindowTest::newerSelectionWins()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString slowPath = createAudioFixture(directory, QStringLiteral("slow.wav"));
+    const QString latestPath = createAudioFixture(directory, QStringLiteral("최신 파일.mp3"));
+
+    MainWindow window;
+    configureMetadataMock(window);
+    window.selectInputFile(slowPath);
+    window.selectInputFile(latestPath);
+
+    QTRY_COMPARE_WITH_TIMEOUT(window.appState(), AppState::InputReady, 5000);
+    QCOMPARE(QFileInfo(window.currentInputFile()).canonicalFilePath(),
+             QFileInfo(latestPath).canonicalFilePath());
+    QTest::qWait(800);
+    QCOMPARE(QFileInfo(window.currentInputFile()).canonicalFilePath(),
+             QFileInfo(latestPath).canonicalFilePath());
 }
 
 QTEST_MAIN(MainWindowTest)

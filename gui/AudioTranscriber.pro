@@ -22,7 +22,8 @@ greaterThan(QT_MAJOR_VERSION, 5) {
 SOURCES += \
     main.cpp \
     mainwindow.cpp \
-    backend/BackendProcess.cpp
+    backend/BackendProcess.cpp \
+    input/AudioFileInfo.cpp
 
 HEADERS += \
     mainwindow.h \
@@ -30,10 +31,14 @@ HEADERS += \
     backend/BackendEvent.h \
     backend/BackendProcess.h \
     backend/TranscriptSegment.h \
-    backend/TranscribeOptions.h
+    backend/TranscribeOptions.h \
+    input/AudioFileInfo.h
 
 FORMS += \
     mainwindow.ui
+
+RESOURCES += \
+    resources/resources.qrc
 
 # Default rules for deployment.
 qnx: target.path = /tmp/$${TARGET}/bin
