@@ -5,6 +5,7 @@
 #include <QStringList>
 
 #include <optional>
+#include <cmath>
 
 enum class BackendDevice
 {
@@ -53,6 +54,8 @@ struct TranscribeOptions
     BackendDevice diarizationDevice = BackendDevice::Npu;
     bool diarizationFallbackToCpu = true;
     double speakerThreshold = 0.5;
+    double minimumSpeechDuration = 0.3;
+    double minimumSilenceDuration = 0.5;
 
     bool isValid(QString *errorMessage = nullptr) const
     {
@@ -72,21 +75,29 @@ struct TranscribeOptions
         if (beams < 1) {
             return fail(QStringLiteral("beams must be at least 1"));
         }
-        if (windowSeconds < 30.0) {
-            return fail(QStringLiteral("windowSeconds must be at least 30"));
+        if (!std::isfinite(windowSeconds) || windowSeconds < 30.0) {
+            return fail(QStringLiteral("windowSeconds must be finite and at least 30"));
         }
-        if (overlapSeconds < 0.0 || overlapSeconds >= windowSeconds / 2.0) {
+        if (!std::isfinite(overlapSeconds) || overlapSeconds < 0.0
+            || overlapSeconds >= windowSeconds / 2.0) {
             return fail(QStringLiteral("overlapSeconds is outside the supported range"));
         }
         if (speakerCount && *speakerCount != 2 && *speakerCount != 3
                 && *speakerCount != 4 && *speakerCount != 5) {
             return fail(QStringLiteral("speakerCount must be Auto, 2, 3, 4, or 5"));
         }
-        if (speakerThreshold <= 0.0 || speakerThreshold > 1.0) {
-            return fail(QStringLiteral("speakerThreshold must be in (0, 1]"));
-        }
-        if (diarizationDevice == BackendDevice::Auto) {
-            return fail(QStringLiteral("diarizationDevice must be NPU, CPU, or GPU"));
+        if (diarizationEnabled) {
+            if (!std::isfinite(speakerThreshold) || speakerThreshold <= 0.0
+                || speakerThreshold > 1.0) {
+                return fail(QStringLiteral("speakerThreshold must be in (0, 1]"));
+            }
+            if (!std::isfinite(minimumSpeechDuration) || minimumSpeechDuration < 0.0
+                || !std::isfinite(minimumSilenceDuration) || minimumSilenceDuration < 0.0) {
+                return fail(QStringLiteral("minimum speaker durations must be finite and non-negative"));
+            }
+            if (diarizationDevice == BackendDevice::Auto) {
+                return fail(QStringLiteral("diarizationDevice must be NPU, CPU, or GPU"));
+            }
         }
         if (errorMessage) {
             errorMessage->clear();
@@ -128,6 +139,10 @@ struct TranscribeOptions
                       << (speakerCount ? QString::number(*speakerCount) : QStringLiteral("auto"))
                       << QStringLiteral("--speaker-threshold")
                       << QString::number(speakerThreshold, 'g', 15)
+                      << QStringLiteral("--diarization-min-duration-on")
+                      << QString::number(minimumSpeechDuration, 'g', 15)
+                      << QStringLiteral("--diarization-min-duration-off")
+                      << QString::number(minimumSilenceDuration, 'g', 15)
                       << QStringLiteral("--diarization-device")
                       << backendDeviceArgument(diarizationDevice);
             if (!diarizationSegmentationModel.isEmpty()) {

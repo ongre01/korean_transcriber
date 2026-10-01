@@ -1,6 +1,8 @@
 #include "mainwindow.h"
+#include "settings/SettingsDialog.h"
 #include "ui_mainwindow.h"
 
+#include <QAction>
 #include <QCoreApplication>
 #include <QCloseEvent>
 #include <QDesktopServices>
@@ -8,6 +10,8 @@
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QMessageBox>
+#include <QMenu>
+#include <QMenuBar>
 #include <QSaveFile>
 #include <QStatusBar>
 #include <QStringList>
@@ -184,10 +188,19 @@ MainWindow::MainWindow(QWidget *parent)
 {
     ui->setupUi(this);
 
+    m_settings = Settings::load();
+    if (m_settings.pythonPath.isEmpty()) {
+        m_settings.pythonPath = m_audioFileInfo->pythonProgram();
+    }
+    if (m_settings.whisperModelDirectory.isEmpty()) {
+        m_settings.whisperModelDirectory = engineAssetPath(
+            QStringLiteral("models/whisper-large-v3-turbo-int8"));
+    }
+
     const QString bridgeScript = engineAssetPath(QStringLiteral("backend_bridge.py"));
-    m_backendProcess->setPythonProgram(m_audioFileInfo->pythonProgram());
     m_backendProcess->setBridgeScript(bridgeScript);
     m_backendProcess->setWorkingDirectory(QFileInfo(bridgeScript).absolutePath());
+    applySettingsToUi();
 
     connect(ui->recordStartButton, &QPushButton::clicked,
             this, &MainWindow::handleRecordStart);
@@ -205,6 +218,12 @@ MainWindow::MainWindow(QWidget *parent)
             this, &MainWindow::handleOpenResultFolder);
     connect(ui->diarizationCheckBox, &QCheckBox::toggled,
             this, &MainWindow::updateSpeakerCountEnabled);
+    connect(ui->diarizationCheckBox, &QCheckBox::toggled, this,
+            [this](bool) { saveSettings(); });
+    connect(ui->speakerCountComboBox, &QComboBox::currentTextChanged, this,
+            [this](const QString &) { saveSettings(); });
+    connect(ui->deviceComboBox, &QComboBox::currentTextChanged, this,
+            [this](const QString &) { saveSettings(); });
     connect(ui->microphoneComboBox,
             qOverload<int>(&QComboBox::currentIndexChanged),
             this, &MainWindow::handleMicrophoneSelection);
@@ -249,6 +268,10 @@ MainWindow::MainWindow(QWidget *parent)
     connect(m_backendProcess, &BackendProcess::errorOccurred,
             this, &MainWindow::processingFailed);
 
+    QMenu *settingsMenu = menuBar()->addMenu(tr("설정"));
+    m_settingsAction = settingsMenu->addAction(tr("설정..."));
+    connect(m_settingsAction, &QAction::triggered, this, &MainWindow::handleSettings);
+
     updateMicrophoneUi();
     updateInputFileUi();
     updateResultOutputUi();
@@ -257,6 +280,7 @@ MainWindow::MainWindow(QWidget *parent)
 
 MainWindow::~MainWindow()
 {
+    saveSettings();
     if (m_audioRecorder) {
         m_audioRecorder->stopRecording();
     }
@@ -424,10 +448,10 @@ void MainWindow::handleFileSelection()
 
     emit inputFileSelectionRequested();
 
-    QString initialDirectory;
+    QString initialDirectory = m_settings.lastInputDirectory;
     if (hasValidInput()) {
         initialDirectory = QFileInfo(m_currentInputFile).absolutePath();
-    } else {
+    } else if (initialDirectory.isEmpty() || !QFileInfo(initialDirectory).isDir()) {
         initialDirectory = QDir::homePath();
     }
 
@@ -437,6 +461,8 @@ void MainWindow::handleFileSelection()
         initialDirectory,
         AudioFileInfo::fileDialogFilter());
     if (!selectedFile.isEmpty()) {
+        m_settings.lastInputDirectory = QFileInfo(selectedFile).absolutePath();
+        saveSettings();
         selectInputFile(selectedFile);
     }
 }
@@ -459,12 +485,28 @@ void MainWindow::handleTranscriptionStart()
         return;
     }
 
+    const bool diarizationEnabled = ui->diarizationCheckBox->isChecked();
+    if (!validateSettingsForRun(diarizationEnabled)) {
+        return;
+    }
+
     TranscribeOptions options;
     options.inputFile = m_currentInputFile;
     options.device = backendDevice(ui->deviceComboBox->currentText());
-    options.modelDirectory = engineAssetPath(
-        QStringLiteral("models/whisper-large-v3-turbo-int8"));
-    options.diarizationEnabled = ui->diarizationCheckBox->isChecked();
+    options.outputDirectory = m_settings.outputDirectory;
+    options.modelDirectory = m_settings.whisperModelDirectory;
+    options.windowSeconds = m_settings.windowSeconds;
+    options.overlapSeconds = m_settings.overlapSeconds;
+    options.hotwordsFile = m_settings.hotwordsFile;
+    options.initialPromptFile = m_settings.initialPromptFile;
+    options.diarizationEnabled = diarizationEnabled;
+    options.speakerThreshold = m_settings.speakerThreshold;
+    options.minimumSpeechDuration = m_settings.minimumSpeechDuration;
+    options.minimumSilenceDuration = m_settings.minimumSilenceDuration;
+    options.diarizationSegmentationModel = m_settings.diarizationSegmentationModel;
+    options.diarizationEmbeddingModel = m_settings.diarizationEmbeddingModel;
+    options.diarizationDevice = backendDevice(m_settings.diarizationDevice);
+    options.diarizationFallbackToCpu = m_settings.diarizationFallbackToCpu;
     if (options.diarizationEnabled) {
         const QString speakerCount = ui->speakerCountComboBox->currentText().trimmed();
         if (speakerCount.compare(QStringLiteral("Auto"), Qt::CaseInsensitive) != 0) {
@@ -477,6 +519,14 @@ void MainWindow::handleTranscriptionStart()
             }
             options.speakerCount = value;
         }
+    }
+
+    QString optionsError;
+    if (!options.isValid(&optionsError)) {
+        const QString message = tr("전사 설정이 올바르지 않습니다: %1").arg(optionsError);
+        QMessageBox::warning(this, tr("설정 확인"), message);
+        statusBar()->showMessage(message);
+        return;
     }
 
     m_diarizationEnabledForRun = options.diarizationEnabled;
@@ -567,6 +617,8 @@ void MainWindow::handleResultSave()
     }
 
     m_resultOutputFile = QFileInfo(targetFile.absoluteFilePath()).absoluteFilePath();
+    m_settings.outputDirectory = targetFile.absolutePath();
+    saveSettings();
     updateResultOutputUi();
     updateUiForState();
     statusBar()->showMessage(
@@ -592,6 +644,25 @@ void MainWindow::handleOpenResultFolder()
             tr("결과 폴더를 열 수 없습니다: %1")
                 .arg(QDir::toNativeSeparators(resultFile.absolutePath())));
     }
+}
+
+void MainWindow::handleSettings()
+{
+    if (m_state == AppState::Recording || m_state == AppState::Processing) {
+        return;
+    }
+
+    SettingsDialog dialog(m_settings, this);
+    if (dialog.exec() != QDialog::Accepted) {
+        return;
+    }
+
+    m_settings = dialog.settings();
+    applySettingsToUi();
+    saveSettings();
+    const QString message = tr("설정을 저장했습니다.");
+    m_stateMessage = message;
+    updateUiForState();
 }
 
 void MainWindow::updateSpeakerCountEnabled()
@@ -636,8 +707,10 @@ void MainWindow::handleMicrophoneSelection(int index)
     if (index < 0) {
         return;
     }
-    m_audioRecorder->setInputDevice(
-        ui->microphoneComboBox->itemData(index).toByteArray());
+    if (m_audioRecorder->setInputDevice(
+            ui->microphoneComboBox->itemData(index).toByteArray())) {
+        saveSettings();
+    }
 }
 
 void MainWindow::recordingTimeChanged(qint64 milliseconds)
@@ -678,6 +751,8 @@ void MainWindow::recordingFinished(const QString &filePath)
     m_inputInspectionPending = false;
     m_currentInputFile = recordedFile.absoluteFilePath();
     m_inputDurationMilliseconds = m_recordingDurationMilliseconds;
+    m_settings.lastInputDirectory = recordedFile.absolutePath();
+    saveSettings();
     updateInputFileUi();
     setAppState(AppState::InputReady, tr("녹음 파일 준비 완료"));
 }
@@ -701,6 +776,8 @@ void MainWindow::inputFileInspectionSucceeded(const AudioFileMetadata &metadata)
 
     m_currentInputFile = metadata.filePath;
     m_inputDurationMilliseconds = metadata.durationMilliseconds;
+    m_settings.lastInputDirectory = QFileInfo(metadata.filePath).absolutePath();
+    saveSettings();
     m_pendingInputFile.clear();
     m_inputInspectionPending = false;
     updateInputFileUi();
@@ -877,6 +954,66 @@ void MainWindow::showResultError(const QString &message)
     statusBar()->showMessage(tr("결과 저장 오류: %1").arg(message));
 }
 
+void MainWindow::applySettingsToUi()
+{
+    m_audioFileInfo->setPythonProgram(m_settings.pythonPath);
+    m_backendProcess->setPythonProgram(m_settings.pythonPath);
+
+    const QSignalBlocker deviceBlocker(ui->deviceComboBox);
+    const int deviceIndex = ui->deviceComboBox->findText(
+        m_settings.selectedDevice, Qt::MatchFixedString);
+    ui->deviceComboBox->setCurrentIndex(deviceIndex >= 0 ? deviceIndex : 0);
+
+    const QSignalBlocker diarizationBlocker(ui->diarizationCheckBox);
+    ui->diarizationCheckBox->setChecked(m_settings.diarizationEnabled);
+    const QSignalBlocker speakerCountBlocker(ui->speakerCountComboBox);
+    const int speakerCountIndex = ui->speakerCountComboBox->findText(
+        m_settings.speakerCount, Qt::MatchFixedString);
+    ui->speakerCountComboBox->setCurrentIndex(speakerCountIndex >= 0 ? speakerCountIndex : 0);
+
+    if (!m_settings.selectedMicrophoneId.isEmpty()
+        && !m_audioRecorder->setInputDevice(m_settings.selectedMicrophoneId)) {
+        m_stateMessage = tr("저장된 마이크를 찾을 수 없습니다. 현재 사용 가능한 마이크를 다시 선택하세요.");
+    }
+    updateSpeakerCountEnabled();
+}
+
+void MainWindow::saveSettings()
+{
+    if (!ui || !m_audioRecorder) {
+        return;
+    }
+
+    m_settings.selectedMicrophoneId = m_audioRecorder->selectedInputDeviceId();
+    m_settings.selectedDevice = ui->deviceComboBox->currentText();
+    m_settings.diarizationEnabled = ui->diarizationCheckBox->isChecked();
+    m_settings.speakerCount = ui->speakerCountComboBox->currentText();
+    m_settings.save();
+}
+
+bool MainWindow::validateSettingsForRun(bool diarizationEnabled)
+{
+    QString errorMessage;
+    if (!m_settings.validateForRun(diarizationEnabled, &errorMessage)) {
+        const QString message = tr("전사를 시작할 수 없습니다.\n%1\n\n설정 메뉴에서 값을 확인하세요.")
+                                    .arg(errorMessage);
+        QMessageBox::warning(this, tr("설정 확인"), message);
+        statusBar()->showMessage(errorMessage);
+        return false;
+    }
+
+    const QString outputDirectory = QFileInfo(m_settings.outputDirectory).absoluteFilePath();
+    if (!QDir().mkpath(outputDirectory) || !QFileInfo(outputDirectory).isDir()) {
+        const QString message = tr("결과 출력 폴더를 만들 수 없습니다: %1\n\n설정 메뉴에서 다른 폴더를 선택하세요.")
+                                    .arg(QDir::toNativeSeparators(outputDirectory));
+        QMessageBox::warning(this, tr("설정 확인"), message);
+        statusBar()->showMessage(message);
+        return false;
+    }
+    m_settings.outputDirectory = outputDirectory;
+    return true;
+}
+
 void MainWindow::updateUiForState()
 {
     const bool hasInput = hasValidInput() && !m_inputInspectionPending;
@@ -898,6 +1035,9 @@ void MainWindow::updateUiForState()
         controlsEnabled && !m_audioRecorder->inputDevices().isEmpty());
     ui->diarizationCheckBox->setEnabled(controlsEnabled);
     ui->deviceComboBox->setEnabled(controlsEnabled);
+    if (m_settingsAction) {
+        m_settingsAction->setEnabled(controlsEnabled);
+    }
     updateSpeakerCountEnabled();
 
     const bool resultAvailable = m_state == AppState::Completed && hasAvailableResult();
@@ -940,5 +1080,6 @@ void MainWindow::closeEvent(QCloseEvent *event)
     if (m_audioRecorder) {
         m_audioRecorder->stopRecording();
     }
+    saveSettings();
     QMainWindow::closeEvent(event);
 }

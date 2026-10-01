@@ -25,7 +25,9 @@ SOURCES += \
     audio/AudioRecorder.cpp \
     audio/WavWriter.cpp \
     backend/BackendProcess.cpp \
-    input/AudioFileInfo.cpp
+    input/AudioFileInfo.cpp \
+    settings/Settings.cpp \
+    settings/SettingsDialog.cpp
 
 HEADERS += \
     mainwindow.h \
@@ -36,7 +38,9 @@ HEADERS += \
     backend/BackendProcess.h \
     backend/TranscriptSegment.h \
     backend/TranscribeOptions.h \
-    input/AudioFileInfo.h
+    input/AudioFileInfo.h \
+    settings/Settings.h \
+    settings/SettingsDialog.h
 
 FORMS += \
     mainwindow.ui

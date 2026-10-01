@@ -134,6 +134,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--diarization", action="store_true")
     parser.add_argument("--num-speakers", type=_speaker_count, default=-1)
     parser.add_argument("--speaker-threshold", type=float, default=0.5)
+    parser.add_argument("--diarization-min-duration-on", type=float, default=0.3)
+    parser.add_argument("--diarization-min-duration-off", type=float, default=0.5)
     parser.add_argument(
         "--diarization-segmentation-model",
         default=str(DEFAULT_SEGMENTATION_MODEL),
@@ -170,6 +172,12 @@ def parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
         or not 0.0 < args.speaker_threshold <= 1.0
     ):
         raise BridgeArgumentError("--speaker-threshold must be in (0, 1]")
+    for option, value in (
+        ("--diarization-min-duration-on", args.diarization_min_duration_on),
+        ("--diarization-min-duration-off", args.diarization_min_duration_off),
+    ):
+        if not math.isfinite(value) or value < 0.0:
+            raise BridgeArgumentError(f"{option} must be a finite number at least 0")
     return args
 
 
@@ -340,6 +348,8 @@ def run_bridge(
                 Path(args.diarization_embedding_model).expanduser().resolve(),
                 num_speakers=args.num_speakers,
                 cluster_threshold=args.speaker_threshold,
+                min_duration_on=args.diarization_min_duration_on,
+                min_duration_off=args.diarization_min_duration_off,
                 device=args.diarization_device,
                 fallback_to_cpu=not args.diarization_no_fallback,
             )

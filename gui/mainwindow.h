@@ -6,6 +6,7 @@
 #include "backend/BackendProcess.h"
 #include "backend/TranscriptSegment.h"
 #include "input/AudioFileInfo.h"
+#include "settings/Settings.h"
 
 #include <QMainWindow>
 #include <QString>
@@ -18,6 +19,7 @@ class MainWindow;
 QT_END_NAMESPACE
 
 class QCloseEvent;
+class QAction;
 
 class MainWindow : public QMainWindow
 {
@@ -58,6 +60,7 @@ private slots:
     void handleCancellation();
     void handleResultSave();
     void handleOpenResultFolder();
+    void handleSettings();
     void updateSpeakerCountEnabled();
     void updateMicrophoneUi();
     void handleMicrophoneSelection(int index);
@@ -81,6 +84,9 @@ private:
     void updateInputFileUi();
     void updateResultOutputUi();
     void updateUiForState();
+    void applySettingsToUi();
+    void saveSettings();
+    bool validateSettingsForRun(bool diarizationEnabled);
     bool hasAvailableResult() const;
     void showResultError(const QString &message);
 
@@ -92,6 +98,8 @@ private:
     AudioRecorder *m_audioRecorder;
     AudioFileInfo *m_audioFileInfo;
     BackendProcess *m_backendProcess;
+    QAction *m_settingsAction = nullptr;
+    Settings m_settings;
     AppState m_state = AppState::Idle;
     QString m_currentInputFile;
     QString m_pendingInputFile;
