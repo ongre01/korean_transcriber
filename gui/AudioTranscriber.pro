@@ -25,7 +25,10 @@ SOURCES += \
 
 HEADERS += \
     mainwindow.h \
-    app/AppState.h
+    app/AppState.h \
+    backend/BackendEvent.h \
+    backend/TranscriptSegment.h \
+    backend/TranscribeOptions.h
 
 FORMS += \
     mainwindow.ui

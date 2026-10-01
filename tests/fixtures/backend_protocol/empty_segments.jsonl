@@ -1,0 +1,4 @@
+{"type":"state","value":"transcribing"}
+{"type":"progress","value":100,"processed_seconds":0.0,"total_seconds":0.0}
+{"type":"state","value":"saving_result"}
+{"type":"completed","text_file":"C:/Results/empty.txt","srt_file":"C:/Results/empty.srt"}
