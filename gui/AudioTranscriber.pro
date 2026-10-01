@@ -24,7 +24,8 @@ SOURCES += \
     mainwindow.cpp
 
 HEADERS += \
-    mainwindow.h
+    mainwindow.h \
+    app/AppState.h
 
 FORMS += \
     mainwindow.ui
