@@ -110,6 +110,23 @@ SettingsDialog::SettingsDialog(const Settings &currentSettings, QWidget *parent)
                    tr("텍스트 파일 (*.txt);;모든 파일 (*.*)"));
     });
 
+    m_skipSilenceCheckBox = new QCheckBox(tr("전사 전 무음 구간 건너뛰기"), m_advancedGroupBox);
+    m_skipSilenceCheckBox->setToolTip(
+        tr("음성으로 감지된 구간만 Whisper에 전달합니다. 자막 시간값은 원본 파일 기준으로 유지됩니다."));
+    advancedForm->addRow(QString(), m_skipSilenceCheckBox);
+    m_silenceThresholdDbSpinBox = new QDoubleSpinBox(m_advancedGroupBox);
+    m_silenceThresholdDbSpinBox->setDecimals(1);
+    m_silenceThresholdDbSpinBox->setRange(-100.0, -0.1);
+    m_silenceThresholdDbSpinBox->setSingleStep(1.0);
+    m_silenceThresholdDbSpinBox->setSuffix(tr(" dBFS"));
+    advancedForm->addRow(tr("무음 감지 임계값"), m_silenceThresholdDbSpinBox);
+    m_silenceMinimumSpeechDurationSpinBox = secondsSpinBox(m_advancedGroupBox, 0.0, 120.0);
+    advancedForm->addRow(tr("최소 음성 지속 시간"), m_silenceMinimumSpeechDurationSpinBox);
+    m_silenceMinimumDurationSpinBox = secondsSpinBox(m_advancedGroupBox, 0.0, 120.0);
+    advancedForm->addRow(tr("무음으로 판단할 간격"), m_silenceMinimumDurationSpinBox);
+    m_silencePaddingDurationSpinBox = secondsSpinBox(m_advancedGroupBox, 0.0, 10.0);
+    advancedForm->addRow(tr("음성 구간 앞뒤 여백"), m_silencePaddingDurationSpinBox);
+
     QPushButton *segmentationBrowseButton = nullptr;
     advancedForm->addRow(tr("Segmentation 모델"),
                          pathEditor(m_segmentationModelEdit, segmentationBrowseButton,
@@ -168,6 +185,12 @@ SettingsDialog::SettingsDialog(const Settings &currentSettings, QWidget *parent)
     m_overlapSecondsSpinBox->setValue(currentSettings.overlapSeconds);
     m_hotwordsFileEdit->setText(currentSettings.hotwordsFile);
     m_initialPromptFileEdit->setText(currentSettings.initialPromptFile);
+    m_skipSilenceCheckBox->setChecked(currentSettings.skipSilence);
+    m_silenceThresholdDbSpinBox->setValue(currentSettings.silenceThresholdDb);
+    m_silenceMinimumSpeechDurationSpinBox->setValue(
+        currentSettings.silenceMinimumSpeechDuration);
+    m_silenceMinimumDurationSpinBox->setValue(currentSettings.silenceMinimumDuration);
+    m_silencePaddingDurationSpinBox->setValue(currentSettings.silencePaddingDuration);
     m_segmentationModelEdit->setText(currentSettings.diarizationSegmentationModel);
     m_embeddingModelEdit->setText(currentSettings.diarizationEmbeddingModel);
     m_speakerThresholdSpinBox->setValue(currentSettings.speakerThreshold);
@@ -190,6 +213,11 @@ Settings SettingsDialog::settings() const
     result.overlapSeconds = m_overlapSecondsSpinBox->value();
     result.hotwordsFile = m_hotwordsFileEdit->text().trimmed();
     result.initialPromptFile = m_initialPromptFileEdit->text().trimmed();
+    result.skipSilence = m_skipSilenceCheckBox->isChecked();
+    result.silenceThresholdDb = m_silenceThresholdDbSpinBox->value();
+    result.silenceMinimumSpeechDuration = m_silenceMinimumSpeechDurationSpinBox->value();
+    result.silenceMinimumDuration = m_silenceMinimumDurationSpinBox->value();
+    result.silencePaddingDuration = m_silencePaddingDurationSpinBox->value();
     result.diarizationSegmentationModel = m_segmentationModelEdit->text().trimmed();
     result.diarizationEmbeddingModel = m_embeddingModelEdit->text().trimmed();
     result.speakerThreshold = m_speakerThresholdSpinBox->value();

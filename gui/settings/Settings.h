@@ -28,6 +28,11 @@ public:
     double overlapSeconds = 4.0;
     QString hotwordsFile;
     QString initialPromptFile;
+    bool skipSilence = true;
+    double silenceThresholdDb = -45.0;
+    double silenceMinimumSpeechDuration = 0.3;
+    double silenceMinimumDuration = 0.5;
+    double silencePaddingDuration = 0.2;
     QString diarizationSegmentationModel;
     QString diarizationEmbeddingModel;
     double speakerThreshold = 0.5;

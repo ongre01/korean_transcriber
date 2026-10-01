@@ -15,6 +15,8 @@ import sys
 import traceback
 from typing import Callable, TextIO
 
+from vad import SpeechRegion, detect_speech_regions
+
 
 APP_DIR = Path(__file__).resolve().parent
 DEFAULT_WINDOW_SECONDS = 120.0
@@ -134,6 +136,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-suffix", default="")
     parser.add_argument("--hotwords-file", default=str(DEFAULT_HOTWORDS_FILE))
     parser.add_argument("--initial-prompt-file", default=str(DEFAULT_INITIAL_PROMPT_FILE))
+    parser.add_argument(
+        "--skip-silence",
+        action="store_true",
+        help="Detect voiced regions and send only those regions to Whisper.",
+    )
+    parser.add_argument("--silence-threshold-db", type=float, default=-45.0)
+    parser.add_argument("--silence-min-speech-duration", type=float, default=0.3)
+    parser.add_argument("--silence-min-duration", type=float, default=0.5)
+    parser.add_argument("--silence-padding-duration", type=float, default=0.2)
     parser.add_argument("--diarization", action="store_true")
     parser.add_argument("--num-speakers", type=_speaker_count, default=-1)
     parser.add_argument("--speaker-threshold", type=float, default=0.5)
@@ -176,11 +187,20 @@ def parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
     ):
         raise BridgeArgumentError("--speaker-threshold must be in (0, 1]")
     for option, value in (
+        ("--silence-min-speech-duration", args.silence_min_speech_duration),
+        ("--silence-min-duration", args.silence_min_duration),
+        ("--silence-padding-duration", args.silence_padding_duration),
         ("--diarization-min-duration-on", args.diarization_min_duration_on),
         ("--diarization-min-duration-off", args.diarization_min_duration_off),
     ):
         if not math.isfinite(value) or value < 0.0:
             raise BridgeArgumentError(f"{option} must be a finite number at least 0")
+    if (
+        not math.isfinite(args.silence_threshold_db)
+        or args.silence_threshold_db < -100.0
+        or args.silence_threshold_db >= 0.0
+    ):
+        raise BridgeArgumentError("--silence-threshold-db must be finite, at least -100, and below 0")
     return args
 
 
@@ -223,6 +243,65 @@ def npu_context_tokens_need_word_timestamps(
     """Return whether the NPU pipeline needs prompt-token decoder capacity."""
 
     return bool(hotwords.strip() or initial_prompt.strip()) and _matches_device(selected_device, "NPU")
+
+
+def transcribe_speech_regions(
+    engine,
+    pipe,
+    config,
+    audio,
+    regions: list[SpeechRegion],
+    window_seconds: float,
+    overlap_seconds: float,
+    *,
+    progress_callback: Callable[[float, float, int, int], None] | None = None,
+):
+    """Transcribe VAD regions while restoring every segment to source time."""
+
+    sample_rate = engine.TARGET_SAMPLE_RATE
+    total_duration = sum(region.sample_count for region in regions) / sample_rate
+    completed_duration = 0.0
+    segments = []
+
+    for region_index, region in enumerate(regions, start=1):
+        region_audio = audio[region.start_sample:region.end_sample]
+        region_duration = len(region_audio) / sample_rate
+        if region_duration <= 0.0:
+            continue
+
+        def region_progress(processed: float, _total: float, index: int, count: int) -> None:
+            if progress_callback is None:
+                return
+            progress_callback(
+                min(total_duration, completed_duration + min(region_duration, max(0.0, processed))),
+                total_duration,
+                index,
+                count,
+            )
+
+        region_segments = engine.transcribe_windows(
+            pipe,
+            config,
+            region_audio,
+            region_duration,
+            window_seconds,
+            overlap_seconds,
+            progress_callback=region_progress,
+            console_progress=False,
+        )
+        offset = region.start_sample / sample_rate
+        region_end = region.end_sample / sample_rate
+        for segment in region_segments:
+            segment.start = offset + float(segment.start)
+            segment.end = min(region_end, offset + float(segment.end))
+            segments.append(segment)
+        completed_duration += region_duration
+
+        if progress_callback is not None:
+            progress_callback(completed_duration, total_duration, region_index, len(regions))
+
+    segments.sort(key=lambda segment: (segment.start, segment.end))
+    return segments
 
 
 def _emit_transcription_progress(
@@ -319,59 +398,98 @@ def run_bridge(
     )
     duration = len(audio) / engine.TARGET_SAMPLE_RATE
 
-    writer.state("loading_model")
-    writer.progress(None)
-    pipe = _call(
-        "Whisper model could not be loaded",
-        lambda: engine.load_whisper_pipeline(
-            model_dir,
-            device,
-            args.model_label,
-            word_timestamps=npu_context_tokens,
-        ),
-    )
-    initial_prompt_plan = _call(
-        "Initial prompt validation failed",
-        lambda: engine.prepare_initial_prompt(pipe, initial_prompt),
-    )
-    if initial_prompt_plan.warning:
-        writer.warning(initial_prompt_plan.warning)
-    config = _call(
-        "Whisper generation configuration failed",
-        lambda: engine.configure_generation(
-            pipe,
-            args.language,
-            args.beams,
-            hotwords,
-            initial_prompt=initial_prompt_plan.value,
-            word_timestamps=npu_context_tokens,
-        ),
-    )
+    speech_regions: list[SpeechRegion] | None = None
+    if getattr(args, "skip_silence", False):
+        writer.state("detecting_speech")
+        writer.progress(None)
+        speech_regions = _call(
+            "Speech detection failed",
+            lambda: detect_speech_regions(
+                audio,
+                engine.TARGET_SAMPLE_RATE,
+                threshold_db=args.silence_threshold_db,
+                min_speech_duration=args.silence_min_speech_duration,
+                min_silence_duration=args.silence_min_duration,
+                padding_duration=args.silence_padding_duration,
+            ),
+        )
+        if not speech_regions:
+            writer.warning("음성 구간이 감지되지 않아 Whisper 전사와 화자 분리를 건너뜁니다.")
 
-    writer.state("transcribing")
+    segments = []
     transcription_complete = False
+    pipe = None
+    config = None
+    if speech_regions is None or speech_regions:
+        writer.state("loading_model")
+        writer.progress(None)
+        pipe = _call(
+            "Whisper model could not be loaded",
+            lambda: engine.load_whisper_pipeline(
+                model_dir,
+                device,
+                args.model_label,
+                word_timestamps=npu_context_tokens,
+            ),
+        )
+        initial_prompt_plan = _call(
+            "Initial prompt validation failed",
+            lambda: engine.prepare_initial_prompt(pipe, initial_prompt),
+        )
+        if initial_prompt_plan.warning:
+            writer.warning(initial_prompt_plan.warning)
+        config = _call(
+            "Whisper generation configuration failed",
+            lambda: engine.configure_generation(
+                pipe,
+                args.language,
+                args.beams,
+                hotwords,
+                initial_prompt=initial_prompt_plan.value,
+                word_timestamps=npu_context_tokens,
+            ),
+        )
 
-    def progress_callback(processed: float, total: float, _index: int, _count: int) -> None:
-        nonlocal transcription_complete
-        transcription_complete = _emit_transcription_progress(writer, processed, total)
+        writer.state("transcribing")
 
-    segments = _call(
-        "Transcription failed",
-        lambda: engine.transcribe_windows(
-            pipe,
-            config,
-            audio,
-            duration,
-            args.window_seconds,
-            args.overlap_seconds,
-            progress_callback=progress_callback,
-            console_progress=False,
-        ),
-    )
-    if not transcription_complete:
-        _emit_transcription_progress(writer, duration, duration)
+        def progress_callback(processed: float, total: float, _index: int, _count: int) -> None:
+            nonlocal transcription_complete
+            transcription_complete = _emit_transcription_progress(writer, processed, total)
 
-    if args.diarization:
+        if speech_regions is None:
+            segments = _call(
+                "Transcription failed",
+                lambda: engine.transcribe_windows(
+                    pipe,
+                    config,
+                    audio,
+                    duration,
+                    args.window_seconds,
+                    args.overlap_seconds,
+                    progress_callback=progress_callback,
+                    console_progress=False,
+                ),
+            )
+            transcription_total = duration
+        else:
+            segments = _call(
+                "Transcription failed",
+                lambda: transcribe_speech_regions(
+                    engine,
+                    pipe,
+                    config,
+                    audio,
+                    speech_regions,
+                    args.window_seconds,
+                    args.overlap_seconds,
+                    progress_callback=progress_callback,
+                ),
+            )
+            transcription_total = sum(region.sample_count for region in speech_regions) / engine.TARGET_SAMPLE_RATE
+        if not transcription_complete:
+            _emit_transcription_progress(writer, transcription_total, transcription_total)
+
+    if args.diarization and (speech_regions is None or speech_regions):
         # Match the existing CLI's resource policy: release Whisper before the
         # segmentation model is compiled on memory-constrained accelerators.
         del pipe

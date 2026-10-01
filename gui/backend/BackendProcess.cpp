@@ -16,6 +16,8 @@ QString stateName(BackendState state)
         return QStringLiteral("loading_model");
     case BackendState::DecodingAudio:
         return QStringLiteral("decoding_audio");
+    case BackendState::DetectingSpeech:
+        return QStringLiteral("detecting_speech");
     case BackendState::Transcribing:
         return QStringLiteral("transcribing");
     case BackendState::Diarization:

@@ -38,6 +38,11 @@ private:
     QDoubleSpinBox *m_overlapSecondsSpinBox = nullptr;
     QLineEdit *m_hotwordsFileEdit = nullptr;
     QLineEdit *m_initialPromptFileEdit = nullptr;
+    QCheckBox *m_skipSilenceCheckBox = nullptr;
+    QDoubleSpinBox *m_silenceThresholdDbSpinBox = nullptr;
+    QDoubleSpinBox *m_silenceMinimumSpeechDurationSpinBox = nullptr;
+    QDoubleSpinBox *m_silenceMinimumDurationSpinBox = nullptr;
+    QDoubleSpinBox *m_silencePaddingDurationSpinBox = nullptr;
     QLineEdit *m_segmentationModelEdit = nullptr;
     QLineEdit *m_embeddingModelEdit = nullptr;
     QDoubleSpinBox *m_speakerThresholdSpinBox = nullptr;

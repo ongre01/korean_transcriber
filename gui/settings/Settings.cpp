@@ -72,6 +72,17 @@ Settings Settings::load()
         settings, QStringLiteral("overlapSeconds"), result.overlapSeconds);
     result.hotwordsFile = settings.value(QStringLiteral("hotwordsFile")).toString();
     result.initialPromptFile = settings.value(QStringLiteral("initialPromptFile")).toString();
+    result.skipSilence = settings.value(
+        QStringLiteral("skipSilence"), result.skipSilence).toBool();
+    result.silenceThresholdDb = readFiniteDouble(
+        settings, QStringLiteral("silenceThresholdDb"), result.silenceThresholdDb);
+    result.silenceMinimumSpeechDuration = readFiniteDouble(
+        settings, QStringLiteral("silenceMinimumSpeechDuration"),
+        result.silenceMinimumSpeechDuration);
+    result.silenceMinimumDuration = readFiniteDouble(
+        settings, QStringLiteral("silenceMinimumDuration"), result.silenceMinimumDuration);
+    result.silencePaddingDuration = readFiniteDouble(
+        settings, QStringLiteral("silencePaddingDuration"), result.silencePaddingDuration);
     result.diarizationSegmentationModel = settings.value(
         QStringLiteral("diarizationSegmentationModel")).toString();
     result.diarizationEmbeddingModel = settings.value(
@@ -109,6 +120,11 @@ void Settings::save() const
     settings.setValue(QStringLiteral("overlapSeconds"), overlapSeconds);
     settings.setValue(QStringLiteral("hotwordsFile"), hotwordsFile);
     settings.setValue(QStringLiteral("initialPromptFile"), initialPromptFile);
+    settings.setValue(QStringLiteral("skipSilence"), skipSilence);
+    settings.setValue(QStringLiteral("silenceThresholdDb"), silenceThresholdDb);
+    settings.setValue(QStringLiteral("silenceMinimumSpeechDuration"), silenceMinimumSpeechDuration);
+    settings.setValue(QStringLiteral("silenceMinimumDuration"), silenceMinimumDuration);
+    settings.setValue(QStringLiteral("silencePaddingDuration"), silencePaddingDuration);
     settings.setValue(QStringLiteral("diarizationSegmentationModel"), diarizationSegmentationModel);
     settings.setValue(QStringLiteral("diarizationEmbeddingModel"), diarizationEmbeddingModel);
     settings.setValue(QStringLiteral("speakerThreshold"), speakerThreshold);
@@ -164,6 +180,16 @@ bool Settings::validateForRun(bool runWithDiarization, QString *errorMessage) co
     if (!initialPromptFile.trimmed().isEmpty() && !QFileInfo(initialPromptFile).isFile()) {
         return fail(QObject::tr("Initial Prompt 파일을 찾을 수 없습니다: %1")
                         .arg(initialPromptFile));
+    }
+    if (!std::isfinite(silenceThresholdDb) || silenceThresholdDb < -100.0
+        || silenceThresholdDb >= 0.0) {
+        return fail(QObject::tr("무음 감지 임계값은 -100 dBFS 이상 0 dBFS 미만이어야 합니다."));
+    }
+    if (!std::isfinite(silenceMinimumSpeechDuration)
+        || silenceMinimumSpeechDuration < 0.0
+        || !std::isfinite(silenceMinimumDuration) || silenceMinimumDuration < 0.0
+        || !std::isfinite(silencePaddingDuration) || silencePaddingDuration < 0.0) {
+        return fail(QObject::tr("무음 감지 시간 값은 0 이상이어야 합니다."));
     }
     if (runWithDiarization) {
         if (!std::isfinite(speakerThreshold) || speakerThreshold <= 0.0

@@ -28,6 +28,7 @@ enum class BackendState
     Preparing,
     LoadingModel,
     DecodingAudio,
+    DetectingSpeech,
     Transcribing,
     Diarization,
     SavingResult
@@ -103,6 +104,8 @@ inline bool parseState(const QString &value, BackendState *state)
         *state = BackendState::LoadingModel;
     } else if (value == QStringLiteral("decoding_audio")) {
         *state = BackendState::DecodingAudio;
+    } else if (value == QStringLiteral("detecting_speech")) {
+        *state = BackendState::DetectingSpeech;
     } else if (value == QStringLiteral("transcribing")) {
         *state = BackendState::Transcribing;
     } else if (value == QStringLiteral("diarization")) {

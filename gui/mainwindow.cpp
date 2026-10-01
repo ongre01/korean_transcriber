@@ -58,6 +58,9 @@ QString processingStateText(const QString &state)
     if (state == QStringLiteral("decoding_audio")) {
         return MainWindow::tr("오디오 디코딩 중...");
     }
+    if (state == QStringLiteral("detecting_speech")) {
+        return MainWindow::tr("무음 구간 감지 중...");
+    }
     if (state == QStringLiteral("transcribing")) {
         return MainWindow::tr("전사 중...");
     }
@@ -607,6 +610,11 @@ void MainWindow::handleTranscriptionStart()
     options.overlapSeconds = m_settings.overlapSeconds;
     options.hotwordsFile = m_settings.hotwordsFile;
     options.initialPromptFile = m_settings.initialPromptFile;
+    options.skipSilence = m_settings.skipSilence;
+    options.silenceThresholdDb = m_settings.silenceThresholdDb;
+    options.silenceMinimumSpeechDuration = m_settings.silenceMinimumSpeechDuration;
+    options.silenceMinimumDuration = m_settings.silenceMinimumDuration;
+    options.silencePaddingDuration = m_settings.silencePaddingDuration;
     options.diarizationEnabled = diarizationEnabled;
     options.speakerThreshold = m_settings.speakerThreshold;
     options.minimumSpeechDuration = m_settings.minimumSpeechDuration;
@@ -645,10 +653,11 @@ void MainWindow::handleTranscriptionStart()
     resetProcessingIndicators();
     setAppState(AppState::Processing);
     logInfo(tr("Transcription Start"),
-            tr("Input: %1\nDevice: %2\nBeams: %3\nDiarization: %4")
+            tr("Input: %1\nDevice: %2\nBeams: %3\nSkip silence: %4\nDiarization: %5")
                 .arg(QDir::toNativeSeparators(options.inputFile),
                      backendDeviceArgument(options.device),
                      QString::number(options.beams),
+                     options.skipSilence ? tr("ON") : tr("OFF"),
                      options.diarizationEnabled ? tr("ON") : tr("OFF")));
     logInfo(tr("Model"), QDir::toNativeSeparators(options.modelDirectory));
     emit transcriptionStartRequested();

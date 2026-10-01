@@ -21,6 +21,7 @@ class StateValue(str, Enum):
     PREPARING = "preparing"
     LOADING_MODEL = "loading_model"
     DECODING_AUDIO = "decoding_audio"
+    DETECTING_SPEECH = "detecting_speech"
     TRANSCRIBING = "transcribing"
     DIARIZATION = "diarization"
     SAVING_RESULT = "saving_result"

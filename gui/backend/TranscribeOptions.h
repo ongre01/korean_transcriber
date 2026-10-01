@@ -48,6 +48,11 @@ struct TranscribeOptions
     double overlapSeconds = 4.0;
     QString hotwordsFile;
     QString initialPromptFile;
+    bool skipSilence = true;
+    double silenceThresholdDb = -45.0;
+    double silenceMinimumSpeechDuration = 0.3;
+    double silenceMinimumDuration = 0.5;
+    double silencePaddingDuration = 0.2;
 
     QString diarizationSegmentationModel;
     QString diarizationEmbeddingModel;
@@ -81,6 +86,16 @@ struct TranscribeOptions
         if (!std::isfinite(overlapSeconds) || overlapSeconds < 0.0
             || overlapSeconds >= windowSeconds / 2.0) {
             return fail(QStringLiteral("overlapSeconds is outside the supported range"));
+        }
+        if (!std::isfinite(silenceThresholdDb) || silenceThresholdDb < -100.0
+            || silenceThresholdDb >= 0.0) {
+            return fail(QStringLiteral("silenceThresholdDb must be in [-100, 0)"));
+        }
+        if (!std::isfinite(silenceMinimumSpeechDuration)
+            || silenceMinimumSpeechDuration < 0.0
+            || !std::isfinite(silenceMinimumDuration) || silenceMinimumDuration < 0.0
+            || !std::isfinite(silencePaddingDuration) || silencePaddingDuration < 0.0) {
+            return fail(QStringLiteral("silence detection durations must be finite and non-negative"));
         }
         if (speakerCount && *speakerCount != 2 && *speakerCount != 3
                 && *speakerCount != 4 && *speakerCount != 5) {
@@ -131,6 +146,17 @@ struct TranscribeOptions
         }
         if (!initialPromptFile.isEmpty()) {
             arguments << QStringLiteral("--initial-prompt-file") << initialPromptFile;
+        }
+        if (skipSilence) {
+            arguments << QStringLiteral("--skip-silence")
+                      << QStringLiteral("--silence-threshold-db")
+                      << QString::number(silenceThresholdDb, 'g', 15)
+                      << QStringLiteral("--silence-min-speech-duration")
+                      << QString::number(silenceMinimumSpeechDuration, 'g', 15)
+                      << QStringLiteral("--silence-min-duration")
+                      << QString::number(silenceMinimumDuration, 'g', 15)
+                      << QStringLiteral("--silence-padding-duration")
+                      << QString::number(silencePaddingDuration, 'g', 15);
         }
 
         if (diarizationEnabled) {
