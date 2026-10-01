@@ -22,12 +22,14 @@ greaterThan(QT_MAJOR_VERSION, 5) {
 SOURCES += \
     main.cpp \
     mainwindow.cpp \
+    audio/WavWriter.cpp \
     backend/BackendProcess.cpp \
     input/AudioFileInfo.cpp
 
 HEADERS += \
     mainwindow.h \
     app/AppState.h \
+    audio/WavWriter.h \
     backend/BackendEvent.h \
     backend/BackendProcess.h \
     backend/TranscriptSegment.h \
