@@ -11,6 +11,7 @@ class QDoubleSpinBox;
 class QGroupBox;
 class QLineEdit;
 class QPushButton;
+class QSpinBox;
 
 class SettingsDialog final : public QDialog
 {
@@ -32,6 +33,7 @@ private:
     QLineEdit *m_pythonPathEdit = nullptr;
     QLineEdit *m_outputDirectoryEdit = nullptr;
     QLineEdit *m_whisperModelDirectoryEdit = nullptr;
+    QSpinBox *m_beamsSpinBox = nullptr;
     QDoubleSpinBox *m_windowSecondsSpinBox = nullptr;
     QDoubleSpinBox *m_overlapSecondsSpinBox = nullptr;
     QLineEdit *m_hotwordsFileEdit = nullptr;

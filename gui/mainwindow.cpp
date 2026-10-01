@@ -602,6 +602,7 @@ void MainWindow::handleTranscriptionStart()
     options.device = backendDevice(ui->deviceComboBox->currentText());
     options.outputDirectory = m_settings.outputDirectory;
     options.modelDirectory = m_settings.whisperModelDirectory;
+    options.beams = m_settings.beams;
     options.windowSeconds = m_settings.windowSeconds;
     options.overlapSeconds = m_settings.overlapSeconds;
     options.hotwordsFile = m_settings.hotwordsFile;
@@ -644,9 +645,10 @@ void MainWindow::handleTranscriptionStart()
     resetProcessingIndicators();
     setAppState(AppState::Processing);
     logInfo(tr("Transcription Start"),
-            tr("Input: %1\nDevice: %2\nDiarization: %3")
+            tr("Input: %1\nDevice: %2\nBeams: %3\nDiarization: %4")
                 .arg(QDir::toNativeSeparators(options.inputFile),
                      backendDeviceArgument(options.device),
+                     QString::number(options.beams),
                      options.diarizationEnabled ? tr("ON") : tr("OFF")));
     logInfo(tr("Model"), QDir::toNativeSeparators(options.modelDirectory));
     emit transcriptionStartRequested();

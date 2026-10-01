@@ -27,6 +27,13 @@ double readFiniteDouble(const QSettings &settings, const QString &key, double fa
     return ok && std::isfinite(value) ? value : fallback;
 }
 
+int readPositiveInt(const QSettings &settings, const QString &key, int fallback)
+{
+    bool ok = false;
+    const int value = settings.value(key, fallback).toInt(&ok);
+    return ok && value >= 1 ? value : fallback;
+}
+
 bool isPythonProgramAvailable(const QString &program)
 {
     const QFileInfo file(program);
@@ -58,6 +65,7 @@ Settings Settings::load()
         QStringLiteral("speakerCount"), result.speakerCount).toString().trimmed();
     result.whisperModelDirectory = settings.value(
         QStringLiteral("whisperModelDirectory")).toString();
+    result.beams = readPositiveInt(settings, QStringLiteral("beams"), result.beams);
     result.windowSeconds = readFiniteDouble(
         settings, QStringLiteral("windowSeconds"), result.windowSeconds);
     result.overlapSeconds = readFiniteDouble(
@@ -96,6 +104,7 @@ void Settings::save() const
     settings.setValue(QStringLiteral("diarizationEnabled"), diarizationEnabled);
     settings.setValue(QStringLiteral("speakerCount"), speakerCount);
     settings.setValue(QStringLiteral("whisperModelDirectory"), whisperModelDirectory);
+    settings.setValue(QStringLiteral("beams"), beams);
     settings.setValue(QStringLiteral("windowSeconds"), windowSeconds);
     settings.setValue(QStringLiteral("overlapSeconds"), overlapSeconds);
     settings.setValue(QStringLiteral("hotwordsFile"), hotwordsFile);
@@ -130,6 +139,9 @@ bool Settings::validateForRun(bool runWithDiarization, QString *errorMessage) co
     if (!QFileInfo(whisperModelDirectory.trimmed()).isDir()) {
         return fail(QObject::tr("Whisper 모델 폴더를 찾을 수 없습니다: %1")
                         .arg(whisperModelDirectory));
+    }
+    if (beams < 1) {
+        return fail(QObject::tr("Beam 수는 1 이상이어야 합니다."));
     }
     if (outputDirectory.trimmed().isEmpty()) {
         return fail(QObject::tr("결과 출력 폴더가 설정되지 않았습니다."));

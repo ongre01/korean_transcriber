@@ -23,6 +23,7 @@ public:
     // The bridge requires a model directory. The remaining fields are optional
     // overrides: an empty path preserves the engine's built-in default.
     QString whisperModelDirectory;
+    int beams = 1;
     double windowSeconds = 120.0;
     double overlapSeconds = 4.0;
     QString hotwordsFile;

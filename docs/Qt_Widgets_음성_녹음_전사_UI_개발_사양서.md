@@ -578,6 +578,8 @@ Auto
 ```text
 Whisper Model
 
+Beam 수 (1-10)
+
 Window Seconds
 Overlap Seconds
 

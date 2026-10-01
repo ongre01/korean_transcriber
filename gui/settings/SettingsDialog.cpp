@@ -12,6 +12,7 @@
 #include <QLineEdit>
 #include <QMessageBox>
 #include <QPushButton>
+#include <QSpinBox>
 #include <QVBoxLayout>
 
 namespace {
@@ -80,6 +81,12 @@ SettingsDialog::SettingsDialog(const Settings &currentSettings, QWidget *parent)
     connect(modelBrowseButton, &QPushButton::clicked, this, [this]() {
         chooseDirectory(m_whisperModelDirectoryEdit, tr("Whisper 모델 폴더 선택"));
     });
+
+    m_beamsSpinBox = new QSpinBox(m_advancedGroupBox);
+    m_beamsSpinBox->setRange(1, 10);
+    m_beamsSpinBox->setToolTip(
+        tr("값이 클수록 전사 속도는 느려질 수 있지만, 일부 불확실한 구간의 인식 품질이 개선될 수 있습니다."));
+    advancedForm->addRow(tr("Beam 수"), m_beamsSpinBox);
 
     m_windowSecondsSpinBox = secondsSpinBox(m_advancedGroupBox, 30.0, 7200.0);
     advancedForm->addRow(tr("Window Seconds"), m_windowSecondsSpinBox);
@@ -156,6 +163,7 @@ SettingsDialog::SettingsDialog(const Settings &currentSettings, QWidget *parent)
     m_pythonPathEdit->setText(currentSettings.pythonPath);
     m_outputDirectoryEdit->setText(currentSettings.outputDirectory);
     m_whisperModelDirectoryEdit->setText(currentSettings.whisperModelDirectory);
+    m_beamsSpinBox->setValue(currentSettings.beams);
     m_windowSecondsSpinBox->setValue(currentSettings.windowSeconds);
     m_overlapSecondsSpinBox->setValue(currentSettings.overlapSeconds);
     m_hotwordsFileEdit->setText(currentSettings.hotwordsFile);
@@ -177,6 +185,7 @@ Settings SettingsDialog::settings() const
     result.pythonPath = m_pythonPathEdit->text().trimmed();
     result.outputDirectory = m_outputDirectoryEdit->text().trimmed();
     result.whisperModelDirectory = m_whisperModelDirectoryEdit->text().trimmed();
+    result.beams = m_beamsSpinBox->value();
     result.windowSeconds = m_windowSecondsSpinBox->value();
     result.overlapSeconds = m_overlapSecondsSpinBox->value();
     result.hotwordsFile = m_hotwordsFileEdit->text().trimmed();
@@ -231,6 +240,9 @@ bool SettingsDialog::hasValidValues(QString *errorMessage) const
     }
     if (m_outputDirectoryEdit->text().trimmed().isEmpty()) {
         return fail(tr("결과 출력 폴더를 입력하세요."));
+    }
+    if (m_beamsSpinBox->value() < 1) {
+        return fail(tr("Beam 수는 1 이상이어야 합니다."));
     }
     if (m_windowSecondsSpinBox->value() < 30.0) {
         return fail(tr("Window Seconds는 30 이상이어야 합니다."));
