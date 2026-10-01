@@ -34,6 +34,8 @@ private slots:
     void newRunReplacesPreviousTranscript();
     void emptyResultDoesNotReusePreviousTranscript();
     void longTranscriptTextIsPreserved();
+    void progressIndicatorsFollowBackendEvents();
+    void failedProcessingDoesNotShowCompletionProgress();
     void diarizationOptionsAndTranscriptLabels();
     void diarizationModelFailureAllowsRetry();
 };
@@ -509,6 +511,86 @@ void MainWindowTest::longTranscriptTextIsPreserved()
     QVERIFY(result.size() > 20000);
     QVERIFY(result.startsWith(QStringLiteral("[00:00:01]\n<start>")));
     QVERIFY(result.endsWith(QStringLiteral("<end>")));
+}
+
+void MainWindowTest::progressIndicatorsFollowBackendEvents()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString progressPath = createAudioFixture(
+        directory, QStringLiteral("ui_progress.wav"));
+    const QString nextPath = createAudioFixture(
+        directory, QStringLiteral("ui_success.wav"));
+    QVERIFY(!progressPath.isEmpty());
+    QVERIFY(!nextPath.isEmpty());
+
+    MainWindow window;
+    configureBackendMock(window);
+    auto *transcribeButton = window.findChild<QPushButton *>("transcribeButton");
+    auto *stateLabel = window.findChild<QLabel *>("processingStateLabel");
+    auto *timeLabel = window.findChild<QLabel *>("processingTimeLabel");
+    auto *progressBar = window.findChild<QProgressBar *>("processingProgressBar");
+    QVERIFY(transcribeButton);
+    QVERIFY(stateLabel);
+    QVERIFY(timeLabel);
+    QVERIFY(progressBar);
+
+    window.setCurrentInputFile(progressPath);
+    transcribeButton->click();
+    QTRY_COMPARE_WITH_TIMEOUT(stateLabel->text(), QStringLiteral("준비 중..."), 5000);
+    QCOMPARE(progressBar->minimum(), 0);
+    QCOMPARE(progressBar->maximum(), 0);
+    QCOMPARE(timeLabel->text(), QStringLiteral("—"));
+    QTRY_COMPARE_WITH_TIMEOUT(stateLabel->text(), QStringLiteral("모델 불러오는 중..."), 5000);
+    QTRY_COMPARE_WITH_TIMEOUT(stateLabel->text(), QStringLiteral("오디오 디코딩 중..."), 5000);
+    QTRY_COMPARE_WITH_TIMEOUT(stateLabel->text(), QStringLiteral("전사 중..."), 5000);
+    QTRY_COMPARE_WITH_TIMEOUT(progressBar->value(), 50, 5000);
+    QCOMPARE(progressBar->maximum(), 100);
+    QCOMPARE(timeLabel->text(), QStringLiteral("00:01:05 / 00:02:10"));
+    QTRY_COMPARE_WITH_TIMEOUT(stateLabel->text(), QStringLiteral("화자 분리 중..."), 5000);
+    QTRY_COMPARE_WITH_TIMEOUT(stateLabel->text(), QStringLiteral("결과 저장 중..."), 5000);
+    QCOMPARE(progressBar->maximum(), 0);
+    QCOMPARE(timeLabel->text(), QStringLiteral("00:01:05 / 00:02:10"));
+
+    QTRY_COMPARE_WITH_TIMEOUT(window.appState(), AppState::Completed, 5000);
+    QCOMPARE(stateLabel->text(), QStringLiteral("완료"));
+    QCOMPARE(progressBar->maximum(), 100);
+    QCOMPARE(progressBar->value(), 100);
+    QCOMPARE(timeLabel->text(), QStringLiteral("00:02:10 / 00:02:10"));
+
+    window.setCurrentInputFile(nextPath);
+    transcribeButton->click();
+    QCOMPARE(window.appState(), AppState::Processing);
+    QCOMPARE(progressBar->maximum(), 100);
+    QCOMPARE(progressBar->value(), 0);
+    QCOMPARE(timeLabel->text(), QStringLiteral("—"));
+    QTRY_COMPARE_WITH_TIMEOUT(window.appState(), AppState::Completed, 5000);
+}
+
+void MainWindowTest::failedProcessingDoesNotShowCompletionProgress()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString inputPath = createAudioFixture(
+        directory, QStringLiteral("ui_progress_error.wav"));
+    QVERIFY(!inputPath.isEmpty());
+
+    MainWindow window;
+    configureBackendMock(window);
+    auto *transcribeButton = window.findChild<QPushButton *>("transcribeButton");
+    auto *stateLabel = window.findChild<QLabel *>("processingStateLabel");
+    auto *progressBar = window.findChild<QProgressBar *>("processingProgressBar");
+    QVERIFY(transcribeButton);
+    QVERIFY(stateLabel);
+    QVERIFY(progressBar);
+
+    window.setCurrentInputFile(inputPath);
+    transcribeButton->click();
+    QTRY_COMPARE_WITH_TIMEOUT(progressBar->value(), 99, 5000);
+    QTRY_COMPARE_WITH_TIMEOUT(window.appState(), AppState::Error, 5000);
+    QCOMPARE(stateLabel->text(), QStringLiteral("오류"));
+    QCOMPARE(progressBar->maximum(), 100);
+    QCOMPARE(progressBar->value(), 0);
 }
 
 void MainWindowTest::diarizationOptionsAndTranscriptLabels()

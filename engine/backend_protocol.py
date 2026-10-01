@@ -193,11 +193,18 @@ class EventStreamValidator:
 
     def __init__(self) -> None:
         self._terminal: str | None = None
+        self._state: StateValue | None = None
 
     def accept(self, event: BackendEvent) -> None:
         if self._terminal is not None:
             raise ProtocolError(f"event received after terminal {self._terminal} event")
-        if isinstance(event, CompletedEvent):
+        if isinstance(event, StateEvent):
+            self._state = event.value
+        elif (isinstance(event, ProgressEvent)
+              and event.value == 100
+              and self._state is not StateValue.SAVING_RESULT):
+            raise ProtocolError("100% progress must follow the saving_result state")
+        elif isinstance(event, CompletedEvent):
             self._terminal = "completed"
         elif isinstance(event, ErrorEvent):
             self._terminal = "error"

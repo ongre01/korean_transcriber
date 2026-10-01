@@ -63,11 +63,15 @@ private slots:
     void recordingFailed(const QString &message);
     void inputFileInspectionSucceeded(const AudioFileMetadata &metadata);
     void inputFileInspectionFailed(const QString &filePath, const QString &message);
+    void backendStateChanged(const QString &state);
+    void backendProgressChanged(int progress);
+    void backendProgressTimeChanged(double processedSeconds, double totalSeconds);
     void transcriptionSegmentReceived(double start, double end,
                                       int speaker, const QString &text);
 
 private:
     void clearTranscript();
+    void resetProcessingIndicators();
     void updateTranscriptUi();
     void updateInputFileUi();
     void updateUiForState();
@@ -85,6 +89,9 @@ private:
     // Preserve the option used for the active/completed run. The checkbox can
     // be changed after completion without changing how that result is shown.
     bool m_diarizationEnabledForRun = false;
+    QString m_backendState;
+    double m_processedSeconds = -1.0;
+    double m_totalSeconds = -1.0;
     QString m_stateMessage;
     QVector<TranscriptSegment> m_transcriptSegments;
 };

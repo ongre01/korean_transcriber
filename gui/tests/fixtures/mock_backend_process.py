@@ -134,6 +134,10 @@ elif scenario == "crash":
 elif scenario == "completed_then_crash":
     write_line({"type": "completed", "text_file": "C:/a.txt", "srt_file": "C:/a.srt"})
     os._exit(9)
+elif scenario == "premature_progress":
+    write_line({"type": "state", "value": "transcribing"})
+    write_line({"type": "progress", "value": 100})
+    write_line({"type": "completed", "text_file": "C:/a.txt", "srt_file": "C:/a.srt"})
 elif scenario == "ui_success":
     validate_ui_options()
     write_line({"type": "state", "value": "preparing"})
@@ -249,6 +253,58 @@ elif scenario == "ui_empty":
     write_line(
         {"type": "completed", "text_file": "C:/empty.txt", "srt_file": "C:/empty.srt"}
     )
+elif scenario == "ui_progress":
+    validate_ui_options()
+    write_line({"type": "state", "value": "preparing"})
+    write_line({"type": "progress", "value": None})
+    time.sleep(0.12)
+    write_line({"type": "state", "value": "loading_model"})
+    write_line({"type": "progress", "value": None})
+    time.sleep(0.12)
+    write_line({"type": "state", "value": "decoding_audio"})
+    write_line({"type": "progress", "value": None})
+    time.sleep(0.12)
+    write_line({"type": "state", "value": "transcribing"})
+    write_line(
+        {
+            "type": "progress",
+            "value": 50,
+            "processed_seconds": 65.0,
+            "total_seconds": 130.0,
+        }
+    )
+    time.sleep(0.12)
+    write_line({"type": "state", "value": "diarization"})
+    write_line({"type": "progress", "value": None})
+    time.sleep(0.12)
+    write_line({"type": "state", "value": "saving_result"})
+    write_line({"type": "progress", "value": None})
+    time.sleep(0.12)
+    write_line(
+        {
+            "type": "progress",
+            "value": 100,
+            "processed_seconds": 130.0,
+            "total_seconds": 130.0,
+        }
+    )
+    write_line(
+        {"type": "completed", "text_file": "C:/progress.txt", "srt_file": "C:/progress.srt"}
+    )
+elif scenario == "ui_progress_error":
+    validate_ui_options()
+    write_line({"type": "state", "value": "transcribing"})
+    write_line(
+        {
+            "type": "progress",
+            "value": 99,
+            "processed_seconds": 129.0,
+            "total_seconds": 130.0,
+        }
+    )
+    time.sleep(0.12)
+    write_line({"type": "error", "message": "mock save failure"})
+    raise SystemExit(3)
 elif scenario == "ui_long":
     validate_ui_options()
     write_line(

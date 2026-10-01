@@ -33,6 +33,29 @@ QString statusText(AppState state)
     return QString();
 }
 
+QString processingStateText(const QString &state)
+{
+    if (state == QStringLiteral("preparing")) {
+        return MainWindow::tr("준비 중...");
+    }
+    if (state == QStringLiteral("loading_model")) {
+        return MainWindow::tr("모델 불러오는 중...");
+    }
+    if (state == QStringLiteral("decoding_audio")) {
+        return MainWindow::tr("오디오 디코딩 중...");
+    }
+    if (state == QStringLiteral("transcribing")) {
+        return MainWindow::tr("전사 중...");
+    }
+    if (state == QStringLiteral("diarization")) {
+        return MainWindow::tr("화자 분리 중...");
+    }
+    if (state == QStringLiteral("saving_result")) {
+        return MainWindow::tr("결과 저장 중...");
+    }
+    return MainWindow::tr("처리 중...");
+}
+
 QString formattedFileSize(qint64 byteCount)
 {
     constexpr qint64 kibibyte = 1024;
@@ -202,6 +225,12 @@ MainWindow::MainWindow(QWidget *parent)
             this, &MainWindow::inputFileInspectionFailed);
     connect(m_backendProcess, &BackendProcess::segmentReceived,
             this, &MainWindow::transcriptionSegmentReceived);
+    connect(m_backendProcess, &BackendProcess::stateChanged,
+            this, &MainWindow::backendStateChanged);
+    connect(m_backendProcess, &BackendProcess::progressChanged,
+            this, &MainWindow::backendProgressChanged);
+    connect(m_backendProcess, &BackendProcess::progressTimeChanged,
+            this, &MainWindow::backendProgressTimeChanged);
     connect(m_backendProcess, &BackendProcess::completed,
             this, &MainWindow::processingCompleted);
     connect(m_backendProcess, &BackendProcess::errorOccurred,
@@ -310,6 +339,7 @@ void MainWindow::processingCompleted()
 void MainWindow::processingFailed(const QString &message)
 {
     if (m_state == AppState::Processing) {
+        resetProcessingIndicators();
         setAppState(AppState::Error, message);
     }
 }
@@ -416,6 +446,7 @@ void MainWindow::handleTranscriptionStart()
 
     m_diarizationEnabledForRun = options.diarizationEnabled;
     clearTranscript();
+    resetProcessingIndicators();
     setAppState(AppState::Processing);
     emit transcriptionStartRequested();
     m_backendProcess->start(options);
@@ -428,6 +459,7 @@ void MainWindow::handleCancellation()
         return;
     }
 
+    resetProcessingIndicators();
     setAppState(hasValidInput() ? AppState::InputReady : AppState::Idle);
     emit cancellationRequested();
 }
@@ -560,6 +592,46 @@ void MainWindow::inputFileInspectionFailed(const QString &filePath, const QStrin
     emit inputFileErrorOccurred(userMessage);
 }
 
+void MainWindow::backendStateChanged(const QString &state)
+{
+    if (m_state != AppState::Processing) {
+        return;
+    }
+
+    m_backendState = state;
+    ui->processingProgressBar->setRange(0, 0);
+    updateUiForState();
+}
+
+void MainWindow::backendProgressChanged(int progress)
+{
+    if (m_state != AppState::Processing) {
+        return;
+    }
+
+    if (progress < 0) {
+        ui->processingProgressBar->setRange(0, 0);
+        return;
+    }
+
+    ui->processingProgressBar->setRange(0, 100);
+    ui->processingProgressBar->setValue(progress);
+}
+
+void MainWindow::backendProgressTimeChanged(double processedSeconds, double totalSeconds)
+{
+    if (m_state != AppState::Processing) {
+        return;
+    }
+
+    m_processedSeconds = processedSeconds;
+    m_totalSeconds = totalSeconds;
+    ui->processingTimeLabel->setText(
+        tr("%1 / %2")
+            .arg(formattedDuration(qRound64(processedSeconds * 1000.0)))
+            .arg(formattedDuration(qRound64(totalSeconds * 1000.0))));
+}
+
 void MainWindow::transcriptionSegmentReceived(double start, double end,
                                               int speaker, const QString &text)
 {
@@ -601,6 +673,16 @@ void MainWindow::clearTranscript()
 {
     m_transcriptSegments.clear();
     ui->resultTextEdit->clear();
+}
+
+void MainWindow::resetProcessingIndicators()
+{
+    m_backendState.clear();
+    m_processedSeconds = -1.0;
+    m_totalSeconds = -1.0;
+    ui->processingProgressBar->setRange(0, 100);
+    ui->processingProgressBar->setValue(0);
+    ui->processingTimeLabel->setText(tr("—"));
 }
 
 void MainWindow::updateTranscriptUi()
@@ -670,12 +752,17 @@ void MainWindow::updateUiForState()
     ui->openResultFolderButton->setEnabled(m_state == AppState::Completed);
 
     if (m_state == AppState::Completed) {
+        ui->processingProgressBar->setRange(0, 100);
         ui->processingProgressBar->setValue(100);
     } else if (m_state != AppState::Processing) {
+        ui->processingProgressBar->setRange(0, 100);
         ui->processingProgressBar->setValue(0);
+        ui->processingTimeLabel->setText(tr("—"));
     }
 
-    const QString stateLabel = statusText(m_state);
+    const QString stateLabel = m_state == AppState::Processing
+        ? processingStateText(m_backendState)
+        : statusText(m_state);
     ui->processingStateLabel->setText(stateLabel);
     ui->statusLabel->setText(stateLabel);
     statusBar()->showMessage(m_stateMessage.isEmpty() ? stateLabel : m_stateMessage);

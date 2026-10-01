@@ -301,7 +301,14 @@ public:
         if (m_terminal != Terminal::None) {
             return fail(errorMessage, QStringLiteral("event received after terminal event"));
         }
-        if (event.type == BackendEventType::Completed) {
+        if (event.type == BackendEventType::State) {
+            m_state = event.state;
+        } else if (event.type == BackendEventType::Progress
+                   && event.progress && *event.progress == 100
+                   && m_state != BackendState::SavingResult) {
+            return fail(errorMessage,
+                        QStringLiteral("100%% progress must follow the saving_result state"));
+        } else if (event.type == BackendEventType::Completed) {
             m_terminal = Terminal::Completed;
         } else if (event.type == BackendEventType::Error) {
             m_terminal = Terminal::Error;
@@ -333,6 +340,7 @@ private:
         Error
     };
     Terminal m_terminal = Terminal::None;
+    BackendState m_state = BackendState::Preparing;
 };
 
 } // namespace BackendProtocol

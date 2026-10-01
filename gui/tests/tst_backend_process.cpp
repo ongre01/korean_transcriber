@@ -127,6 +127,7 @@ void BackendProcessTest::processFailures_data()
     QTest::newRow("duplicate-completed") << QStringLiteral("duplicate_completed");
     QTest::newRow("crash") << QStringLiteral("crash");
     QTest::newRow("completed-then-crash") << QStringLiteral("completed_then_crash");
+    QTest::newRow("premature-progress") << QStringLiteral("premature_progress");
 }
 
 void BackendProcessTest::processFailures()

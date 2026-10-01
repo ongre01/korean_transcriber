@@ -154,6 +154,22 @@ void BackendProtocolTest::terminalAndExitRules()
         QByteArrayLiteral("{\"type\":\"state\",\"value\":\"preparing\"}"),
         &state, &error));
     QVERIFY(!trailingEvent.accept(state, &error));
+
+    BackendEvent fullProgress;
+    QVERIFY(BackendProtocol::parseEventLine(
+        QByteArrayLiteral("{\"type\":\"progress\",\"value\":100}"),
+        &fullProgress, &error));
+    BackendProtocol::EventStreamValidator prematureProgress;
+    QVERIFY(prematureProgress.accept(state, &error));
+    QVERIFY(!prematureProgress.accept(fullProgress, &error));
+
+    BackendEvent savingState;
+    QVERIFY(BackendProtocol::parseEventLine(
+        QByteArrayLiteral("{\"type\":\"state\",\"value\":\"saving_result\"}"),
+        &savingState, &error));
+    BackendProtocol::EventStreamValidator savedProgress;
+    QVERIFY(savedProgress.accept(savingState, &error));
+    QVERIFY(savedProgress.accept(fullProgress, &error));
 }
 
 void BackendProtocolTest::transcribeOptionsContract()

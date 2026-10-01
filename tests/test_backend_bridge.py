@@ -198,6 +198,24 @@ class BackendBridgeTest(unittest.TestCase):
         progress = [event for event in events if isinstance(event, ProgressEvent)]
         self.assertTrue(any(event.value is None for event in progress))
         self.assertTrue(any(event.value == 50 for event in progress))
+        self.assertEqual(progress[-1].value, 100)
+        self.assertEqual(progress[-1].processed_seconds, 2.0)
+        self.assertEqual(progress[-1].total_seconds, 2.0)
+        saving_index = next(
+            index for index, event in enumerate(events)
+            if isinstance(event, StateEvent) and event.value.value == "saving_result"
+        )
+        final_progress_index = max(
+            index for index, event in enumerate(events)
+            if isinstance(event, ProgressEvent) and event.value == 100
+        )
+        self.assertLess(saving_index, final_progress_index)
+        self.assertLess(final_progress_index, len(events) - 1)
+        self.assertTrue(all(
+            event.value < 100
+            for event in events[:saving_index]
+            if isinstance(event, ProgressEvent) and event.value is not None
+        ))
         self.assertEqual(
             [event.text for event in events if isinstance(event, SegmentEvent)],
             ["안녕하세요.", "회의를 시작합니다."],
@@ -316,6 +334,23 @@ class BackendBridgeTest(unittest.TestCase):
         self.assertFalse(any(isinstance(event, SegmentEvent) for event in events))
         self.assertIsInstance(events[-1], CompletedEvent)
 
+    def test_zero_duration_is_indeterminate_until_result_saving_succeeds(self):
+        engine = FakeEngine()
+        engine.audio = []
+        exit_code, events, _diagnostic, _engine = self.invoke(engine)
+
+        self.assertEqual(exit_code, 0)
+        final_progress_index = max(
+            index for index, event in enumerate(events)
+            if isinstance(event, ProgressEvent) and event.value == 100
+        )
+        self.assertTrue(all(
+            event.value is None
+            for event in events[:final_progress_index]
+            if isinstance(event, ProgressEvent)
+        ))
+        self.assertIsInstance(events[-1], CompletedEvent)
+
     def test_missing_input_and_model_have_contract_exit_codes(self):
         self.input_path.unlink()
         exit_code, events, _diagnostic, _engine = self.invoke()
@@ -346,6 +381,10 @@ class BackendBridgeTest(unittest.TestCase):
                 self.assertIsInstance(events[-1], ErrorEvent)
                 self.assertIn(message, events[-1].message)
                 self.assertFalse(any(isinstance(event, CompletedEvent) for event in events))
+                self.assertFalse(any(
+                    isinstance(event, ProgressEvent) and event.value == 100
+                    for event in events
+                ))
                 self.assertIn(str(error), diagnostic)
 
     def test_completed_requires_both_saved_files(self):

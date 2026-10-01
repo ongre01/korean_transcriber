@@ -76,6 +76,23 @@ class BackendProtocolTest(unittest.TestCase):
             ], exit_code=0)
         self.assertIsInstance(completed, CompletedEvent)
 
+    def test_completion_progress_requires_saving_result_stage(self):
+        premature = [
+            b'{"type":"state","value":"transcribing"}',
+            b'{"type":"progress","value":100}',
+            b'{"type":"completed","text_file":"C:/a.txt","srt_file":"C:/a.srt"}',
+        ]
+        with self.assertRaises(ProtocolError):
+            validate_stream(premature, exit_code=0)
+
+        saved = [
+            b'{"type":"state","value":"saving_result"}',
+            b'{"type":"progress","value":100}',
+            b'{"type":"completed","text_file":"C:/a.txt","srt_file":"C:/a.srt"}',
+        ]
+        events = validate_stream(saved, exit_code=0)
+        self.assertEqual(events[1].value, 100)
+
 
 if __name__ == "__main__":
     unittest.main()

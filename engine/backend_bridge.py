@@ -208,15 +208,27 @@ def _emit_transcription_progress(
     writer: EventWriter,
     processed: float,
     total: float,
-) -> None:
+) -> bool:
+    """Emit reliable transcription progress without claiming job completion.
+
+    A completed transcription still has optional diarization and result-file
+    saving ahead of it.  Reserve 100% for the point where both result files
+    have been successfully written.
+    """
     processed = float(processed)
     total = float(total)
     if not math.isfinite(processed) or not math.isfinite(total):
         raise RuntimeError("transcription progress must be finite")
-    total = max(0.0, total)
-    processed = min(total, max(0.0, processed)) if total > 0.0 else 0.0
-    value = 100 if total <= 0.0 else int(round(processed / total * 100.0))
+
+    if total <= 0.0:
+        # A zero/unknown duration cannot yield a meaningful percentage.
+        writer.progress(None)
+        return False
+
+    processed = min(total, max(0.0, processed))
+    value = min(99, int(round(processed / total * 100.0)))
     writer.progress(value, processed, total)
+    return processed >= total
 
 
 def _load_diarize_function() -> Callable:
@@ -292,8 +304,7 @@ def run_bridge(
 
     def progress_callback(processed: float, total: float, _index: int, _count: int) -> None:
         nonlocal transcription_complete
-        _emit_transcription_progress(writer, processed, total)
-        transcription_complete = total <= 0.0 or processed >= total
+        transcription_complete = _emit_transcription_progress(writer, processed, total)
 
     segments = _call(
         "Transcription failed",
@@ -389,6 +400,10 @@ def run_bridge(
         return txt_path, srt_path
 
     txt_path, srt_path = _call("Result files could not be saved", save_result)
+    if duration > 0.0:
+        writer.progress(100, duration, duration)
+    else:
+        writer.progress(100)
     writer.emit(
         "completed",
         text_file=str(txt_path),
