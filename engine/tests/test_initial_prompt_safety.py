@@ -42,13 +42,14 @@ class InitialPromptSafetyTests(unittest.TestCase):
         self.assertFalse(plan.requested)
         self.assertIsNone(plan.warning)
 
-    def test_short_initial_prompt_is_token_validated_and_disabled(self) -> None:
+    def test_short_initial_prompt_is_token_validated_and_ready_for_generation(self) -> None:
         plan = engine.prepare_initial_prompt(FakePipe(token_count=22), "회의 용어")
 
         self.assertTrue(plan.requested)
+        self.assertEqual(plan.value, "회의 용어")
         self.assertEqual(plan.token_count, 22)
         self.assertEqual(plan.maximum_token_count, 384)
-        self.assertIn("안전하게 제외", plan.warning)
+        self.assertIsNone(plan.warning)
 
     def test_overlong_initial_prompt_is_rejected_before_generation(self) -> None:
         plan = engine.prepare_initial_prompt(FakePipe(token_count=385), "회의 용어")
@@ -57,7 +58,7 @@ class InitialPromptSafetyTests(unittest.TestCase):
         self.assertEqual(plan.maximum_token_count, 384)
         self.assertIn("허용 길이를 초과", plan.warning)
 
-    def test_generation_config_assigns_hotwords_but_not_initial_prompt(self) -> None:
+    def test_generation_config_assigns_hotwords_and_initial_prompt(self) -> None:
         pipe = FakePipe()
 
         config = engine.configure_generation(
@@ -65,11 +66,12 @@ class InitialPromptSafetyTests(unittest.TestCase):
             "<|ko|>",
             1,
             "회의 용어",
+            initial_prompt="회의 참석자는 김대리입니다.",
             word_timestamps=True,
         )
 
         self.assertIs(config, pipe.config)
-        self.assertFalse(hasattr(config, "initial_prompt"))
+        self.assertEqual(config.initial_prompt, "회의 참석자는 김대리입니다.")
         self.assertEqual(config.hotwords, "회의 용어")
         self.assertTrue(config.word_timestamps)
 

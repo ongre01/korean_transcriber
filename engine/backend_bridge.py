@@ -215,10 +215,14 @@ def resolve_device(engine, requested: str) -> str:
     raise RuntimeError(f"No supported OpenVINO device was found. Devices: {devices}")
 
 
-def npu_hotwords_need_word_timestamps(selected_device: str, hotwords: str) -> bool:
+def npu_context_tokens_need_word_timestamps(
+    selected_device: str,
+    hotwords: str,
+    initial_prompt: str,
+) -> bool:
     """Return whether the NPU pipeline needs prompt-token decoder capacity."""
 
-    return bool(hotwords.strip()) and _matches_device(selected_device, "NPU")
+    return bool(hotwords.strip() or initial_prompt.strip()) and _matches_device(selected_device, "NPU")
 
 
 def _emit_transcription_progress(
@@ -276,10 +280,6 @@ def run_bridge(
         else input_path.parent
     )
 
-    device = _call(
-        "OpenVINO device selection failed",
-        lambda: resolve_device(engine, args.device),
-    )
     hotwords = _call(
         "Hotwords could not be read",
         lambda: engine.read_optional_text(Path(args.hotwords_file).expanduser().resolve()),
@@ -290,10 +290,24 @@ def run_bridge(
             Path(args.initial_prompt_file).expanduser().resolve()
         ),
     )
-    npu_hotwords = npu_hotwords_need_word_timestamps(device, hotwords)
-    if npu_hotwords:
+    device = _call(
+        "OpenVINO device selection failed",
+        lambda: resolve_device(engine, args.device),
+    )
+    npu_context_tokens = npu_context_tokens_need_word_timestamps(
+        device,
+        hotwords,
+        initial_prompt,
+    )
+    if npu_context_tokens:
+        if hotwords and initial_prompt:
+            context_source = "핫워드와 초기 프롬프트"
+        elif initial_prompt:
+            context_source = "초기 프롬프트"
+        else:
+            context_source = "핫워드"
         writer.warning(
-            "핫워드를 적용하기 위해 NPU 단어 타임스탬프 모드를 사용합니다. "
+            f"{context_source}를 적용하기 위해 NPU 단어 타임스탬프 모드를 사용합니다. "
             "최초 모델 준비 시간이 길어질 수 있습니다."
         )
 
@@ -313,7 +327,7 @@ def run_bridge(
             model_dir,
             device,
             args.model_label,
-            word_timestamps=npu_hotwords,
+            word_timestamps=npu_context_tokens,
         ),
     )
     initial_prompt_plan = _call(
@@ -329,7 +343,8 @@ def run_bridge(
             args.language,
             args.beams,
             hotwords,
-            word_timestamps=npu_hotwords,
+            initial_prompt=initial_prompt_plan.value,
+            word_timestamps=npu_context_tokens,
         ),
     )
 

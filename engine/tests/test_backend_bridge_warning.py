@@ -13,7 +13,7 @@ ENGINE_DIR = Path(__file__).resolve().parents[1]
 if str(ENGINE_DIR) not in sys.path:
     sys.path.insert(0, str(ENGINE_DIR))
 
-from backend_bridge import EventWriter, npu_hotwords_need_word_timestamps, run_bridge
+from backend_bridge import EventWriter, npu_context_tokens_need_word_timestamps, run_bridge
 from backend_protocol import WarningEvent, parse_event_line
 
 
@@ -45,8 +45,8 @@ class FakeEngine:
         self.pipeline_arguments = (arguments, keyword_arguments)
         return object()
 
-    def prepare_initial_prompt(self, _pipe, _prompt: str):
-        return SimpleNamespace(warning="초기 프롬프트를 안전하게 제외했습니다.")
+    def prepare_initial_prompt(self, _pipe, prompt: str):
+        return SimpleNamespace(value=prompt, warning=None)
 
     def configure_generation(self, *arguments, **keyword_arguments):
         self.configure_arguments = (arguments, keyword_arguments)
@@ -75,12 +75,13 @@ class FakeEngine:
 
 
 class BackendBridgeWarningTests(unittest.TestCase):
-    def test_npu_hotword_mode_is_limited_to_nonempty_hotwords_on_npu(self) -> None:
-        self.assertTrue(npu_hotwords_need_word_timestamps("NPU", "회의 용어"))
-        self.assertFalse(npu_hotwords_need_word_timestamps("NPU", "   "))
-        self.assertFalse(npu_hotwords_need_word_timestamps("CPU", "회의 용어"))
+    def test_npu_context_token_mode_is_limited_to_nonempty_context_on_npu(self) -> None:
+        self.assertTrue(npu_context_tokens_need_word_timestamps("NPU", "회의 용어", ""))
+        self.assertTrue(npu_context_tokens_need_word_timestamps("NPU", "", "회의 용어"))
+        self.assertFalse(npu_context_tokens_need_word_timestamps("NPU", "   ", "  "))
+        self.assertFalse(npu_context_tokens_need_word_timestamps("CPU", "회의 용어", ""))
 
-    def test_bridge_enables_npu_word_timestamps_for_hotwords_and_emits_warning(self) -> None:
+    def test_bridge_keeps_npu_and_applies_initial_prompt(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             input_path = root / "input.wav"
@@ -119,11 +120,13 @@ class BackendBridgeWarningTests(unittest.TestCase):
         events = [parse_event_line(line) for line in output.getvalue().splitlines()]
         self.assertEqual(exit_code, 0)
         warnings = [event for event in events if isinstance(event, WarningEvent)]
-        self.assertEqual(len(warnings), 2)
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("초기 프롬프트", warnings[0].message)
         self.assertEqual(engine.pipeline_arguments[0][1], "NPU")
         self.assertTrue(engine.pipeline_arguments[1]["word_timestamps"])
         self.assertEqual(len(engine.configure_arguments[0]), 4)
         self.assertEqual(engine.configure_arguments[0][3], "핫워드")
+        self.assertEqual(engine.configure_arguments[1]["initial_prompt"], "회의 용어")
         self.assertTrue(engine.configure_arguments[1]["word_timestamps"])
 
 

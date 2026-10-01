@@ -38,9 +38,10 @@ class Segment:
 
 @dataclass(frozen=True)
 class InitialPromptPlan:
-    """Validated initial-prompt metadata for the current safe-mode policy."""
+    """Validated initial-prompt metadata for Whisper generation."""
 
     requested: bool
+    value: str = ''
     token_count: int | None = None
     maximum_token_count: int | None = None
     warning: str | None = None
@@ -135,13 +136,7 @@ def _initial_prompt_token_count(pipe, initial_prompt: str) -> int:
 
 
 def prepare_initial_prompt(pipe, initial_prompt: str) -> InitialPromptPlan:
-    """Validate and safely disable an initial prompt for OpenVINO Whisper.
-
-    The current OpenVINO Whisper pipeline raises an inference tensor-range
-    error when ``GenerationConfig.initial_prompt`` is populated, including for
-    short prompts. Keep the text saved for a future compatible runtime, but do
-    not pass it to the pipeline so a transcription can still complete.
-    """
+    """Validate an initial prompt while reserving decoder space for speech."""
 
     prompt = initial_prompt.strip()
     if not prompt:
@@ -180,13 +175,9 @@ def prepare_initial_prompt(pipe, initial_prompt: str) -> InitialPromptPlan:
 
     return InitialPromptPlan(
         requested=True,
+        value=prompt,
         token_count=token_count,
         maximum_token_count=maximum_token_count,
-        warning=(
-            '현재 OpenVINO Whisper 실행 환경에서는 초기 프롬프트가 입력 텐서 오류를 '
-            '일으킬 수 있어 안전하게 제외했습니다. 프롬프트 내용은 저장되어 있으며 '
-            '전사는 계속 진행됩니다.'
-        ),
     )
 
 
@@ -397,6 +388,7 @@ def configure_generation(
     beams: int,
     hotwords: str,
     *,
+    initial_prompt: str = '',
     word_timestamps: bool = False,
 ):
     config = pipe.get_generation_config()
@@ -409,11 +401,10 @@ def configure_generation(
     config.do_sample = False
     if hotwords:
         config.hotwords = hotwords
+    if initial_prompt:
+        config.initial_prompt = initial_prompt
     if word_timestamps:
         config.word_timestamps = True
-    # Do not touch ``initial_prompt`` until the OpenVINO Whisper implementation
-    # can handle it without the reproducible tensor-range inference failure.
-    # Assigning even an empty value activates the faulty runtime path.
     return config
 
 
@@ -485,6 +476,10 @@ def main() -> int:
 
     hotwords = read_optional_text(Path(args.hotwords_file).expanduser().resolve())
     initial_prompt = read_optional_text(Path(args.initial_prompt_file).expanduser().resolve())
+    npu_context_tokens = (
+        args.device.upper().startswith('NPU')
+        and bool(hotwords or initial_prompt)
+    )
 
     try:
         print('=' * 78)
@@ -499,7 +494,9 @@ def main() -> int:
         print(f'Window     : {args.window_seconds:.0f} sec')
         print(f'Overlap    : {args.overlap_seconds:.1f} sec')
         print(f'Hotwords   : {"ON" if hotwords else "OFF"}')
-        print(f'Init prompt: {"REQUESTED (safe mode)" if initial_prompt else "OFF"}')
+        print(f'Init prompt: {"ON" if initial_prompt else "OFF"}')
+        if npu_context_tokens:
+            print('      [INFO] NPU 컨텍스트 토큰 모드(단어 타임스탬프)를 사용합니다.')
         if args.diarize:
             print(
                 'Diarization: ON '
@@ -522,7 +519,12 @@ def main() -> int:
         print(f'      Audio length: {clock(duration)} ({duration / 60.0:.1f} min)')
 
         print(f'[3/{steps}] Loading/compiling model on {args.device}...')
-        pipe = load_whisper_pipeline(model_dir, args.device, args.model_label)
+        pipe = load_whisper_pipeline(
+            model_dir,
+            args.device,
+            args.model_label,
+            word_timestamps=npu_context_tokens,
+        )
         print('      Model ready.')
 
         initial_prompt_plan = prepare_initial_prompt(pipe, initial_prompt)
@@ -531,6 +533,8 @@ def main() -> int:
             args.language,
             args.beams,
             hotwords,
+            initial_prompt=initial_prompt_plan.value,
+            word_timestamps=npu_context_tokens,
         )
         if hotwords:
             print(f'      Hotwords: {hotwords[:160]}{"..." if len(hotwords) > 160 else ""}')
