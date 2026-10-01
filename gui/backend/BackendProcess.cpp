@@ -31,6 +31,7 @@ BackendProcess::BackendProcess(QObject *parent)
     : QObject(parent)
 {
     m_process.setProcessChannelMode(QProcess::SeparateChannels);
+    m_cancellationTimer.setSingleShot(true);
 
     connect(&m_process, &QProcess::started, this, &BackendProcess::started);
     connect(&m_process, &QProcess::readyReadStandardOutput,
@@ -42,6 +43,22 @@ BackendProcess::BackendProcess(QObject *parent)
     connect(&m_process,
             qOverload<int, QProcess::ExitStatus>(&QProcess::finished),
             this, &BackendProcess::processFinished);
+    connect(&m_cancellationTimer, &QTimer::timeout,
+            this, &BackendProcess::escalateCancellation);
+}
+
+BackendProcess::~BackendProcess()
+{
+    m_cancellationTimer.stop();
+    // Destruction cannot rely on a later event-loop iteration.  Disconnecting
+    // first prevents terminal signals from reaching a partially destroyed owner.
+    m_process.disconnect(this);
+    if (!isRunning()) {
+        return;
+    }
+
+    m_process.terminate();
+    m_process.kill();
 }
 
 void BackendProcess::setPythonProgram(const QString &program)
@@ -120,9 +137,29 @@ void BackendProcess::start(const TranscribeOptions &options)
 
 void BackendProcess::cancel()
 {
-    if (isRunning()) {
-        m_process.terminate();
+    if (m_terminalSignalEmitted || m_cancellationRequested) {
+        return;
     }
+
+    m_cancellationRequested = true;
+    m_stdoutBuffer.clear();
+    if (!isRunning()) {
+        finishCancellation();
+        return;
+    }
+
+    m_cancellationTimer.start(m_cancellationGracePeriodMilliseconds);
+    m_process.terminate();
+}
+
+void BackendProcess::setCancellationGracePeriod(int milliseconds)
+{
+    m_cancellationGracePeriodMilliseconds = milliseconds < 0 ? 0 : milliseconds;
+}
+
+int BackendProcess::cancellationGracePeriod() const noexcept
+{
+    return m_cancellationGracePeriodMilliseconds;
 }
 
 bool BackendProcess::isRunning() const
@@ -147,6 +184,7 @@ QByteArray BackendProcess::standardErrorOutput() const
 
 void BackendProcess::resetRunState()
 {
+    m_cancellationTimer.stop();
     m_stdoutBuffer.clear();
     m_standardError.clear();
     m_streamValidator = BackendProtocol::EventStreamValidator();
@@ -157,11 +195,17 @@ void BackendProcess::resetRunState()
     m_receivedError = false;
     m_protocolFailed = false;
     m_terminalSignalEmitted = false;
+    m_cancellationRequested = false;
 }
 
 void BackendProcess::readStandardOutput()
 {
-    m_stdoutBuffer.append(m_process.readAllStandardOutput());
+    const QByteArray data = m_process.readAllStandardOutput();
+    if (m_cancellationRequested) {
+        m_stdoutBuffer.clear();
+        return;
+    }
+    m_stdoutBuffer.append(data);
     consumeCompleteLines();
 }
 
@@ -172,7 +216,9 @@ void BackendProcess::readStandardError()
         return;
     }
     m_standardError.append(data);
-    emit standardErrorReceived(data);
+    if (!m_cancellationRequested) {
+        emit standardErrorReceived(data);
+    }
 }
 
 void BackendProcess::consumeCompleteLines()
@@ -195,7 +241,7 @@ void BackendProcess::consumeCompleteLines()
 
 void BackendProcess::consumeLine(QByteArray line)
 {
-    if (m_protocolFailed || m_terminalSignalEmitted) {
+    if (m_cancellationRequested || m_protocolFailed || m_terminalSignalEmitted) {
         return;
     }
 
@@ -247,6 +293,11 @@ void BackendProcess::processFinished(int exitCode, QProcess::ExitStatus exitStat
     readStandardOutput();
     readStandardError();
 
+    if (m_cancellationRequested) {
+        finishCancellation();
+        return;
+    }
+
     if (!m_protocolFailed && !m_stdoutBuffer.isEmpty()) {
         QByteArray finalLine = m_stdoutBuffer;
         m_stdoutBuffer.clear();
@@ -281,6 +332,13 @@ void BackendProcess::processFinished(int exitCode, QProcess::ExitStatus exitStat
 
 void BackendProcess::processError(QProcess::ProcessError error)
 {
+    if (m_cancellationRequested) {
+        if (!isRunning()) {
+            finishCancellation();
+        }
+        return;
+    }
+
     if (m_terminalSignalEmitted) {
         return;
     }
@@ -289,6 +347,25 @@ void BackendProcess::processError(QProcess::ProcessError error)
         ? QStringLiteral("Failed to start backend process: %1").arg(m_process.errorString())
         : QStringLiteral("Backend process error: %1").arg(m_process.errorString());
     failRun(message, error != QProcess::Crashed);
+}
+
+void BackendProcess::escalateCancellation()
+{
+    if (m_cancellationRequested && !m_terminalSignalEmitted && isRunning()) {
+        m_process.kill();
+    }
+}
+
+void BackendProcess::finishCancellation()
+{
+    if (m_terminalSignalEmitted) {
+        return;
+    }
+
+    m_cancellationTimer.stop();
+    m_stdoutBuffer.clear();
+    m_terminalSignalEmitted = true;
+    emit cancelled();
 }
 
 void BackendProcess::failRun(const QString &message, bool terminateProcess)

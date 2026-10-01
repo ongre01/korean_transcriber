@@ -8,6 +8,7 @@
 #include <QObject>
 #include <QProcess>
 #include <QString>
+#include <QTimer>
 
 class BackendProcess : public QObject
 {
@@ -15,6 +16,7 @@ class BackendProcess : public QObject
 
 public:
     explicit BackendProcess(QObject *parent = nullptr);
+    ~BackendProcess() override;
 
     void setPythonProgram(const QString &program);
     QString pythonProgram() const;
@@ -27,6 +29,8 @@ public:
 
     void start(const TranscribeOptions &options);
     void cancel();
+    void setCancellationGracePeriod(int milliseconds);
+    int cancellationGracePeriod() const noexcept;
 
     bool isRunning() const;
     QString textResultFile() const;
@@ -42,6 +46,7 @@ signals:
     // speaker is one-based; 0 represents an unassigned speaker.
     void segmentReceived(double start, double end, int speaker, QString text);
     void completed();
+    void cancelled();
     void errorOccurred(QString message);
     void standardErrorReceived(QByteArray data);
 
@@ -54,9 +59,12 @@ private:
     void dispatchEvent(const BackendEvent &event);
     void processFinished(int exitCode, QProcess::ExitStatus exitStatus);
     void processError(QProcess::ProcessError error);
+    void escalateCancellation();
+    void finishCancellation();
     void failRun(const QString &message, bool terminateProcess = true);
 
     QProcess m_process;
+    QTimer m_cancellationTimer;
     QString m_pythonProgram = QStringLiteral("python");
     QString m_bridgeScript;
     QString m_workingDirectory;
@@ -72,6 +80,8 @@ private:
     bool m_receivedError = false;
     bool m_protocolFailed = false;
     bool m_terminalSignalEmitted = false;
+    bool m_cancellationRequested = false;
+    int m_cancellationGracePeriodMilliseconds = 3000;
 };
 
 #endif // BACKENDPROCESS_H

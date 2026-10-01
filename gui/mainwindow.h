@@ -17,6 +17,8 @@ class MainWindow;
 }
 QT_END_NAMESPACE
 
+class QCloseEvent;
+
 class MainWindow : public QMainWindow
 {
     Q_OBJECT
@@ -63,6 +65,7 @@ private slots:
     void recordingFailed(const QString &message);
     void inputFileInspectionSucceeded(const AudioFileMetadata &metadata);
     void inputFileInspectionFailed(const QString &filePath, const QString &message);
+    void processingCancelled();
     void backendStateChanged(const QString &state);
     void backendProgressChanged(int progress);
     void backendProgressTimeChanged(double processedSeconds, double totalSeconds);
@@ -76,6 +79,10 @@ private:
     void updateInputFileUi();
     void updateUiForState();
 
+protected:
+    void closeEvent(QCloseEvent *event) override;
+
+private:
     Ui::MainWindow *ui;
     AudioRecorder *m_audioRecorder;
     AudioFileInfo *m_audioFileInfo;
@@ -86,6 +93,8 @@ private:
     qint64 m_inputDurationMilliseconds = -1;
     qint64 m_recordingDurationMilliseconds = 0;
     bool m_inputInspectionPending = false;
+    bool m_cancellationPending = false;
+    bool m_closeRequested = false;
     // Preserve the option used for the active/completed run. The checkbox can
     // be changed after completion without changing how that result is shown.
     bool m_diarizationEnabledForRun = false;

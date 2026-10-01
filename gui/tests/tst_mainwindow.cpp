@@ -2,7 +2,9 @@
 #include "mainwindow.h"
 
 #include <QCheckBox>
+#include <QCloseEvent>
 #include <QComboBox>
+#include <QCoreApplication>
 #include <QPushButton>
 #include <QLabel>
 #include <QFile>
@@ -38,6 +40,8 @@ private slots:
     void failedProcessingDoesNotShowCompletionProgress();
     void diarizationOptionsAndTranscriptLabels();
     void diarizationModelFailureAllowsRetry();
+    void cancellationWaitsForExitAndAllowsRestart();
+    void closeDefersUntilBackendIsStopped();
 };
 
 namespace {
@@ -677,6 +681,73 @@ void MainWindowTest::diarizationModelFailureAllowsRetry()
     window.setCurrentInputFile(retryPath);
     transcribeButton->click();
     QTRY_COMPARE_WITH_TIMEOUT(window.appState(), AppState::Completed, 5000);
+}
+
+void MainWindowTest::cancellationWaitsForExitAndAllowsRestart()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString cancelledPath = createAudioFixture(
+        directory, QStringLiteral("ui_cancel_ignores_terminate.wav"));
+    const QString retryPath = createAudioFixture(directory, QStringLiteral("ui_success.wav"));
+    QVERIFY(!cancelledPath.isEmpty());
+    QVERIFY(!retryPath.isEmpty());
+
+    MainWindow window;
+    configureBackendMock(window);
+    window.backendProcess()->setCancellationGracePeriod(150);
+    auto *transcribeButton = window.findChild<QPushButton *>("transcribeButton");
+    auto *cancelButton = window.findChild<QPushButton *>("cancelButton");
+    QVERIFY(transcribeButton);
+    QVERIFY(cancelButton);
+
+    QFile originalFile(cancelledPath);
+    QVERIFY(originalFile.open(QIODevice::ReadOnly));
+    const QByteArray originalContents = originalFile.readAll();
+
+    window.setCurrentInputFile(cancelledPath);
+    transcribeButton->click();
+    QTRY_VERIFY_WITH_TIMEOUT(window.backendProcess()->isRunning(), 5000);
+    cancelButton->click();
+
+    QCOMPARE(window.appState(), AppState::Processing);
+    QVERIFY(!cancelButton->isEnabled());
+    QVERIFY(!transcribeButton->isEnabled());
+    QTRY_COMPARE_WITH_TIMEOUT(window.appState(), AppState::InputReady, 5000);
+    QVERIFY(!window.backendProcess()->isRunning());
+
+    QFile unchangedFile(cancelledPath);
+    QVERIFY(unchangedFile.open(QIODevice::ReadOnly));
+    QCOMPARE(unchangedFile.readAll(), originalContents);
+
+    window.setCurrentInputFile(retryPath);
+    transcribeButton->click();
+    QTRY_COMPARE_WITH_TIMEOUT(window.appState(), AppState::Completed, 5000);
+}
+
+void MainWindowTest::closeDefersUntilBackendIsStopped()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString inputPath = createAudioFixture(
+        directory, QStringLiteral("ui_cancel_ignores_terminate.wav"));
+    QVERIFY(!inputPath.isEmpty());
+
+    MainWindow window;
+    configureBackendMock(window);
+    window.backendProcess()->setCancellationGracePeriod(150);
+    auto *transcribeButton = window.findChild<QPushButton *>("transcribeButton");
+    QVERIFY(transcribeButton);
+
+    window.setCurrentInputFile(inputPath);
+    transcribeButton->click();
+    QTRY_VERIFY_WITH_TIMEOUT(window.backendProcess()->isRunning(), 5000);
+
+    QCloseEvent closeEvent;
+    QCoreApplication::sendEvent(&window, &closeEvent);
+    QVERIFY(!closeEvent.isAccepted());
+    QTRY_VERIFY_WITH_TIMEOUT(!window.backendProcess()->isRunning(), 5000);
+    QTRY_COMPARE_WITH_TIMEOUT(window.appState(), AppState::InputReady, 5000);
 }
 
 QTEST_MAIN(MainWindowTest)

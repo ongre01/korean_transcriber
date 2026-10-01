@@ -2,6 +2,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import signal
 import sys
 import time
 
@@ -59,7 +60,19 @@ def validate_diarization_is_off():
         write_line({"type": "error", "message": "UI unexpectedly enabled diarization"})
         raise SystemExit(14)
 
-if scenario == "normal":
+if scenario == "cancel_ignores_terminate":
+    write_line({"type": "state", "value": "preparing"})
+    if hasattr(signal, "SIGTERM"):
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    # This terminal event is emitted after cancellation has started.  The
+    # receiver must discard it and force the still-running mock to exit.
+    time.sleep(0.05)
+    write_line(
+        {"type": "completed", "text_file": "C:/late.txt", "srt_file": "C:/late.srt"}
+    )
+    while True:
+        time.sleep(0.05)
+elif scenario == "normal":
     write_line({"type": "state", "value": "preparing"}, b"\r\n")
     write_line({"type": "progress", "value": None})
     print("mock diagnostic", file=sys.stderr, flush=True)

@@ -17,6 +17,8 @@ private slots:
     void processFailures_data();
     void processFailures();
     void missingPythonProgramIsReportedOnce();
+    void cancellationTerminatesActiveRun();
+    void cancellationEscalatesAndAllowsRestart();
 
 private:
     TranscribeOptions options(const QString &scenario) const;
@@ -167,6 +169,55 @@ void BackendProcessTest::missingPythonProgramIsReportedOnce()
     QCOMPARE(errors.count(), 1);
     QCOMPARE(completed.count(), 0);
     QVERIFY(!process.isRunning());
+}
+
+void BackendProcessTest::cancellationTerminatesActiveRun()
+{
+    BackendProcess process;
+    configure(&process);
+    process.setCancellationGracePeriod(1000);
+
+    QSignalSpy states(&process, &BackendProcess::stateChanged);
+    QSignalSpy completed(&process, &BackendProcess::completed);
+    QSignalSpy cancelled(&process, &BackendProcess::cancelled);
+    QSignalSpy errors(&process, &BackendProcess::errorOccurred);
+
+    process.start(options(QStringLiteral("normal")));
+    QTRY_COMPARE_WITH_TIMEOUT(states.count(), 1, 5000);
+    process.cancel();
+
+    QTRY_COMPARE_WITH_TIMEOUT(cancelled.count(), 1, 5000);
+    QTRY_VERIFY_WITH_TIMEOUT(!process.isRunning(), 5000);
+    QCOMPARE(completed.count(), 0);
+    QCOMPARE(errors.count(), 0);
+}
+
+void BackendProcessTest::cancellationEscalatesAndAllowsRestart()
+{
+    BackendProcess process;
+    configure(&process);
+    process.setCancellationGracePeriod(150);
+
+    QSignalSpy states(&process, &BackendProcess::stateChanged);
+    QSignalSpy completed(&process, &BackendProcess::completed);
+    QSignalSpy cancelled(&process, &BackendProcess::cancelled);
+    QSignalSpy errors(&process, &BackendProcess::errorOccurred);
+
+    process.start(options(QStringLiteral("cancel_ignores_terminate")));
+    QTRY_COMPARE_WITH_TIMEOUT(states.count(), 1, 5000);
+    process.cancel();
+    process.cancel();
+
+    QTRY_COMPARE_WITH_TIMEOUT(cancelled.count(), 1, 5000);
+    QTRY_VERIFY_WITH_TIMEOUT(!process.isRunning(), 5000);
+    // The fixture emits completed after cancellation; it must not win the race.
+    QCOMPARE(completed.count(), 0);
+    QCOMPARE(errors.count(), 0);
+
+    process.start(options(QStringLiteral("normal")));
+    QTRY_COMPARE_WITH_TIMEOUT(completed.count(), 1, 5000);
+    QCOMPARE(cancelled.count(), 1);
+    QCOMPARE(errors.count(), 0);
 }
 
 QTEST_GUILESS_MAIN(BackendProcessTest)

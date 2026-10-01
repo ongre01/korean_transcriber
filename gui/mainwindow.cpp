@@ -2,6 +2,7 @@
 #include "ui_mainwindow.h"
 
 #include <QCoreApplication>
+#include <QCloseEvent>
 #include <QDir>
 #include <QFileDialog>
 #include <QFileInfo>
@@ -209,6 +210,8 @@ MainWindow::MainWindow(QWidget *parent)
             Qt::QueuedConnection);
     connect(this, &MainWindow::recordingStopRequested,
             m_audioRecorder, &AudioRecorder::stopRecording);
+    connect(this, &MainWindow::cancellationRequested,
+            m_backendProcess, &BackendProcess::cancel);
     connect(m_audioRecorder, &AudioRecorder::inputDevicesChanged,
             this, &MainWindow::updateMicrophoneUi);
     connect(m_audioRecorder, &AudioRecorder::recordingTimeChanged,
@@ -233,6 +236,8 @@ MainWindow::MainWindow(QWidget *parent)
             this, &MainWindow::backendProgressTimeChanged);
     connect(m_backendProcess, &BackendProcess::completed,
             this, &MainWindow::processingCompleted);
+    connect(m_backendProcess, &BackendProcess::cancelled,
+            this, &MainWindow::processingCancelled);
     connect(m_backendProcess, &BackendProcess::errorOccurred,
             this, &MainWindow::processingFailed);
 
@@ -331,16 +336,32 @@ void MainWindow::setAppState(AppState state, const QString &message)
 
 void MainWindow::processingCompleted()
 {
-    if (m_state == AppState::Processing) {
+    if (m_state == AppState::Processing && !m_cancellationPending) {
         setAppState(AppState::Completed);
     }
 }
 
 void MainWindow::processingFailed(const QString &message)
 {
-    if (m_state == AppState::Processing) {
+    if (m_state == AppState::Processing && !m_cancellationPending) {
         resetProcessingIndicators();
         setAppState(AppState::Error, message);
+    }
+}
+
+void MainWindow::processingCancelled()
+{
+    const bool closeRequested = m_closeRequested;
+    m_closeRequested = false;
+    m_cancellationPending = false;
+
+    if (m_state == AppState::Processing) {
+        resetProcessingIndicators();
+        setAppState(hasValidInput() ? AppState::InputReady : AppState::Idle);
+    }
+
+    if (closeRequested) {
+        close();
     }
 }
 
@@ -445,6 +466,7 @@ void MainWindow::handleTranscriptionStart()
     }
 
     m_diarizationEnabledForRun = options.diarizationEnabled;
+    m_cancellationPending = false;
     clearTranscript();
     resetProcessingIndicators();
     setAppState(AppState::Processing);
@@ -455,12 +477,14 @@ void MainWindow::handleTranscriptionStart()
 void MainWindow::handleCancellation()
 {
     const AppActionPolicy policy = appActionPolicy(m_state, hasValidInput());
-    if (!policy.canCancel) {
+    if (!policy.canCancel || m_cancellationPending) {
         return;
     }
 
-    resetProcessingIndicators();
-    setAppState(hasValidInput() ? AppState::InputReady : AppState::Idle);
+    m_cancellationPending = true;
+    m_backendState = QStringLiteral("cancelling");
+    ui->processingProgressBar->setRange(0, 0);
+    updateUiForState();
     emit cancellationRequested();
 }
 
@@ -594,7 +618,7 @@ void MainWindow::inputFileInspectionFailed(const QString &filePath, const QStrin
 
 void MainWindow::backendStateChanged(const QString &state)
 {
-    if (m_state != AppState::Processing) {
+    if (m_state != AppState::Processing || m_cancellationPending) {
         return;
     }
 
@@ -605,7 +629,7 @@ void MainWindow::backendStateChanged(const QString &state)
 
 void MainWindow::backendProgressChanged(int progress)
 {
-    if (m_state != AppState::Processing) {
+    if (m_state != AppState::Processing || m_cancellationPending) {
         return;
     }
 
@@ -620,7 +644,7 @@ void MainWindow::backendProgressChanged(int progress)
 
 void MainWindow::backendProgressTimeChanged(double processedSeconds, double totalSeconds)
 {
-    if (m_state != AppState::Processing) {
+    if (m_state != AppState::Processing || m_cancellationPending) {
         return;
     }
 
@@ -635,7 +659,7 @@ void MainWindow::backendProgressTimeChanged(double processedSeconds, double tota
 void MainWindow::transcriptionSegmentReceived(double start, double end,
                                               int speaker, const QString &text)
 {
-    if (m_state != AppState::Processing) {
+    if (m_state != AppState::Processing || m_cancellationPending) {
         return;
     }
 
@@ -738,7 +762,7 @@ void MainWindow::updateUiForState()
     ui->fileSelectButton->setEnabled(policy.canSelectFile);
     ui->recordStopButton->setEnabled(policy.canStopRecording);
     ui->transcribeButton->setEnabled(policy.canStartTranscription);
-    ui->cancelButton->setEnabled(policy.canCancel);
+    ui->cancelButton->setEnabled(policy.canCancel && !m_cancellationPending);
 
     ui->recordingModeRadioButton->setEnabled(controlsEnabled);
     ui->fileModeRadioButton->setEnabled(controlsEnabled);
@@ -761,9 +785,31 @@ void MainWindow::updateUiForState()
     }
 
     const QString stateLabel = m_state == AppState::Processing
-        ? processingStateText(m_backendState)
+        ? (m_cancellationPending
+               ? tr("취소 중...")
+               : processingStateText(m_backendState))
         : statusText(m_state);
     ui->processingStateLabel->setText(stateLabel);
     ui->statusLabel->setText(stateLabel);
     statusBar()->showMessage(m_stateMessage.isEmpty() ? stateLabel : m_stateMessage);
+}
+
+void MainWindow::closeEvent(QCloseEvent *event)
+{
+    if (m_backendProcess && m_backendProcess->isRunning()) {
+        m_closeRequested = true;
+        if (!m_cancellationPending) {
+            m_cancellationPending = true;
+            m_backendState = QStringLiteral("cancelling");
+            updateUiForState();
+        }
+        emit cancellationRequested();
+        event->ignore();
+        return;
+    }
+
+    if (m_audioRecorder) {
+        m_audioRecorder->stopRecording();
+    }
+    QMainWindow::closeEvent(event);
 }
