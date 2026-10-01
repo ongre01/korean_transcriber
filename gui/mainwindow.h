@@ -84,6 +84,7 @@ private slots:
     void backendStandardErrorReceived(const QByteArray &data);
     void backendProcessStopped();
     void scheduleHotwordsSave();
+    void scheduleInitialPromptSave();
 
 private:
     void clearTranscript();
@@ -96,6 +97,8 @@ private:
     void saveSettings();
     void loadHotwordsText();
     bool saveHotwordsText(QString *errorMessage = nullptr);
+    void loadInitialPromptText();
+    bool saveInitialPromptText(QString *errorMessage = nullptr);
     bool validateSettingsForRun(bool diarizationEnabled);
     bool hasAvailableResult() const;
     void showResultError(const QString &message);
@@ -117,6 +120,7 @@ private:
     AudioFileInfo *m_audioFileInfo;
     BackendProcess *m_backendProcess;
     QTimer *m_hotwordsSaveTimer = nullptr;
+    QTimer *m_initialPromptSaveTimer = nullptr;
     QAction *m_settingsAction = nullptr;
     QAction *m_viewLogsAction = nullptr;
     AppLogger m_logger;
@@ -132,6 +136,7 @@ private:
     bool m_diarizationFallbackOccurred = false;
     bool m_logWriteFailureReported = false;
     bool m_hotwordsTextDirty = false;
+    bool m_initialPromptTextDirty = false;
     // Preserve the option used for the active/completed run. The checkbox can
     // be changed after completion without changing how that result is shown.
     bool m_diarizationEnabledForRun = false;

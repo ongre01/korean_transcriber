@@ -154,6 +154,17 @@ QString userHotwordsFilePath()
         : QDir(directory).filePath(QStringLiteral("hotwords.txt"));
 }
 
+QString userInitialPromptFilePath()
+{
+    QString directory = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+    if (directory.isEmpty()) {
+        directory = QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation);
+    }
+    return directory.isEmpty()
+        ? QString()
+        : QDir(directory).filePath(QStringLiteral("initial_prompt.txt"));
+}
+
 BackendDevice backendDevice(const QString &name)
 {
     if (name.compare(QStringLiteral("NPU"), Qt::CaseInsensitive) == 0) {
@@ -202,10 +213,13 @@ MainWindow::MainWindow(QWidget *parent)
     , m_audioFileInfo(new AudioFileInfo(this))
     , m_backendProcess(new BackendProcess(this))
     , m_hotwordsSaveTimer(new QTimer(this))
+    , m_initialPromptSaveTimer(new QTimer(this))
 {
     ui->setupUi(this);
     m_hotwordsSaveTimer->setSingleShot(true);
     m_hotwordsSaveTimer->setInterval(400);
+    m_initialPromptSaveTimer->setSingleShot(true);
+    m_initialPromptSaveTimer->setInterval(400);
 
     m_settings = Settings::load();
     if (m_settings.pythonPath.isEmpty()) {
@@ -245,11 +259,21 @@ MainWindow::MainWindow(QWidget *parent)
             [this](const QString &) { saveSettings(); });
     connect(ui->hotwordsTextEdit, &QPlainTextEdit::textChanged,
             this, &MainWindow::scheduleHotwordsSave);
+    connect(ui->initialPromptTextEdit, &QPlainTextEdit::textChanged,
+            this, &MainWindow::scheduleInitialPromptSave);
     connect(m_hotwordsSaveTimer, &QTimer::timeout, this, [this]() {
         QString errorMessage;
         if (!saveHotwordsText(&errorMessage)) {
             logError(tr("Hotwords Save Error"), errorMessage);
             ui->hotwordsStatusLabel->setText(tr("자동 저장 실패: %1").arg(errorMessage));
+        }
+    });
+    connect(m_initialPromptSaveTimer, &QTimer::timeout, this, [this]() {
+        QString errorMessage;
+        if (!saveInitialPromptText(&errorMessage)) {
+            logError(tr("Initial Prompt Save Error"), errorMessage);
+            ui->initialPromptStatusLabel->setText(
+                tr("자동 저장 실패: %1").arg(errorMessage));
         }
     });
     connect(ui->microphoneComboBox,
@@ -547,6 +571,14 @@ void MainWindow::handleTranscriptionStart()
     if (!saveHotwordsText(&hotwordsError)) {
         logError(tr("Hotwords Save Error"), hotwordsError);
         QMessageBox::warning(this, tr("Hotwords 저장 실패"), hotwordsError);
+        return;
+    }
+
+    m_initialPromptSaveTimer->stop();
+    QString initialPromptError;
+    if (!saveInitialPromptText(&initialPromptError)) {
+        logError(tr("Initial Prompt Save Error"), initialPromptError);
+        QMessageBox::warning(this, tr("초기 프롬프트 저장 실패"), initialPromptError);
         return;
     }
 
@@ -1238,6 +1270,7 @@ void MainWindow::applySettingsToUi()
         m_stateMessage = tr("저장된 마이크를 찾을 수 없습니다. 현재 사용 가능한 마이크를 다시 선택하세요.");
     }
     loadHotwordsText();
+    loadInitialPromptText();
     updateSpeakerCountEnabled();
 }
 
@@ -1259,6 +1292,13 @@ void MainWindow::scheduleHotwordsSave()
     m_hotwordsTextDirty = true;
     ui->hotwordsStatusLabel->setText(tr("입력 내용 저장 중..."));
     m_hotwordsSaveTimer->start();
+}
+
+void MainWindow::scheduleInitialPromptSave()
+{
+    m_initialPromptTextDirty = true;
+    ui->initialPromptStatusLabel->setText(tr("입력 내용 저장 중..."));
+    m_initialPromptSaveTimer->start();
 }
 
 void MainWindow::loadHotwordsText()
@@ -1357,6 +1397,108 @@ bool MainWindow::saveHotwordsText(QString *errorMessage)
     return true;
 }
 
+void MainWindow::loadInitialPromptText()
+{
+    const QSignalBlocker blocker(ui->initialPromptTextEdit);
+    ui->initialPromptTextEdit->clear();
+    m_initialPromptTextDirty = false;
+
+    const QString filePath = m_settings.initialPromptFile.trimmed();
+    if (filePath.isEmpty()) {
+        ui->initialPromptStatusLabel->setText(tr("입력하면 자동 저장됩니다."));
+        return;
+    }
+
+    QFile input(filePath);
+    if (!input.open(QIODevice::ReadOnly)) {
+        const QString errorMessage = tr("Initial Prompt 파일을 불러올 수 없습니다: %1")
+                                         .arg(input.errorString());
+        logError(tr("Initial Prompt Load Error"), errorMessage);
+        ui->initialPromptStatusLabel->setText(errorMessage);
+        return;
+    }
+
+    QString contents = QString::fromUtf8(input.readAll());
+    if (contents.startsWith(QChar::ByteOrderMark)) {
+        contents.remove(0, 1);
+    }
+    ui->initialPromptTextEdit->setPlainText(contents);
+    ui->initialPromptStatusLabel->setText(tr("저장된 초기 프롬프트를 불러왔습니다."));
+}
+
+bool MainWindow::saveInitialPromptText(QString *errorMessage)
+{
+    // A blank setting must still be persisted and passed to the bridge.  This
+    // prevents the engine's bundled default prompt file from being applied
+    // when the user intentionally leaves the editor empty.
+    if (!m_initialPromptTextDirty && !m_settings.initialPromptFile.trimmed().isEmpty()) {
+        if (errorMessage) {
+            errorMessage->clear();
+        }
+        return true;
+    }
+
+    QString filePath = m_settings.initialPromptFile.trimmed();
+    if (filePath.isEmpty()) {
+        filePath = userInitialPromptFilePath();
+    }
+    if (filePath.isEmpty()) {
+        if (errorMessage) {
+            *errorMessage = tr("초기 프롬프트 파일을 저장할 사용자 데이터 폴더를 찾을 수 없습니다.");
+        }
+        return false;
+    }
+
+    const QString absolutePath = QDir::cleanPath(QFileInfo(filePath).absoluteFilePath());
+    const QString directoryPath = QFileInfo(absolutePath).absolutePath();
+    if (!QDir().mkpath(directoryPath)) {
+        if (errorMessage) {
+            *errorMessage = tr("초기 프롬프트 파일 폴더를 만들 수 없습니다: %1")
+                                .arg(QDir::toNativeSeparators(directoryPath));
+        }
+        return false;
+    }
+
+    QSaveFile output(absolutePath);
+    if (!output.open(QIODevice::WriteOnly)) {
+        if (errorMessage) {
+            *errorMessage = tr("초기 프롬프트 파일을 저장할 수 없습니다: %1")
+                                .arg(output.errorString());
+        }
+        return false;
+    }
+
+    QString contents = ui->initialPromptTextEdit->toPlainText();
+    if (!contents.isEmpty() && !contents.endsWith(QLatin1Char('\n'))) {
+        contents.append(QLatin1Char('\n'));
+    }
+    const QByteArray encodedContents = contents.toUtf8();
+    if (output.write(encodedContents) != encodedContents.size()) {
+        output.cancelWriting();
+        if (errorMessage) {
+            *errorMessage = tr("초기 프롬프트 파일을 저장할 수 없습니다: %1")
+                                .arg(output.errorString());
+        }
+        return false;
+    }
+    if (!output.commit()) {
+        if (errorMessage) {
+            *errorMessage = tr("초기 프롬프트 파일을 저장할 수 없습니다: %1")
+                                .arg(output.errorString());
+        }
+        return false;
+    }
+
+    m_settings.initialPromptFile = absolutePath;
+    m_initialPromptTextDirty = false;
+    saveSettings();
+    ui->initialPromptStatusLabel->setText(tr("자동 저장됨"));
+    if (errorMessage) {
+        errorMessage->clear();
+    }
+    return true;
+}
+
 bool MainWindow::validateSettingsForRun(bool diarizationEnabled)
 {
     QString errorMessage;
@@ -1406,6 +1548,7 @@ void MainWindow::updateUiForState()
     ui->diarizationCheckBox->setEnabled(controlsEnabled);
     ui->deviceComboBox->setEnabled(controlsEnabled);
     ui->hotwordsTextEdit->setEnabled(m_state != AppState::Processing && !backendBusy);
+    ui->initialPromptTextEdit->setEnabled(m_state != AppState::Processing && !backendBusy);
     if (m_settingsAction) {
         m_settingsAction->setEnabled(controlsEnabled);
     }
@@ -1455,6 +1598,11 @@ void MainWindow::closeEvent(QCloseEvent *event)
     QString hotwordsError;
     if (!saveHotwordsText(&hotwordsError)) {
         logError(tr("Hotwords Save Error"), hotwordsError);
+    }
+    m_initialPromptSaveTimer->stop();
+    QString initialPromptError;
+    if (!saveInitialPromptText(&initialPromptError)) {
+        logError(tr("Initial Prompt Save Error"), initialPromptError);
     }
     saveSettings();
     QMainWindow::closeEvent(event);

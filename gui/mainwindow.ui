@@ -6,8 +6,8 @@
    <rect>
     <x>0</x>
     <y>0</y>
-    <width>900</width>
-    <height>840</height>
+    <width>1063</width>
+    <height>843</height>
    </rect>
   </property>
   <property name="minimumSize">
@@ -20,88 +20,162 @@
    <string>AI Audio Transcriber</string>
   </property>
   <widget class="QWidget" name="centralwidget">
-   <layout class="QVBoxLayout" name="mainLayout" stretch="0,0,0,1,0">
-    <property name="leftMargin"><number>12</number></property>
-    <property name="topMargin"><number>12</number></property>
-    <property name="rightMargin"><number>12</number></property>
-    <property name="bottomMargin"><number>8</number></property>
-    <property name="spacing"><number>10</number></property>
-    <item>
+   <layout class="QGridLayout" name="gridLayout">
+    <property name="leftMargin">
+     <number>12</number>
+    </property>
+    <property name="topMargin">
+     <number>12</number>
+    </property>
+    <property name="rightMargin">
+     <number>12</number>
+    </property>
+    <property name="bottomMargin">
+     <number>8</number>
+    </property>
+    <item row="0" column="0">
      <widget class="QGroupBox" name="inputGroupBox">
-      <property name="title"><string>입력 방식</string></property>
+      <property name="maximumSize">
+       <size>
+        <width>400</width>
+        <height>16777215</height>
+       </size>
+      </property>
+      <property name="title">
+       <string>입력 방식</string>
+      </property>
       <layout class="QGridLayout" name="inputLayout">
-       <property name="horizontalSpacing"><number>10</number></property>
-       <property name="verticalSpacing"><number>8</number></property>
-       <item row="0" column="0" colspan="2">
-        <widget class="QRadioButton" name="recordingModeRadioButton">
-         <property name="text"><string>실시간 녹음</string></property>
-         <property name="checked"><bool>true</bool></property>
-        </widget>
-       </item>
-       <item row="0" column="2" colspan="2">
-        <widget class="QRadioButton" name="fileModeRadioButton">
-         <property name="text"><string>기존 파일</string></property>
+       <property name="horizontalSpacing">
+        <number>10</number>
+       </property>
+       <property name="verticalSpacing">
+        <number>8</number>
+       </property>
+       <item row="2" column="0">
+        <widget class="QLabel" name="recordingTimeTitleLabel">
+         <property name="text">
+          <string>녹음 시간</string>
+         </property>
         </widget>
        </item>
        <item row="1" column="0">
         <widget class="QLabel" name="microphoneLabel">
-         <property name="text"><string>마이크</string></property>
+         <property name="text">
+          <string>마이크</string>
+         </property>
+        </widget>
+       </item>
+       <item row="2" column="2">
+        <widget class="QLabel" name="inputLevelLabel">
+         <property name="text">
+          <string>입력 레벨</string>
+         </property>
+        </widget>
+       </item>
+       <item row="0" column="0" colspan="2">
+        <widget class="QRadioButton" name="recordingModeRadioButton">
+         <property name="text">
+          <string>실시간 녹음</string>
+         </property>
+         <property name="checked">
+          <bool>true</bool>
+         </property>
         </widget>
        </item>
        <item row="1" column="1" colspan="3">
         <widget class="QComboBox" name="microphoneComboBox">
-         <item><property name="text"><string>마이크 장치는 녹음 기능에서 불러옵니다</string></property></item>
+         <item>
+          <property name="text">
+           <string>마이크 장치는 녹음 기능에서 불러옵니다</string>
+          </property>
+         </item>
         </widget>
        </item>
-       <item row="2" column="0">
-        <widget class="QLabel" name="recordingTimeTitleLabel">
-         <property name="text"><string>녹음 시간</string></property>
+       <item row="0" column="2" colspan="2">
+        <widget class="QRadioButton" name="fileModeRadioButton">
+         <property name="text">
+          <string>기존 파일</string>
+         </property>
         </widget>
        </item>
        <item row="2" column="1">
         <widget class="QLabel" name="recordingTimeLabel">
          <property name="font">
-          <font><pointsize>16</pointsize><bold>true</bold></font>
+          <font>
+           <pointsize>16</pointsize>
+           <bold>true</bold>
+          </font>
          </property>
-         <property name="text"><string>00:00:00</string></property>
-        </widget>
-       </item>
-       <item row="2" column="2">
-        <widget class="QLabel" name="inputLevelLabel">
-         <property name="text"><string>입력 레벨</string></property>
+         <property name="text">
+          <string>00:00:00</string>
+         </property>
         </widget>
        </item>
        <item row="2" column="3">
         <widget class="QProgressBar" name="inputLevelProgressBar">
-         <property name="maximum"><number>100</number></property>
-         <property name="value"><number>0</number></property>
-         <property name="textVisible"><bool>false</bool></property>
+         <property name="maximum">
+          <number>100</number>
+         </property>
+         <property name="value">
+          <number>0</number>
+         </property>
+         <property name="textVisible">
+          <bool>false</bool>
+         </property>
         </widget>
        </item>
        <item row="3" column="0" colspan="4">
         <layout class="QHBoxLayout" name="recordingButtonLayout">
          <item>
           <spacer name="recordingButtonLeftSpacer">
-           <property name="orientation"><enum>Qt::Horizontal</enum></property>
-           <property name="sizeHint" stdset="0"><size><width>40</width><height>20</height></size></property>
+           <property name="orientation">
+            <enum>Qt::Orientation::Horizontal</enum>
+           </property>
+           <property name="sizeHint" stdset="0">
+            <size>
+             <width>40</width>
+             <height>20</height>
+            </size>
+           </property>
           </spacer>
          </item>
          <item>
           <widget class="QPushButton" name="recordStartButton">
-           <property name="minimumSize"><size><width>140</width><height>34</height></size></property>
-           <property name="text"><string>● 녹음 시작</string></property>
+           <property name="minimumSize">
+            <size>
+             <width>140</width>
+             <height>34</height>
+            </size>
+           </property>
+           <property name="text">
+            <string>● 녹음 시작</string>
+           </property>
           </widget>
          </item>
          <item>
           <widget class="QPushButton" name="recordStopButton">
-           <property name="minimumSize"><size><width>140</width><height>34</height></size></property>
-           <property name="text"><string>■ 녹음 중지</string></property>
+           <property name="minimumSize">
+            <size>
+             <width>140</width>
+             <height>34</height>
+            </size>
+           </property>
+           <property name="text">
+            <string>■ 녹음 중지</string>
+           </property>
           </widget>
          </item>
          <item>
           <spacer name="recordingButtonRightSpacer">
-           <property name="orientation"><enum>Qt::Horizontal</enum></property>
-           <property name="sizeHint" stdset="0"><size><width>40</width><height>20</height></size></property>
+           <property name="orientation">
+            <enum>Qt::Orientation::Horizontal</enum>
+           </property>
+           <property name="sizeHint" stdset="0">
+            <size>
+             <width>40</width>
+             <height>20</height>
+            </size>
+           </property>
           </spacer>
          </item>
         </layout>
@@ -109,92 +183,273 @@
       </layout>
      </widget>
     </item>
-    <item>
+    <item row="0" column="1">
      <widget class="QGroupBox" name="fileGroupBox">
-      <property name="title"><string>입력 파일</string></property>
+      <property name="title">
+       <string>입력 파일</string>
+      </property>
       <layout class="QGridLayout" name="fileLayout">
        <item row="0" column="0">
         <widget class="QLabel" name="fileNameTitleLabel">
-         <property name="text"><string>파일 이름</string></property>
+         <property name="text">
+          <string>파일 이름</string>
+         </property>
         </widget>
        </item>
        <item row="0" column="1">
         <widget class="QLabel" name="fileNameValueLabel">
-         <property name="text"><string>선택된 파일 없음</string></property>
-         <property name="textInteractionFlags"><set>Qt::TextSelectableByMouse</set></property>
+         <property name="text">
+          <string>선택된 파일 없음</string>
+         </property>
+         <property name="textInteractionFlags">
+          <set>Qt::TextInteractionFlag::TextSelectableByMouse</set>
+         </property>
         </widget>
        </item>
        <item row="0" column="2" rowspan="2">
         <widget class="QPushButton" name="fileSelectButton">
-         <property name="minimumSize"><size><width>110</width><height>34</height></size></property>
-         <property name="text"><string>파일 선택</string></property>
+         <property name="minimumSize">
+          <size>
+           <width>110</width>
+           <height>34</height>
+          </size>
+         </property>
+         <property name="text">
+          <string>파일 선택</string>
+         </property>
         </widget>
        </item>
        <item row="1" column="0">
         <widget class="QLabel" name="filePathTitleLabel">
-         <property name="text"><string>경로</string></property>
+         <property name="text">
+          <string>경로</string>
+         </property>
         </widget>
        </item>
        <item row="1" column="1">
         <widget class="QLabel" name="filePathValueLabel">
-         <property name="text"><string>—</string></property>
-         <property name="textInteractionFlags"><set>Qt::TextSelectableByMouse</set></property>
-         <property name="wordWrap"><bool>true</bool></property>
+         <property name="text">
+          <string>—</string>
+         </property>
+         <property name="wordWrap">
+          <bool>true</bool>
+         </property>
+         <property name="textInteractionFlags">
+          <set>Qt::TextInteractionFlag::TextSelectableByMouse</set>
+         </property>
         </widget>
        </item>
        <item row="2" column="0">
         <widget class="QLabel" name="fileDurationTitleLabel">
-         <property name="text"><string>재생 시간</string></property>
+         <property name="text">
+          <string>재생 시간</string>
+         </property>
         </widget>
        </item>
        <item row="2" column="1">
         <widget class="QLabel" name="fileDurationValueLabel">
-         <property name="text"><string>—</string></property>
+         <property name="text">
+          <string>—</string>
+         </property>
         </widget>
        </item>
        <item row="2" column="2">
         <widget class="QLabel" name="fileSizeValueLabel">
-         <property name="text"><string>—</string></property>
-         <property name="alignment"><set>Qt::AlignRight|Qt::AlignTrailing|Qt::AlignVCenter</set></property>
+         <property name="text">
+          <string>—</string>
+         </property>
+         <property name="alignment">
+          <set>Qt::AlignmentFlag::AlignRight|Qt::AlignmentFlag::AlignTrailing|Qt::AlignmentFlag::AlignVCenter</set>
+         </property>
         </widget>
        </item>
       </layout>
      </widget>
     </item>
-    <item>
+    <item row="2" column="0" colspan="2">
      <widget class="QGroupBox" name="processingGroupBox">
-      <property name="title"><string>처리 옵션</string></property>
+      <property name="title">
+       <string>처리 옵션</string>
+      </property>
       <layout class="QGridLayout" name="processingLayout">
        <item row="0" column="0">
         <widget class="QCheckBox" name="diarizationCheckBox">
-         <property name="text"><string>화자 분리</string></property>
+         <property name="text">
+          <string>화자 분리</string>
+         </property>
         </widget>
        </item>
-       <item row="0" column="1">
-        <widget class="QLabel" name="speakerCountLabel">
-         <property name="text"><string>화자 수</string></property>
+       <item row="7" column="0">
+        <widget class="QLabel" name="processingTimeTitleLabel">
+         <property name="text">
+          <string>처리 시간</string>
+         </property>
         </widget>
        </item>
-       <item row="0" column="2">
-        <widget class="QComboBox" name="speakerCountComboBox">
-         <item><property name="text"><string>Auto</string></property></item>
-         <item><property name="text"><string>2</string></property></item>
-         <item><property name="text"><string>3</string></property></item>
-         <item><property name="text"><string>4</string></property></item>
-         <item><property name="text"><string>5</string></property></item>
+       <item row="6" column="0">
+        <widget class="QLabel" name="processingStateLabel">
+         <property name="text">
+          <string>준비</string>
+         </property>
+        </widget>
+       </item>
+       <item row="3" column="0">
+        <widget class="QLabel" name="initialPromptLabel">
+         <property name="text">
+          <string>초기 프롬프트</string>
+         </property>
+        </widget>
+       </item>
+       <item row="6" column="1" colspan="4">
+        <widget class="QProgressBar" name="processingProgressBar">
+         <property name="minimum">
+          <number>0</number>
+         </property>
+         <property name="maximum">
+          <number>100</number>
+         </property>
+         <property name="value">
+          <number>0</number>
+         </property>
+        </widget>
+       </item>
+       <item row="3" column="1" colspan="4">
+        <widget class="QPlainTextEdit" name="initialPromptTextEdit">
+         <property name="minimumSize">
+          <size>
+           <width>0</width>
+           <height>0</height>
+          </size>
+         </property>
+         <property name="placeholderText">
+          <string>문맥과 고유명사 등을 입력하세요. #으로 시작하는 줄은 주석으로 처리됩니다.</string>
+         </property>
+        </widget>
+       </item>
+       <item row="7" column="1" colspan="4">
+        <widget class="QLabel" name="processingTimeLabel">
+         <property name="text">
+          <string>—</string>
+         </property>
+        </widget>
+       </item>
+       <item row="2" column="0">
+        <widget class="QLabel" name="hotwordsStatusLabel">
+         <property name="text">
+          <string>입력하면 자동 저장됩니다.</string>
+         </property>
         </widget>
        </item>
        <item row="0" column="3">
         <widget class="QLabel" name="deviceLabel">
-         <property name="text"><string>Device</string></property>
+         <property name="text">
+          <string>Device</string>
+         </property>
         </widget>
        </item>
-       <item row="0" column="4">
-        <widget class="QComboBox" name="deviceComboBox">
-         <item><property name="text"><string>AUTO</string></property></item>
-         <item><property name="text"><string>NPU</string></property></item>
-         <item><property name="text"><string>CPU</string></property></item>
-         <item><property name="text"><string>GPU</string></property></item>
+       <item row="5" column="0" colspan="5">
+        <layout class="QHBoxLayout" name="processingButtonLayout">
+         <item>
+          <spacer name="processingButtonLeftSpacer">
+           <property name="orientation">
+            <enum>Qt::Orientation::Horizontal</enum>
+           </property>
+           <property name="sizeHint" stdset="0">
+            <size>
+             <width>40</width>
+             <height>20</height>
+            </size>
+           </property>
+          </spacer>
+         </item>
+         <item>
+          <widget class="QPushButton" name="transcribeButton">
+           <property name="minimumSize">
+            <size>
+             <width>140</width>
+             <height>34</height>
+            </size>
+           </property>
+           <property name="text">
+            <string>전사 시작</string>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QPushButton" name="cancelButton">
+           <property name="minimumSize">
+            <size>
+             <width>100</width>
+             <height>34</height>
+            </size>
+           </property>
+           <property name="text">
+            <string>취소</string>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <spacer name="processingButtonRightSpacer">
+           <property name="orientation">
+            <enum>Qt::Orientation::Horizontal</enum>
+           </property>
+           <property name="sizeHint" stdset="0">
+            <size>
+             <width>40</width>
+             <height>20</height>
+            </size>
+           </property>
+          </spacer>
+         </item>
+        </layout>
+       </item>
+       <item row="1" column="1" colspan="4">
+        <widget class="QPlainTextEdit" name="hotwordsTextEdit">
+         <property name="minimumSize">
+          <size>
+           <width>0</width>
+           <height>0</height>
+          </size>
+         </property>
+         <property name="placeholderText">
+          <string>핫워드를 한 줄에 하나씩 입력하세요. #으로 시작하는 줄은 주석으로 처리됩니다.</string>
+         </property>
+        </widget>
+       </item>
+       <item row="0" column="1">
+        <widget class="QLabel" name="speakerCountLabel">
+         <property name="text">
+          <string>화자 수</string>
+         </property>
+        </widget>
+       </item>
+       <item row="0" column="2">
+        <widget class="QComboBox" name="speakerCountComboBox">
+         <item>
+          <property name="text">
+           <string>Auto</string>
+          </property>
+         </item>
+         <item>
+          <property name="text">
+           <string>2</string>
+          </property>
+         </item>
+         <item>
+          <property name="text">
+           <string>3</string>
+          </property>
+         </item>
+         <item>
+          <property name="text">
+           <string>4</string>
+          </property>
+         </item>
+         <item>
+          <property name="text">
+           <string>5</string>
+          </property>
+         </item>
         </widget>
        </item>
        <item row="1" column="0">
@@ -204,68 +459,32 @@
          </property>
         </widget>
        </item>
-       <item row="1" column="1" colspan="4">
-        <widget class="QPlainTextEdit" name="hotwordsTextEdit">
-         <property name="minimumSize">
-          <size><width>0</width><height>72</height></size>
-         </property>
-         <property name="placeholderText">
-          <string>핫워드를 한 줄에 하나씩 입력하세요. #으로 시작하는 줄은 주석으로 처리됩니다.</string>
-         </property>
+       <item row="0" column="4">
+        <widget class="QComboBox" name="deviceComboBox">
+         <item>
+          <property name="text">
+           <string>AUTO</string>
+          </property>
+         </item>
+         <item>
+          <property name="text">
+           <string>NPU</string>
+          </property>
+         </item>
+         <item>
+          <property name="text">
+           <string>CPU</string>
+          </property>
+         </item>
+         <item>
+          <property name="text">
+           <string>GPU</string>
+          </property>
+         </item>
         </widget>
-       </item>
-       <item row="2" column="0" colspan="5">
-        <layout class="QHBoxLayout" name="processingButtonLayout">
-         <item>
-          <spacer name="processingButtonLeftSpacer">
-           <property name="orientation"><enum>Qt::Horizontal</enum></property>
-           <property name="sizeHint" stdset="0"><size><width>40</width><height>20</height></size></property>
-          </spacer>
-         </item>
-         <item>
-          <widget class="QPushButton" name="transcribeButton">
-           <property name="minimumSize"><size><width>140</width><height>34</height></size></property>
-           <property name="text"><string>전사 시작</string></property>
-          </widget>
-         </item>
-         <item>
-          <widget class="QPushButton" name="cancelButton">
-           <property name="minimumSize"><size><width>100</width><height>34</height></size></property>
-           <property name="text"><string>취소</string></property>
-          </widget>
-         </item>
-         <item>
-          <spacer name="processingButtonRightSpacer">
-           <property name="orientation"><enum>Qt::Horizontal</enum></property>
-           <property name="sizeHint" stdset="0"><size><width>40</width><height>20</height></size></property>
-          </spacer>
-         </item>
-       </layout>
-       </item>
-       <item row="3" column="0">
-        <widget class="QLabel" name="processingStateLabel">
-         <property name="text"><string>준비</string></property>
-       </widget>
-       </item>
-       <item row="3" column="1" colspan="4">
-        <widget class="QProgressBar" name="processingProgressBar">
-         <property name="minimum"><number>0</number></property>
-         <property name="maximum"><number>100</number></property>
-         <property name="value"><number>0</number></property>
-       </widget>
        </item>
        <item row="4" column="0">
-        <widget class="QLabel" name="processingTimeTitleLabel">
-         <property name="text"><string>처리 시간</string></property>
-       </widget>
-       </item>
-       <item row="4" column="1" colspan="4">
-        <widget class="QLabel" name="processingTimeLabel">
-         <property name="text"><string>—</string></property>
-        </widget>
-       </item>
-       <item row="5" column="0" colspan="5">
-        <widget class="QLabel" name="hotwordsStatusLabel">
+        <widget class="QLabel" name="initialPromptStatusLabel">
          <property name="text">
           <string>입력하면 자동 저장됩니다.</string>
          </property>
@@ -274,46 +493,69 @@
       </layout>
      </widget>
     </item>
-    <item>
+    <item row="3" column="0" colspan="2">
      <widget class="QGroupBox" name="resultGroupBox">
-      <property name="title"><string>전사 결과</string></property>
+      <property name="title">
+       <string>전사 결과</string>
+      </property>
       <layout class="QVBoxLayout" name="resultLayout">
        <item>
-       <widget class="QTextEdit" name="resultTextEdit">
-        <property name="placeholderText"><string>전사 결과가 여기에 표시됩니다.</string></property>
-        <property name="readOnly"><bool>true</bool></property>
-       </widget>
-      </item>
-      <item>
-       <widget class="QLabel" name="resultOutputPathLabel">
-        <property name="text"><string>출력 파일: —</string></property>
-        <property name="wordWrap"><bool>true</bool></property>
-       </widget>
-      </item>
-     </layout>
+        <widget class="QTextEdit" name="resultTextEdit">
+         <property name="readOnly">
+          <bool>true</bool>
+         </property>
+         <property name="placeholderText">
+          <string>전사 결과가 여기에 표시됩니다.</string>
+         </property>
+        </widget>
+       </item>
+       <item>
+        <widget class="QLabel" name="resultOutputPathLabel">
+         <property name="text">
+          <string>출력 파일: —</string>
+         </property>
+         <property name="wordWrap">
+          <bool>true</bool>
+         </property>
+        </widget>
+       </item>
+      </layout>
      </widget>
     </item>
-    <item>
+    <item row="4" column="0" colspan="2">
      <layout class="QHBoxLayout" name="footerLayout">
       <item>
        <widget class="QPushButton" name="saveResultButton">
-        <property name="text"><string>결과 저장</string></property>
+        <property name="text">
+         <string>결과 저장</string>
+        </property>
        </widget>
       </item>
       <item>
        <widget class="QPushButton" name="openResultFolderButton">
-        <property name="text"><string>결과 폴더 열기</string></property>
+        <property name="text">
+         <string>결과 폴더 열기</string>
+        </property>
        </widget>
       </item>
       <item>
        <spacer name="footerSpacer">
-        <property name="orientation"><enum>Qt::Horizontal</enum></property>
-        <property name="sizeHint" stdset="0"><size><width>40</width><height>20</height></size></property>
+        <property name="orientation">
+         <enum>Qt::Orientation::Horizontal</enum>
+        </property>
+        <property name="sizeHint" stdset="0">
+         <size>
+          <width>40</width>
+          <height>20</height>
+         </size>
+        </property>
        </spacer>
       </item>
       <item>
        <widget class="QLabel" name="statusLabel">
-        <property name="text"><string>준비</string></property>
+        <property name="text">
+         <string>준비</string>
+        </property>
        </widget>
       </item>
      </layout>
@@ -321,7 +563,14 @@
    </layout>
   </widget>
   <widget class="QMenuBar" name="menubar">
-   <property name="geometry"><rect><x>0</x><y>0</y><width>900</width><height>22</height></rect></property>
+   <property name="geometry">
+    <rect>
+     <x>0</x>
+     <y>0</y>
+     <width>1063</width>
+     <height>21</height>
+    </rect>
+   </property>
   </widget>
   <widget class="QStatusBar" name="statusbar"/>
  </widget>
