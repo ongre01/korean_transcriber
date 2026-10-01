@@ -57,12 +57,18 @@ class ErrorEvent:
     message: str
 
 
+@dataclass(frozen=True)
+class WarningEvent:
+    message: str
+
+
 BackendEvent = Union[
     StateEvent,
     ProgressEvent,
     SegmentEvent,
     CompletedEvent,
     ErrorEvent,
+    WarningEvent,
 ]
 
 
@@ -184,6 +190,9 @@ def parse_event_line(line: str | bytes) -> BackendEvent:
 
     if event_type == "error":
         return ErrorEvent(_required_string(payload, "message", non_empty=True))
+
+    if event_type == "warning":
+        return WarningEvent(_required_string(payload, "message", non_empty=True))
 
     raise ProtocolError(f"unknown event type: {event_type}")
 

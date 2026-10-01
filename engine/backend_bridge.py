@@ -76,6 +76,9 @@ class EventWriter:
     def state(self, value: str) -> None:
         self.emit("state", value=value)
 
+    def warning(self, message: str) -> None:
+        self.emit("warning", message=message)
+
     def progress(
         self,
         value: int | None,
@@ -296,6 +299,12 @@ def run_bridge(
         "Whisper model could not be loaded",
         lambda: engine.load_whisper_pipeline(model_dir, device, args.model_label),
     )
+    initial_prompt_plan = _call(
+        "Initial prompt validation failed",
+        lambda: engine.prepare_initial_prompt(pipe, initial_prompt),
+    )
+    if initial_prompt_plan.warning:
+        writer.warning(initial_prompt_plan.warning)
     config = _call(
         "Whisper generation configuration failed",
         lambda: engine.configure_generation(
@@ -303,7 +312,6 @@ def run_bridge(
             args.language,
             args.beams,
             hotwords,
-            initial_prompt,
         ),
     )
 

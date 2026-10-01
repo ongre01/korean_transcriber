@@ -18,6 +18,7 @@ enum class BackendEventType
     State,
     Progress,
     Segment,
+    Warning,
     Completed,
     Error
 };
@@ -43,6 +44,7 @@ struct BackendEvent
     QString textFile;
     QString srtFile;
     QString errorMessage;
+    QString warningMessage;
 };
 
 namespace BackendProtocol {
@@ -282,6 +284,12 @@ inline bool parseEventLine(const QByteArray &line, BackendEvent *event,
             return false;
         }
         parsed.type = BackendEventType::Error;
+    } else if (type == QStringLiteral("warning")) {
+        if (!requiredString(object, QStringLiteral("message"), &parsed.warningMessage,
+                            errorMessage, true)) {
+            return false;
+        }
+        parsed.type = BackendEventType::Warning;
     } else {
         return fail(errorMessage, QStringLiteral("unknown event type: %1").arg(type));
     }

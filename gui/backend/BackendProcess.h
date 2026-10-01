@@ -47,6 +47,7 @@ signals:
     void segmentReceived(double start, double end, int speaker, QString text);
     void completed();
     void cancelled();
+    void warningOccurred(QString message);
     void errorOccurred(QString message);
     void standardErrorReceived(QByteArray data);
     void commandStarted(QString command, QString workingDirectory);

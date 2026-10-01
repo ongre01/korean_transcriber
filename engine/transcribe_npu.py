@@ -22,6 +22,10 @@ DEFAULT_INITIAL_PROMPT_FILE = APP_DIR / 'initial_prompt.txt'
 DEFAULT_DIARIZATION_DIR = APP_DIR / 'models' / 'diarization'
 DEFAULT_SEGMENTATION_MODEL = DEFAULT_DIARIZATION_DIR / 'sherpa-onnx-pyannote-segmentation-3-0' / 'model.onnx'
 DEFAULT_EMBEDDING_MODEL = DEFAULT_DIARIZATION_DIR / '3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx'
+# Keep enough decoder space for a useful transcription when initial-prompt
+# support becomes available. Whisper's generation config has a 448-token
+# decoder limit for the bundled model.
+INITIAL_PROMPT_MIN_TRANSCRIPTION_TOKENS = 64
 
 
 @dataclass
@@ -30,6 +34,16 @@ class Segment:
     end: float
     text: str
     speaker: int | None = None
+
+
+@dataclass(frozen=True)
+class InitialPromptPlan:
+    """Validated initial-prompt metadata for the current safe-mode policy."""
+
+    requested: bool
+    token_count: int | None = None
+    maximum_token_count: int | None = None
+    warning: str | None = None
 
 
 def choose_file() -> Path | None:
@@ -107,6 +121,73 @@ def read_optional_text(path: Path) -> str:
             continue
         lines.append(line)
     return ', '.join(lines).strip()
+
+
+def _initial_prompt_token_count(pipe, initial_prompt: str) -> int:
+    tokenized = pipe.get_tokenizer().encode(initial_prompt)
+    shape = getattr(getattr(tokenized, 'input_ids', None), 'shape', None)
+    if not shape:
+        raise RuntimeError('the tokenizer did not return input token dimensions')
+    token_count = int(shape[-1])
+    if token_count < 1:
+        raise RuntimeError('the tokenizer returned no input tokens')
+    return token_count
+
+
+def prepare_initial_prompt(pipe, initial_prompt: str) -> InitialPromptPlan:
+    """Validate and safely disable an initial prompt for OpenVINO Whisper.
+
+    The current OpenVINO Whisper pipeline raises an inference tensor-range
+    error when ``GenerationConfig.initial_prompt`` is populated, including for
+    short prompts. Keep the text saved for a future compatible runtime, but do
+    not pass it to the pipeline so a transcription can still complete.
+    """
+
+    prompt = initial_prompt.strip()
+    if not prompt:
+        return InitialPromptPlan(requested=False)
+
+    max_length = getattr(pipe.get_generation_config(), 'max_length', None)
+    try:
+        max_length = int(max_length)
+    except (TypeError, ValueError, OverflowError):
+        max_length = 0
+    maximum_token_count = max(0, max_length - INITIAL_PROMPT_MIN_TRANSCRIPTION_TOKENS)
+
+    try:
+        token_count = _initial_prompt_token_count(pipe, prompt)
+    except Exception:
+        return InitialPromptPlan(
+            requested=True,
+            maximum_token_count=maximum_token_count or None,
+            warning=(
+                '초기 프롬프트의 길이를 확인할 수 없어 안전하게 제외했습니다. '
+                '프롬프트 내용은 저장되어 있으며 전사는 계속 진행됩니다.'
+            ),
+        )
+
+    if token_count > maximum_token_count:
+        return InitialPromptPlan(
+            requested=True,
+            token_count=token_count,
+            maximum_token_count=maximum_token_count,
+            warning=(
+                f'초기 프롬프트가 허용 길이를 초과했습니다 '
+                f'({token_count}토큰, 최대 {maximum_token_count}토큰). '
+                '안전하게 제외하고 전사를 계속 진행합니다.'
+            ),
+        )
+
+    return InitialPromptPlan(
+        requested=True,
+        token_count=token_count,
+        maximum_token_count=maximum_token_count,
+        warning=(
+            '현재 OpenVINO Whisper 실행 환경에서는 초기 프롬프트가 입력 텐서 오류를 '
+            '일으킬 수 있어 안전하게 제외했습니다. 프롬프트 내용은 저장되어 있으며 '
+            '전사는 계속 진행됩니다.'
+        ),
+    )
 
 
 def srt_timestamp(seconds: float) -> str:
@@ -300,7 +381,7 @@ def load_whisper_pipeline(model_dir: Path, device: str, model_label: str = ''):
     return ov_genai.WhisperPipeline(str(model_dir), device, **pipeline_options)
 
 
-def configure_generation(pipe, language: str, beams: int, hotwords: str, initial_prompt: str):
+def configure_generation(pipe, language: str, beams: int, hotwords: str):
     config = pipe.get_generation_config()
     config.language = language
     config.task = 'transcribe'
@@ -311,8 +392,9 @@ def configure_generation(pipe, language: str, beams: int, hotwords: str, initial
     config.do_sample = False
     if hotwords:
         config.hotwords = hotwords
-    if initial_prompt:
-        config.initial_prompt = initial_prompt
+    # Do not touch ``initial_prompt`` until the OpenVINO Whisper implementation
+    # can handle it without the reproducible tensor-range inference failure.
+    # Assigning even an empty value activates the faulty runtime path.
     return config
 
 
@@ -398,7 +480,7 @@ def main() -> int:
         print(f'Window     : {args.window_seconds:.0f} sec')
         print(f'Overlap    : {args.overlap_seconds:.1f} sec')
         print(f'Hotwords   : {"ON" if hotwords else "OFF"}')
-        print(f'Init prompt: {"ON" if initial_prompt else "OFF"}')
+        print(f'Init prompt: {"REQUESTED (safe mode)" if initial_prompt else "OFF"}')
         if args.diarize:
             print(
                 'Diarization: ON '
@@ -424,17 +506,17 @@ def main() -> int:
         pipe = load_whisper_pipeline(model_dir, args.device, args.model_label)
         print('      Model ready.')
 
+        initial_prompt_plan = prepare_initial_prompt(pipe, initial_prompt)
         config = configure_generation(
             pipe,
             args.language,
             args.beams,
             hotwords,
-            initial_prompt,
         )
         if hotwords:
             print(f'      Hotwords: {hotwords[:160]}{"..." if len(hotwords) > 160 else ""}')
-        if initial_prompt:
-            print(f'      Initial prompt: {initial_prompt[:160]}{"..." if len(initial_prompt) > 160 else ""}')
+        if initial_prompt_plan.warning:
+            print(f'      [WARNING] {initial_prompt_plan.warning}')
 
         mode = 'Beam Search' if args.beams > 1 else 'Greedy'
         print(f'[4/{steps}] Transcribing Korean ({mode}, beams={args.beams})...')

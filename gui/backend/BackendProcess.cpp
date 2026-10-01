@@ -302,6 +302,9 @@ void BackendProcess::dispatchEvent(const BackendEvent &event)
                              event.segment.speaker.value_or(0),
                              event.segment.text);
         break;
+    case BackendEventType::Warning:
+        emit warningOccurred(event.warningMessage);
+        break;
     case BackendEventType::Completed:
         m_receivedCompleted = true;
         m_textResultFile = event.textFile;

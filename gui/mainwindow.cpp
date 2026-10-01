@@ -319,6 +319,12 @@ MainWindow::MainWindow(QWidget *parent)
             this, &MainWindow::processingCompleted);
     connect(m_backendProcess, &BackendProcess::cancelled,
             this, &MainWindow::processingCancelled);
+    connect(m_backendProcess, &BackendProcess::warningOccurred, this,
+            [this](const QString &message) {
+                logInfo(tr("Backend Warning"), message);
+                ui->initialPromptStatusLabel->setText(message);
+                statusBar()->showMessage(message);
+            });
     connect(m_backendProcess, &BackendProcess::errorOccurred,
             this, &MainWindow::processingFailed);
     connect(m_backendProcess, &BackendProcess::standardErrorReceived,
