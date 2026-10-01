@@ -56,6 +56,8 @@ private slots:
     void handleFileSelection();
     void handleTranscriptionStart();
     void handleCancellation();
+    void handleResultSave();
+    void handleOpenResultFolder();
     void updateSpeakerCountEnabled();
     void updateMicrophoneUi();
     void handleMicrophoneSelection(int index);
@@ -77,7 +79,10 @@ private:
     void resetProcessingIndicators();
     void updateTranscriptUi();
     void updateInputFileUi();
+    void updateResultOutputUi();
     void updateUiForState();
+    bool hasAvailableResult() const;
+    void showResultError(const QString &message);
 
 protected:
     void closeEvent(QCloseEvent *event) override;
@@ -99,6 +104,7 @@ private:
     // be changed after completion without changing how that result is shown.
     bool m_diarizationEnabledForRun = false;
     QString m_backendState;
+    QString m_resultOutputFile;
     double m_processedSeconds = -1.0;
     double m_totalSeconds = -1.0;
     QString m_stateMessage;

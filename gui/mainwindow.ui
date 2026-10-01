@@ -255,12 +255,18 @@
       <property name="title"><string>전사 결과</string></property>
       <layout class="QVBoxLayout" name="resultLayout">
        <item>
-        <widget class="QTextEdit" name="resultTextEdit">
-         <property name="placeholderText"><string>전사 결과가 여기에 표시됩니다.</string></property>
-         <property name="readOnly"><bool>true</bool></property>
-        </widget>
-       </item>
-      </layout>
+       <widget class="QTextEdit" name="resultTextEdit">
+        <property name="placeholderText"><string>전사 결과가 여기에 표시됩니다.</string></property>
+        <property name="readOnly"><bool>true</bool></property>
+       </widget>
+      </item>
+      <item>
+       <widget class="QLabel" name="resultOutputPathLabel">
+        <property name="text"><string>출력 파일: —</string></property>
+        <property name="wordWrap"><bool>true</bool></property>
+       </widget>
+      </item>
+     </layout>
      </widget>
     </item>
     <item>

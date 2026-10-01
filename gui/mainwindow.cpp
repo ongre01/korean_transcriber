@@ -3,13 +3,17 @@
 
 #include <QCoreApplication>
 #include <QCloseEvent>
+#include <QDesktopServices>
 #include <QDir>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QMessageBox>
+#include <QSaveFile>
 #include <QStatusBar>
 #include <QStringList>
 #include <QTextCursor>
 #include <QSignalBlocker>
+#include <QUrl>
 
 #include <algorithm>
 
@@ -195,6 +199,10 @@ MainWindow::MainWindow(QWidget *parent)
             this, &MainWindow::handleTranscriptionStart);
     connect(ui->cancelButton, &QPushButton::clicked,
             this, &MainWindow::handleCancellation);
+    connect(ui->saveResultButton, &QPushButton::clicked,
+            this, &MainWindow::handleResultSave);
+    connect(ui->openResultFolderButton, &QPushButton::clicked,
+            this, &MainWindow::handleOpenResultFolder);
     connect(ui->diarizationCheckBox, &QCheckBox::toggled,
             this, &MainWindow::updateSpeakerCountEnabled);
     connect(ui->microphoneComboBox,
@@ -243,6 +251,7 @@ MainWindow::MainWindow(QWidget *parent)
 
     updateMicrophoneUi();
     updateInputFileUi();
+    updateResultOutputUi();
     updateUiForState();
 }
 
@@ -337,6 +346,11 @@ void MainWindow::setAppState(AppState state, const QString &message)
 void MainWindow::processingCompleted()
 {
     if (m_state == AppState::Processing && !m_cancellationPending) {
+        const QFileInfo resultFile(m_backendProcess->textResultFile());
+        m_resultOutputFile = resultFile.isFile()
+            ? resultFile.absoluteFilePath()
+            : QString();
+        updateResultOutputUi();
         setAppState(AppState::Completed);
     }
 }
@@ -486,6 +500,98 @@ void MainWindow::handleCancellation()
     ui->processingProgressBar->setRange(0, 0);
     updateUiForState();
     emit cancellationRequested();
+}
+
+void MainWindow::handleResultSave()
+{
+    if (m_state != AppState::Completed) {
+        return;
+    }
+    if (!hasAvailableResult()) {
+        updateUiForState();
+        showResultError(tr("저장할 전사 결과 파일을 찾을 수 없습니다."));
+        return;
+    }
+
+    const QFileInfo currentResult(m_resultOutputFile);
+    QFileDialog saveDialog(this, tr("TXT 결과 저장"));
+    saveDialog.setAcceptMode(QFileDialog::AcceptSave);
+    saveDialog.setFileMode(QFileDialog::AnyFile);
+    saveDialog.setNameFilter(tr("텍스트 파일 (*.txt)"));
+    saveDialog.setDirectory(currentResult.absolutePath());
+    saveDialog.selectFile(currentResult.fileName());
+    // Use one explicit, translated overwrite prompt below. This also keeps the
+    // behaviour consistent between native and non-native file dialogs.
+    saveDialog.setOption(QFileDialog::DontUseNativeDialog);
+    saveDialog.setOption(QFileDialog::DontConfirmOverwrite);
+    if (saveDialog.exec() != QDialog::Accepted || saveDialog.selectedFiles().isEmpty()) {
+        return;
+    }
+    QString targetPath = saveDialog.selectedFiles().constFirst();
+    if (QFileInfo(targetPath).suffix().isEmpty()) {
+        targetPath += QStringLiteral(".txt");
+    }
+
+    const QFileInfo targetFile(targetPath);
+    if (targetFile.exists()) {
+        const QMessageBox::StandardButton answer = QMessageBox::question(
+            this,
+            tr("파일 덮어쓰기"),
+            tr("이미 같은 이름의 파일이 있습니다. 덮어쓰시겠습니까?\n%1")
+                .arg(QDir::toNativeSeparators(targetFile.absoluteFilePath())),
+            QMessageBox::Yes | QMessageBox::No,
+            QMessageBox::No);
+        if (answer != QMessageBox::Yes) {
+            return;
+        }
+    }
+
+    QSaveFile outputFile(targetFile.absoluteFilePath());
+    if (!outputFile.open(QIODevice::WriteOnly)) {
+        showResultError(
+            tr("파일을 저장할 수 없습니다: %1").arg(outputFile.errorString()));
+        return;
+    }
+
+    const QByteArray contents = ui->resultTextEdit->toPlainText().toUtf8();
+    if (outputFile.write(contents) != contents.size()) {
+        outputFile.cancelWriting();
+        showResultError(
+            tr("파일을 저장할 수 없습니다: %1").arg(outputFile.errorString()));
+        return;
+    }
+    if (!outputFile.commit()) {
+        showResultError(
+            tr("파일을 저장할 수 없습니다: %1").arg(outputFile.errorString()));
+        return;
+    }
+
+    m_resultOutputFile = QFileInfo(targetFile.absoluteFilePath()).absoluteFilePath();
+    updateResultOutputUi();
+    updateUiForState();
+    statusBar()->showMessage(
+        tr("결과를 저장했습니다: %1")
+            .arg(QDir::toNativeSeparators(m_resultOutputFile)));
+}
+
+void MainWindow::handleOpenResultFolder()
+{
+    if (m_state != AppState::Completed) {
+        return;
+    }
+    if (!hasAvailableResult()) {
+        updateUiForState();
+        showResultError(tr("열 수 있는 전사 결과 파일을 찾을 수 없습니다."));
+        return;
+    }
+
+    const QFileInfo resultFile(m_resultOutputFile);
+    const QUrl folderUrl = QUrl::fromLocalFile(resultFile.absolutePath());
+    if (!QDesktopServices::openUrl(folderUrl)) {
+        showResultError(
+            tr("결과 폴더를 열 수 없습니다: %1")
+                .arg(QDir::toNativeSeparators(resultFile.absolutePath())));
+    }
 }
 
 void MainWindow::updateSpeakerCountEnabled()
@@ -696,7 +802,9 @@ void MainWindow::transcriptionSegmentReceived(double start, double end,
 void MainWindow::clearTranscript()
 {
     m_transcriptSegments.clear();
+    m_resultOutputFile.clear();
     ui->resultTextEdit->clear();
+    updateResultOutputUi();
 }
 
 void MainWindow::resetProcessingIndicators()
@@ -749,6 +857,26 @@ void MainWindow::updateInputFileUi()
     ui->fileSizeValueLabel->setText(formattedFileSize(inputFile.size()));
 }
 
+void MainWindow::updateResultOutputUi()
+{
+    const QString outputPath = m_resultOutputFile.isEmpty()
+        ? tr("—")
+        : QDir::toNativeSeparators(m_resultOutputFile);
+    ui->resultOutputPathLabel->setText(tr("출력 파일: %1").arg(outputPath));
+    ui->resultOutputPathLabel->setToolTip(m_resultOutputFile);
+}
+
+bool MainWindow::hasAvailableResult() const
+{
+    const QFileInfo resultFile(m_resultOutputFile);
+    return resultFile.exists() && resultFile.isFile();
+}
+
+void MainWindow::showResultError(const QString &message)
+{
+    statusBar()->showMessage(tr("결과 저장 오류: %1").arg(message));
+}
+
 void MainWindow::updateUiForState()
 {
     const bool hasInput = hasValidInput() && !m_inputInspectionPending;
@@ -772,8 +900,9 @@ void MainWindow::updateUiForState()
     ui->deviceComboBox->setEnabled(controlsEnabled);
     updateSpeakerCountEnabled();
 
-    ui->saveResultButton->setEnabled(m_state == AppState::Completed);
-    ui->openResultFolderButton->setEnabled(m_state == AppState::Completed);
+    const bool resultAvailable = m_state == AppState::Completed && hasAvailableResult();
+    ui->saveResultButton->setEnabled(resultAvailable);
+    ui->openResultFolderButton->setEnabled(resultAvailable);
 
     if (m_state == AppState::Completed) {
         ui->processingProgressBar->setRange(0, 100);
