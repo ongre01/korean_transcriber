@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import gc
 import math
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -26,6 +27,14 @@ DEFAULT_EMBEDDING_MODEL = DEFAULT_DIARIZATION_DIR / '3dspeaker_speech_eres2net_b
 # support becomes available. Whisper's generation config has a 448-token
 # decoder limit for the bundled model.
 INITIAL_PROMPT_MIN_TRANSCRIPTION_TOKENS = 64
+
+# Whisper can occasionally get stuck decoding a short non-speech sound as the
+# same token or phrase.  Require a very long, dominant run before removing it
+# so that ordinary Korean backchannels such as "네, 네" remain untouched.
+_REPETITION_TOKEN_PATTERN = re.compile(r'[0-9A-Za-z가-힣]+')
+_MIN_REPETITION_CYCLES = 8
+_MIN_REPETITION_TOKENS = 16
+_MIN_REPETITION_COVERAGE = 0.75
 
 
 @dataclass
@@ -198,6 +207,56 @@ def clock(seconds: float) -> str:
     return f'{minutes:02d}:{secs:02d}'
 
 
+def remove_pathological_repetition(text: str) -> str:
+    """Remove a dominant decoder-loop run while preserving ordinary repeats.
+
+    A decoder loop is only removed when the same token sequence repeats at
+    least eight times, covers at least 16 lexical tokens, and makes up at
+    least 75% of the segment.  This deliberately leaves natural phrases such
+    as ``네, 네`` and short emphatic repetitions unchanged.
+    """
+    source = str(text).strip()
+    matches = list(_REPETITION_TOKEN_PATTERN.finditer(source.casefold()))
+    token_count = len(matches)
+    if token_count < _MIN_REPETITION_TOKENS:
+        return source
+
+    longest_run: tuple[int, int] | None = None
+    maximum_unit_size = min(8, token_count // _MIN_REPETITION_CYCLES)
+    for start in range(token_count):
+        for unit_size in range(1, maximum_unit_size + 1):
+            if start + unit_size * _MIN_REPETITION_CYCLES > token_count:
+                break
+
+            repetitions = 1
+            while start + (repetitions + 1) * unit_size <= token_count:
+                previous = matches[start + (repetitions - 1) * unit_size:start + repetitions * unit_size]
+                current = matches[start + repetitions * unit_size:start + (repetitions + 1) * unit_size]
+                if [match.group() for match in current] != [match.group() for match in previous]:
+                    break
+                repetitions += 1
+
+            end = start + repetitions * unit_size
+            repeated_token_count = end - start
+            if (
+                repetitions >= _MIN_REPETITION_CYCLES
+                and repeated_token_count >= _MIN_REPETITION_TOKENS
+                and repeated_token_count / token_count >= _MIN_REPETITION_COVERAGE
+                and (longest_run is None or repeated_token_count > longest_run[1] - longest_run[0])
+            ):
+                longest_run = (start, end)
+
+    if longest_run is None:
+        return source
+
+    start, _end = longest_run
+    before = source[:matches[start].start()].rstrip(' \t,·')
+    # A long loop can finish with a truncated cycle (for example, a repeated
+    # four-word phrase followed by its first one or two words).  Removing the
+    # remainder of that segment avoids leaving this tail in the transcript.
+    return before
+
+
 def print_progress(processed: float, total: float, index: int, count: int, started: float) -> None:
     ratio = 1.0 if total <= 0 else min(1.0, processed / total)
     width = 28
@@ -254,7 +313,7 @@ def transcribe_windows(
 
         if chunks:
             for c in chunks:
-                txt = str(c.text).strip()
+                txt = remove_pathological_repetition(c.text)
                 if not txt:
                     continue
                 start = min(duration, infer_start + max(0.0, float(c.start_ts)))
@@ -270,7 +329,8 @@ def transcribe_windows(
                 segments.append(Segment(start, max(end, start + 0.05), txt))
         else:
             texts = getattr(result, 'texts', None)
-            fallback = str(texts[0]).strip() if texts else str(result).strip()
+            fallback_source = texts[0] if texts else result
+            fallback = remove_pathological_repetition(fallback_source)
             if fallback:
                 segments.append(Segment(core_start, core_end, fallback))
 
