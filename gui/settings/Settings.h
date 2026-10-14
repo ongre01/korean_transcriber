@@ -4,11 +4,14 @@
 #include <QByteArray>
 #include <QString>
 
+class EnginePaths;
+
 class Settings
 {
 public:
     static Settings load();
     void save() const;
+    void applyEngineDefaults(const EnginePaths &paths, const QString &pythonOverride = {});
 
     bool validateForRun(bool diarizationEnabled, QString *errorMessage = nullptr) const;
 

@@ -11,6 +11,8 @@ CONFIG += c++17
 TEMPLATE = app
 TARGET = AudioTranscriber
 
+include(app/EnginePaths.pri)
+
 greaterThan(QT_MAJOR_VERSION, 5) {
     DEFINES += AUDIOTRANSCRIBER_USE_QAUDIOSOURCE
     message("Audio capture API: QAudioSource (Qt $$[QT_VERSION])")

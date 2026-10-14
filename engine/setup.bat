@@ -39,8 +39,8 @@ echo [3/6] Installing/updating runtime packages...
 ".venv\Scripts\python.exe" -m pip install --upgrade --upgrade-strategy eager -r requirements.txt
 if errorlevel 1 goto :failed
 
-echo [4/6] Checking OpenVINO devices...
-".venv\Scripts\python.exe" -c "import openvino as ov; import openvino_genai; print('OpenVINO:', ov.__version__); print('Devices:', ov.Core().available_devices)"
+echo [4/6] Checking runtime packages and OpenVINO devices...
+".venv\Scripts\python.exe" -c "import sys, numpy, av, openvino as ov, openvino_genai, sherpa_onnx; print('Python:', sys.executable); print('NumPy:', numpy.__version__); print('OpenVINO:', ov.__version__); print('Devices:', ov.Core().available_devices)"
 if errorlevel 1 goto :failed
 
 echo [5/6] Preparing INT8 and FP16 Whisper models...
@@ -54,6 +54,9 @@ if errorlevel 1 goto :failed
 echo.
 echo ==============================================================================
 echo  Setup complete.
+echo  GUI Settings - Python: %~dp0.venv\Scripts\python.exe
+echo  GUI Settings - Whisper model: %~dp0models\whisper-large-v3-turbo-int8
+echo  The GUI uses this virtual environment, which contains the runtime packages.
 echo  run_int8.bat          = NPU + INT8
 echo  run_fp16.bat          = NPU + FP16
 echo  run_int8_diarize.bat  = NPU ASR + NPU segmentation + CPU embedding/clustering

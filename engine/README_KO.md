@@ -39,6 +39,21 @@ Run setup.bat once. It creates/reuses .venv, installs the runtime packages,
 prepares both Whisper models, and downloads the speaker diarization models.
 Existing models are reused.
 
+Qt GUI 설정
+-----------
+GUI는 엔진 폴더를 찾아 `engine/.venv/Scripts/python.exe`와
+`engine/models/whisper-large-v3-turbo-int8`을 기본값으로 사용한다.
+기존 설정에 일반 명령 `python`이 저장되어 있으면 엔진 가상환경으로 전환한다.
+직접 지정한 Python 실행 파일과 사용자 모델 경로는 유지한다.
+환경 변수 `PYTHON`을 지정한 경우에는 기본 Python 선택에 해당 값을 사용한다.
+
+`ModuleNotFoundError: No module named 'numpy'`가 발생하면 GUI 설정의
+Python 경로를 확인한다. `setup.bat`은 일반 Python이 아닌 `.venv`에 패키지를
+설치한다. 설정에서 위 가상환경 실행 파일을 선택하고, 가상환경이 없거나
+패키지가 누락되었다면 `setup.bat`을 실행한 뒤 GUI를 다시 시작한다.
+모델 폴더에는 빌드 출력 폴더의 `debug/engine/models/...` 대신 실제 엔진
+폴더 아래의 모델 경로를 지정한다. `setup.bat` 완료 메시지에 두 경로가 표시된다.
+
 Launchers
 ---------
 run_int8.bat

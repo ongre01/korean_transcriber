@@ -1,10 +1,10 @@
 #include "mainwindow.h"
+#include "app/EnginePaths.h"
 #include "logging/LogDialog.h"
 #include "settings/SettingsDialog.h"
 #include "ui_mainwindow.h"
 
 #include <QAction>
-#include <QCoreApplication>
 #include <QCloseEvent>
 #include <QDesktopServices>
 #include <QDir>
@@ -120,32 +120,6 @@ bool sameFilePath(const QString &left, const QString &right)
 #endif
 }
 
-QString engineAssetPath(const QString &relativePath)
-{
-    QStringList candidates;
-    candidates << QDir::current().absoluteFilePath(
-        QStringLiteral("engine/%1").arg(relativePath));
-
-    QDir applicationDirectory(QCoreApplication::applicationDirPath());
-    for (int depth = 0; depth < 6; ++depth) {
-        candidates << applicationDirectory.absoluteFilePath(
-            QStringLiteral("engine/%1").arg(relativePath));
-        if (!applicationDirectory.cdUp()) {
-            break;
-        }
-    }
-
-    for (const QString &candidate : candidates) {
-        const QFileInfo asset(candidate);
-        if (asset.exists()) {
-            const QString canonicalPath = asset.canonicalFilePath();
-            return canonicalPath.isEmpty() ? asset.absoluteFilePath() : canonicalPath;
-        }
-    }
-
-    return QDir::cleanPath(candidates.constFirst());
-}
-
 QString userHotwordsFilePath()
 {
     QString directory = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
@@ -225,17 +199,10 @@ MainWindow::MainWindow(QWidget *parent)
     m_initialPromptSaveTimer->setInterval(400);
 
     m_settings = Settings::load();
-    if (m_settings.pythonPath.isEmpty()) {
-        m_settings.pythonPath = m_audioFileInfo->pythonProgram();
-    }
-    if (m_settings.whisperModelDirectory.isEmpty()) {
-        m_settings.whisperModelDirectory = engineAssetPath(
-            QStringLiteral("models/whisper-large-v3-turbo-int8"));
-    }
-
-    const QString bridgeScript = engineAssetPath(QStringLiteral("backend_bridge.py"));
+    const EnginePaths enginePaths = EnginePaths::discover();
+    const QString bridgeScript = enginePaths.assetPath(QStringLiteral("backend_bridge.py"));
     m_backendProcess->setBridgeScript(bridgeScript);
-    m_backendProcess->setWorkingDirectory(QFileInfo(bridgeScript).absolutePath());
+    m_backendProcess->setWorkingDirectory(enginePaths.engineDirectory());
     applySettingsToUi();
 
     connect(ui->recordStartButton, &QPushButton::clicked,
@@ -1236,7 +1203,7 @@ QString MainWindow::backendUserMessage(const QString &detail) const
         || normalized.contains(QStringLiteral("no module named"))
         || normalized.contains(QStringLiteral("failed to start backend"))
         || normalized.contains(QStringLiteral("python program"))) {
-        return tr("Python 실행 환경을 시작할 수 없습니다. Python 경로와 필수 모듈을 확인하세요.");
+        return tr("Python 실행 환경을 시작할 수 없습니다. engine/setup.bat을 실행하고, 고급 설정의 Python 경로를 engine/.venv/Scripts/python.exe로 지정하세요.");
     }
     if (normalized.contains(QStringLiteral("input file not found"))) {
         return tr("입력 파일을 찾을 수 없습니다. 파일이 이동되거나 삭제되지 않았는지 확인하세요.");

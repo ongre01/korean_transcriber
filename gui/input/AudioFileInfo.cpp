@@ -1,6 +1,6 @@
 #include "AudioFileInfo.h"
+#include "../app/EnginePaths.h"
 
-#include <QCoreApplication>
 #include <QCryptographicHash>
 #include <QDir>
 #include <QFile>
@@ -17,56 +17,11 @@
 #include <limits>
 
 namespace {
-QString defaultPythonProgram()
-{
-    const QString configured = QString::fromLocal8Bit(qgetenv("PYTHON")).trimmed();
-    if (!configured.isEmpty()) {
-        return configured;
-    }
-
-    QStringList candidates;
-    candidates << QDir::current().absoluteFilePath(
-        QStringLiteral("engine/.venv/Scripts/python.exe"));
-
-    QDir applicationDirectory(QCoreApplication::applicationDirPath());
-    for (int depth = 0; depth < 6; ++depth) {
-        candidates << applicationDirectory.absoluteFilePath(
-            QStringLiteral("engine/.venv/Scripts/python.exe"));
-        if (!applicationDirectory.cdUp()) {
-            break;
-        }
-    }
-
-    for (const QString &candidate : candidates) {
-        const QFileInfo python(candidate);
-        if (python.isFile()) {
-            const QString canonicalPath = python.canonicalFilePath();
-            return canonicalPath.isEmpty() ? python.absoluteFilePath() : canonicalPath;
-        }
-    }
-
-    return QStringLiteral("python");
-}
-
 QString defaultProbeScript()
 {
-    QStringList candidates;
-    candidates << QDir::current().absoluteFilePath(QStringLiteral("engine/audio_metadata.py"));
-
-    QDir applicationDirectory(QCoreApplication::applicationDirPath());
-    for (int depth = 0; depth < 6; ++depth) {
-        candidates << applicationDirectory.absoluteFilePath(QStringLiteral("engine/audio_metadata.py"));
-        if (!applicationDirectory.cdUp()) {
-            break;
-        }
-    }
-
-    for (const QString &candidate : candidates) {
-        const QFileInfo script(candidate);
-        if (script.isFile()) {
-            const QString canonicalPath = script.canonicalFilePath();
-            return canonicalPath.isEmpty() ? script.absoluteFilePath() : canonicalPath;
-        }
+    const QString script = EnginePaths::discover().assetPath(QStringLiteral("audio_metadata.py"));
+    if (QFileInfo(script).isFile()) {
+        return script;
     }
 
     QFile bundledScript(QStringLiteral(":/python/audio_metadata.py"));
@@ -107,7 +62,8 @@ QString normalizedExistingFile(const QString &filePath)
 
 AudioFileInfo::AudioFileInfo(QObject *parent)
     : QObject(parent)
-    , m_pythonProgram(defaultPythonProgram())
+    , m_pythonProgram(EnginePaths::discover().defaultPythonProgram(
+          QString::fromLocal8Bit(qgetenv("PYTHON"))))
     , m_probeScript(defaultProbeScript())
 {
     qRegisterMetaType<AudioFileMetadata>();

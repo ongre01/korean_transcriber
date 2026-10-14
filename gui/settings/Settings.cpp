@@ -1,4 +1,5 @@
 #include "Settings.h"
+#include "../app/EnginePaths.h"
 
 #include <QDir>
 #include <QFileInfo>
@@ -99,7 +100,27 @@ Settings Settings::load()
         QStringLiteral("diarizationFallbackToCpu"), result.diarizationFallbackToCpu).toBool();
 
     settings.endGroup();
+    result.applyEngineDefaults(EnginePaths::discover(),
+                              QString::fromLocal8Bit(qgetenv("PYTHON")));
     return result;
+}
+
+void Settings::applyEngineDefaults(const EnginePaths &paths, const QString &pythonOverride)
+{
+    const QString python = pythonPath.trimmed();
+    if (python.isEmpty() || python == QStringLiteral("python")) {
+        pythonPath = paths.defaultPythonProgram(pythonOverride);
+    }
+
+    const QString model = whisperModelDirectory.trimmed();
+    const QString defaultModel = paths.assetPath(
+        QStringLiteral("models/whisper-large-v3-turbo-int8"));
+    if (model.isEmpty()) {
+        whisperModelDirectory = QFileInfo(defaultModel).isDir() ? defaultModel : QString();
+    } else if (!QFileInfo(model).isDir() && paths.isLegacyWhisperDefault(model)
+               && !defaultModel.isEmpty() && QFileInfo(defaultModel).isDir()) {
+        whisperModelDirectory = defaultModel;
+    }
 }
 
 void Settings::save() const
@@ -151,6 +172,9 @@ bool Settings::validateForRun(bool runWithDiarization, QString *errorMessage) co
     }
     if (!isPythonProgramAvailable(python)) {
         return fail(QObject::tr("Python 실행 파일을 찾을 수 없습니다: %1").arg(python));
+    }
+    if (whisperModelDirectory.trimmed().isEmpty()) {
+        return fail(QObject::tr("Whisper 모델 폴더가 설정되지 않았습니다. engine/setup.bat 실행 후 모델 폴더를 확인하세요."));
     }
     if (!QFileInfo(whisperModelDirectory.trimmed()).isDir()) {
         return fail(QObject::tr("Whisper 모델 폴더를 찾을 수 없습니다: %1")

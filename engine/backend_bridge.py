@@ -13,9 +13,10 @@ from numbers import Integral
 from pathlib import Path
 import sys
 import traceback
-from typing import Callable, TextIO
+from typing import TYPE_CHECKING, Callable, TextIO
 
-from vad import SpeechRegion, detect_speech_regions
+if TYPE_CHECKING:
+    from vad import SpeechRegion
 
 
 APP_DIR = Path(__file__).resolve().parent
@@ -212,7 +213,7 @@ def _failure_message(prefix: str, exc: BaseException) -> str:
 def _call(prefix: str, operation: Callable):
     try:
         return operation()
-    except BridgeFailure:
+    except (BridgeFailure, ModuleNotFoundError):
         raise
     except Exception as exc:
         raise BridgeFailure(_failure_message(prefix, exc)) from exc
@@ -400,6 +401,9 @@ def run_bridge(
 
     speech_regions: list[SpeechRegion] | None = None
     if getattr(args, "skip_silence", False):
+        # Keep runtime dependencies inside main's protocol error boundary.
+        from vad import detect_speech_regions
+
         writer.state("detecting_speech")
         writer.progress(None)
         speech_regions = _call(
@@ -607,9 +611,9 @@ def main(
         return 2
 
     try:
-        if engine_module is None:
-            engine_module = importlib.import_module("transcribe_npu")
         with redirect_stdout(diagnostic):
+            if engine_module is None:
+                engine_module = importlib.import_module("transcribe_npu")
             return run_bridge(
                 args,
                 engine_module,
@@ -628,7 +632,13 @@ def main(
         name = exc.name or "unknown"
         writer.emit(
             "error",
-            message=f"Required Python module is not installed: {name}.",
+            message=(
+                f"Required Python module is not installed: {name}. "
+                f"Current interpreter: {sys.executable}. "
+                f"Run {APP_DIR / 'setup.bat'} to install the runtime packages, "
+                "then select the engine virtual environment in Settings: "
+                f"{APP_DIR / '.venv' / 'Scripts' / 'python.exe'}."
+            ),
         )
         _write_diagnostic(diagnostic, exc)
         return 1
