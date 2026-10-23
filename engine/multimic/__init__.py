@@ -1,4 +1,4 @@
-"""Offline multi-microphone audio preparation primitives."""
+"""Offline multi-microphone preparation and initial-alignment primitives."""
 
 from .pipeline import (
     ANALYSIS_SAMPLE_RATE,
@@ -13,12 +13,24 @@ from .pipeline import (
     PreparedAudioInput,
     PreparedMultiAudio,
     SourceFingerprint,
+    align_prepared_inputs,
     build_validity_mask,
     fingerprint_file,
     is_supported_audio_path,
     place_signal_on_timeline,
     prepare_inputs,
     prepare_multi_audio_inputs,
+)
+from .align import (
+    AlignmentConfig,
+    AlignmentFailure,
+    InputAlignment,
+    InputAlignmentResult,
+    MultiAudioAlignment,
+    MultiAudioAlignmentResult,
+    WindowAlignment,
+    estimate_initial_offset,
+    estimate_initial_offsets,
 )
 
 __all__ = [
@@ -27,17 +39,27 @@ __all__ = [
     "RECOMMENDED_MAX_INPUT_COUNT",
     "SUPPORTED_AUDIO_EXTENSIONS",
     "AnalysisSignal",
+    "AlignmentConfig",
+    "AlignmentFailure",
     "AudioInputMetadata",
     "InputFailure",
+    "InputAlignment",
+    "InputAlignmentResult",
     "MultiAudioPreparationError",
+    "MultiAudioAlignment",
+    "MultiAudioAlignmentResult",
     "PreparationWarning",
     "PreparedAudioInput",
     "PreparedMultiAudio",
     "SourceFingerprint",
+    "WindowAlignment",
+    "align_prepared_inputs",
     "build_validity_mask",
     "fingerprint_file",
     "is_supported_audio_path",
     "place_signal_on_timeline",
     "prepare_inputs",
     "prepare_multi_audio_inputs",
+    "estimate_initial_offset",
+    "estimate_initial_offsets",
 ]

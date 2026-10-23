@@ -1,8 +1,9 @@
-"""Shared input preparation for offline multi-microphone processing.
+"""Shared preparation and alignment entry points for multi-microphone audio.
 
-This module deliberately stops before alignment or quality scoring.  It turns
-each source file into the same 16 kHz mono representation and keeps a separate
-validity mask so later timeline padding is not mistaken for recorded silence.
+Preparation turns every source into the same 16 kHz mono representation and
+keeps a separate validity mask so later timeline padding is not mistaken for
+recorded silence.  Initial offset estimation is delegated to ``align.py``;
+quality scoring and merged-audio rendering remain later pipeline stages.
 """
 
 from __future__ import annotations
@@ -15,6 +16,8 @@ from pathlib import Path
 from typing import Iterable, Iterator
 
 import numpy as np
+
+from .align import AlignmentConfig, MultiAudioAlignment, estimate_initial_offsets
 
 try:  # The engine is imported both as a source directory and as a package.
     from ..audio_metadata import (
@@ -586,4 +589,36 @@ def prepare_inputs(
     return prepare_multi_audio_inputs(
         input_paths,
         target_sample_rate=target_sample_rate,
+    )
+
+
+def align_prepared_inputs(
+    prepared: PreparedMultiAudio,
+    *,
+    reference_index: int = 0,
+    config: AlignmentConfig | None = None,
+) -> MultiAudioAlignment:
+    """Estimate initial placement offsets for already prepared 16 kHz inputs.
+
+    Alignment failures are retained per input in the returned report.  This
+    wrapper intentionally does not move samples or mutate ``prepared``; later
+    pipeline stages can apply a successful ``offset_samples`` directly with
+    :func:`place_signal_on_timeline`.
+    """
+
+    if not isinstance(prepared, PreparedMultiAudio):
+        raise TypeError("prepared must be a PreparedMultiAudio")
+    if prepared.analysis_sample_rate != ANALYSIS_SAMPLE_RATE:
+        raise ValueError(
+            f"multi-audio alignment requires a {ANALYSIS_SAMPLE_RATE} Hz sample rate"
+        )
+    if any(item.sample_rate != ANALYSIS_SAMPLE_RATE for item in prepared.inputs):
+        raise ValueError(
+            f"every prepared input must use the {ANALYSIS_SAMPLE_RATE} Hz analysis rate"
+        )
+
+    return estimate_initial_offsets(
+        tuple(item.analysis for item in prepared.inputs),
+        reference_index=reference_index,
+        config=config,
     )
