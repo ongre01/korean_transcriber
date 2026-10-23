@@ -2,14 +2,16 @@
 
 Preparation turns every source into the same 16 kHz mono representation and
 keeps a separate validity mask so later timeline padding is not mistaken for
-recorded silence.  Initial offset estimation is delegated to ``align.py``;
-quality scoring and merged-audio rendering remain later pipeline stages.
+recorded silence.  Offset and clock-drift estimation are delegated to
+``align.py``; quality scoring and merged-audio rendering remain later stages.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from hashlib import sha256
+import math
+from numbers import Real
 import operator
 import os
 from pathlib import Path
@@ -17,7 +19,12 @@ from typing import Iterable, Iterator
 
 import numpy as np
 
-from .align import AlignmentConfig, MultiAudioAlignment, estimate_initial_offsets
+from .align import (
+    AlignmentConfig,
+    InputAlignment,
+    MultiAudioAlignment,
+    estimate_time_alignments,
+)
 
 try:  # The engine is imported both as a source directory and as a package.
     from ..audio_metadata import (
@@ -340,6 +347,151 @@ def place_signal_on_timeline(
     )
 
 
+def warp_signal_to_reference_timeline(
+    signal: AnalysisSignal,
+    alignment: InputAlignment,
+    timeline_sample_count: int,
+    chunk_size: int = 262_144,
+) -> AnalysisSignal:
+    """Map one input onto the reference timeline using its affine alignment.
+
+    ``InputAlignment`` defines the target-to-reference mapping
+    ``reference = time_scale * target + offset_samples``.  Rendering therefore
+    samples the input at ``(reference - offset_samples) / time_scale``.  The
+    output length is supplied by the reference input so neither target padding
+    nor clock drift can change the canonical timeline.
+
+    Automatic rendering is deliberately refused for failed alignments and for
+    results that require manual review.  Interpolation is processed in bounded
+    chunks, and an output sample is valid only when every source sample used by
+    the linear interpolation is valid.
+    """
+
+    if not isinstance(signal, AnalysisSignal):
+        raise TypeError("signal must be an AnalysisSignal")
+    if not isinstance(alignment, InputAlignment):
+        raise TypeError("alignment must be an InputAlignment")
+    if alignment.requires_manual_review:
+        raise ValueError(
+            "alignment requires manual review before it can be applied"
+        )
+    if not alignment.success:
+        raise ValueError("only a successful alignment can be applied")
+
+    if isinstance(timeline_sample_count, bool):
+        raise ValueError("timeline_sample_count must be a non-negative integer")
+    try:
+        timeline_count = operator.index(timeline_sample_count)
+    except TypeError as exc:
+        raise ValueError(
+            "timeline_sample_count must be a non-negative integer"
+        ) from exc
+    if timeline_count < 0:
+        raise ValueError("timeline_sample_count must not be negative")
+    if isinstance(chunk_size, bool):
+        raise ValueError("chunk_size must be a positive integer")
+    try:
+        render_chunk_size = operator.index(chunk_size)
+    except TypeError as exc:
+        raise ValueError("chunk_size must be a positive integer") from exc
+    if render_chunk_size <= 0:
+        raise ValueError("chunk_size must be a positive integer")
+
+    offset = alignment.offset_samples
+    scale = alignment.time_scale
+    if (
+        offset is None
+        or isinstance(offset, bool)
+        or not isinstance(offset, Real)
+        or not math.isfinite(float(offset))
+    ):
+        raise ValueError("alignment offset_samples must be a finite number")
+    if (
+        scale is None
+        or isinstance(scale, bool)
+        or not isinstance(scale, Real)
+        or not math.isfinite(float(scale))
+        or float(scale) <= 0.0
+    ):
+        raise ValueError("alignment time_scale must be a finite number greater than 0")
+    if not isinstance(alignment.correction_applied, bool):
+        raise ValueError("alignment correction_applied must be a boolean")
+    if not alignment.correction_applied and float(scale) != 1.0:
+        raise ValueError(
+            "alignment without an applied affine correction must use time_scale 1"
+        )
+
+    # Preserve the established integer-placement behavior (including exact
+    # source samples and masks) for the reference and offset-only alignments.
+    if float(scale) == 1.0:
+        try:
+            integer_offset = operator.index(offset)
+        except TypeError:
+            integer_offset = None
+        if integer_offset is not None:
+            return place_signal_on_timeline(
+                signal,
+                start_sample=integer_offset,
+                timeline_sample_count=timeline_count,
+            )
+
+    samples = np.zeros(timeline_count, dtype=np.float32)
+    valid_mask = np.zeros(timeline_count, dtype=np.bool_)
+    source_count = signal.samples.size
+    if timeline_count == 0 or source_count == 0:
+        return AnalysisSignal(
+            samples=samples,
+            valid_mask=valid_mask,
+            sample_rate=signal.sample_rate,
+        )
+
+    offset_value = float(offset)
+    scale_value = float(scale)
+    for chunk_start in range(0, timeline_count, render_chunk_size):
+        chunk_end = min(timeline_count, chunk_start + render_chunk_size)
+        reference_positions = np.arange(
+            chunk_start,
+            chunk_end,
+            dtype=np.float64,
+        )
+        source_positions = (reference_positions - offset_value) / scale_value
+        inside = (source_positions >= 0.0) & (source_positions <= source_count - 1)
+        if not np.any(inside):
+            continue
+
+        # Clip only for safe vectorized indexing.  ``inside`` remains part of
+        # the validity test, so clipped out-of-range positions stay padding.
+        clipped_positions = np.clip(source_positions, 0.0, source_count - 1)
+        left_indexes = np.floor(clipped_positions).astype(np.int64)
+        right_indexes = np.ceil(clipped_positions).astype(np.int64)
+        fractions = clipped_positions - left_indexes
+        source_valid = (
+            inside
+            & signal.valid_mask[left_indexes]
+            & signal.valid_mask[right_indexes]
+        )
+        if not np.any(source_valid):
+            continue
+
+        left_values = signal.samples[left_indexes].astype(np.float64, copy=False)
+        right_values = signal.samples[right_indexes].astype(np.float64, copy=False)
+        interpolated = left_values + fractions * (right_values - left_values)
+        destination = slice(chunk_start, chunk_end)
+        chunk_samples = samples[destination]
+        chunk_mask = valid_mask[destination]
+        chunk_samples[source_valid] = interpolated[source_valid].astype(
+            np.float32,
+            copy=False,
+        )
+        chunk_mask[source_valid] = True
+
+    return AnalysisSignal(
+        samples=samples,
+        valid_mask=valid_mask,
+        sample_rate=signal.sample_rate,
+    )
+
+
 def _append_resampled_frames(frames: Iterable[object], chunks: list[np.ndarray]) -> None:
     for frame in frames:
         values = np.asarray(frame.to_ndarray(), dtype=np.float32).reshape(-1)
@@ -598,12 +750,12 @@ def align_prepared_inputs(
     reference_index: int = 0,
     config: AlignmentConfig | None = None,
 ) -> MultiAudioAlignment:
-    """Estimate initial placement offsets for already prepared 16 kHz inputs.
+    """Estimate affine time alignment for already prepared 16 kHz inputs.
 
     Alignment failures are retained per input in the returned report.  This
     wrapper intentionally does not move samples or mutate ``prepared``; later
-    pipeline stages can apply a successful ``offset_samples`` directly with
-    :func:`place_signal_on_timeline`.
+    pipeline stages can render each successful result with
+    :func:`warp_signal_to_reference_timeline`.
     """
 
     if not isinstance(prepared, PreparedMultiAudio):
@@ -617,7 +769,7 @@ def align_prepared_inputs(
             f"every prepared input must use the {ANALYSIS_SAMPLE_RATE} Hz analysis rate"
         )
 
-    return estimate_initial_offsets(
+    return estimate_time_alignments(
         tuple(item.analysis for item in prepared.inputs),
         reference_index=reference_index,
         config=config,

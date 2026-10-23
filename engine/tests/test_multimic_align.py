@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import sys
 import unittest
+from unittest import mock
 
 import numpy as np
 
@@ -14,12 +15,15 @@ if str(ENGINE_DIR) not in sys.path:
 
 from multimic.align import (
     AlignmentConfig,
+    InputAlignment,
     WindowAlignment,
     _candidate_clusters,
     _coerce_signal,
     _select_reference_windows,
     estimate_initial_offset,
     estimate_initial_offsets,
+    estimate_time_alignment,
+    estimate_time_alignments,
 )
 from multimic.pipeline import (
     ANALYSIS_SAMPLE_RATE,
@@ -29,6 +33,7 @@ from multimic.pipeline import (
     PreparedMultiAudio,
     align_prepared_inputs,
     place_signal_on_timeline,
+    warp_signal_to_reference_timeline,
 )
 
 
@@ -75,6 +80,82 @@ def analysis_signal(
     if mask is None:
         mask = np.ones(values.size, dtype=np.bool_)
     return AnalysisSignal(values, mask, SAMPLE_RATE)
+
+
+def analysis_signal_at_rate(
+    samples: np.ndarray,
+    sample_rate: int,
+    mask: np.ndarray | None = None,
+) -> AnalysisSignal:
+    values = np.asarray(samples, dtype=np.float32)
+    if mask is None:
+        mask = np.ones(values.size, dtype=np.bool_)
+    return AnalysisSignal(values, mask, sample_rate)
+
+
+def long_drift_recordings(
+    *,
+    sample_rate: int = 400,
+    duration_seconds: float = 1805.0,
+    offset_seconds: float = 0.25,
+    drift_ppm: float = 200.0,
+    nonlinear_drift_seconds: float | None = None,
+) -> tuple[AnalysisSignal, AnalysisSignal]:
+    """Create deterministic 30-minute signals without 16 kHz test memory cost.
+
+    The generated target follows the public alignment convention
+    ``reference = offset + time_scale * target``.  A non-``None`` nonlinear
+    drift value replaces the constant scale with a quadratic accumulated
+    timing error that reaches the requested number of seconds at the end.
+    """
+
+    sample_count = int(round(duration_seconds * sample_rate))
+    rng = np.random.default_rng(20261023)
+    white = rng.normal(0.0, 1.0, sample_count + 16)
+    kernel = np.hanning(9)
+    kernel /= np.sum(kernel)
+    colored = np.convolve(white, kernel, mode="same")[:sample_count]
+    sample_indexes = np.arange(sample_count, dtype=np.float64)
+    envelope = 0.75 + 0.25 * np.sin(
+        2.0 * np.pi * sample_indexes / (17.3 * sample_rate)
+    )
+    reference_samples = np.asarray(
+        0.15 * envelope * colored / max(float(np.std(colored)), 1.0e-12),
+        dtype=np.float32,
+    )
+
+    offset_samples = offset_seconds * sample_rate
+    if nonlinear_drift_seconds is None:
+        time_scale = 1.0 + drift_ppm / 1_000_000.0
+        target_count = int(
+            np.floor((sample_count - 1 - offset_samples) / time_scale)
+        ) + 1
+        target_indexes = np.arange(target_count, dtype=np.float64)
+        reference_positions = offset_samples + time_scale * target_indexes
+    else:
+        accumulated_drift = nonlinear_drift_seconds * sample_rate
+        target_count = max(
+            2,
+            int(np.floor(sample_count - 1 - offset_samples - accumulated_drift))
+            + 1,
+        )
+        target_indexes = np.arange(target_count, dtype=np.float64)
+        normalized = target_indexes / max(1.0, float(target_count - 1))
+        reference_positions = (
+            offset_samples
+            + target_indexes
+            + accumulated_drift * np.square(normalized)
+        )
+
+    target_samples = np.interp(
+        reference_positions,
+        sample_indexes,
+        reference_samples,
+    ).astype(np.float32)
+    return (
+        analysis_signal_at_rate(reference_samples, sample_rate),
+        analysis_signal_at_rate(target_samples, sample_rate),
+    )
 
 
 def cropped_recordings() -> tuple[AnalysisSignal, AnalysisSignal, AnalysisSignal]:
@@ -461,6 +542,33 @@ class InitialOffsetTests(unittest.TestCase):
         )
         self.assertLess(result.accepted_window_count, result.selected_window_count)
 
+    def test_legacy_single_window_configuration_keeps_positive_offset(self) -> None:
+        reference, positive, _ = cropped_recordings()
+        config = AlignmentConfig(
+            max_windows=1,
+            min_reference_windows=1,
+            min_consistent_windows=1,
+        )
+
+        pair_result = estimate_initial_offset(
+            reference,
+            positive,
+            config=config,
+        )
+        batch_result = estimate_initial_offsets(
+            (reference, positive),
+            config=config,
+        ).inputs[1]
+
+        for result in (pair_result, batch_result):
+            self.assertTrue(result.success, result.failure_reason)
+            self.assertEqual(result.selected_window_count, 1)
+            self.assertEqual(result.consistent_window_count, 1)
+            self.assertLessEqual(
+                abs(result.offset_samples - SAMPLE_RATE // 2),
+                320,
+            )
+
     def test_contract_errors_are_distinct_from_alignment_failures(self) -> None:
         reference, positive, _ = cropped_recordings()
         wrong_rate = AnalysisSignal(
@@ -481,6 +589,181 @@ class InitialOffsetTests(unittest.TestCase):
             estimate_initial_offset(reference, positive, input_index=-1)
         with self.assertRaisesRegex(ValueError, "finite number"):
             AlignmentConfig(window_seconds="0.75")  # type: ignore[arg-type]
+        with self.assertRaisesRegex(ValueError, "drift_min_anchors"):
+            AlignmentConfig(max_windows=4, drift_min_anchors=5)
+
+        # A legacy short-input setup may intentionally use only two windows;
+        # drift analysis will conservatively decline it instead of making the
+        # offset-only configuration itself invalid.
+        AlignmentConfig(
+            max_windows=2,
+            min_reference_windows=2,
+            min_consistent_windows=2,
+        )
+
+
+class DriftAlignmentTests(unittest.TestCase):
+    def test_thirty_minute_linear_drift_is_corrected_and_diagnosed(self) -> None:
+        reference, target = long_drift_recordings()
+
+        report = estimate_time_alignments((reference, target))
+        result = report.inputs[1]
+
+        self.assertTrue(report.success, result.failure_reason)
+        self.assertTrue(result.success, result.failure_reason)
+        self.assertFalse(result.requires_manual_review)
+        self.assertIsNone(result.warning_code)
+        self.assertTrue(result.correction_applied)
+        self.assertEqual(result.correction_method, "affine")
+        self.assertAlmostEqual(result.offset_ms, 250.0, delta=20.0)
+        self.assertAlmostEqual(result.estimated_time_scale, 1.0002, delta=30e-6)
+        self.assertAlmostEqual(result.time_scale, 1.0002, delta=30e-6)
+        self.assertAlmostEqual(result.drift_ppm, 200.0, delta=30.0)
+        self.assertGreater(abs(result.drift_span_ms), 200.0)
+        self.assertGreater(
+            result.pre_correction_error_ms,
+            result.post_correction_error_ms,
+        )
+        self.assertLessEqual(result.post_correction_error_ms, 20.0)
+        self.assertLessEqual(
+            result.max_post_correction_error_ms,
+            AlignmentConfig().drift_residual_tolerance_ms,
+        )
+        self.assertGreaterEqual(len(result.drift_anchors), 3)
+
+        reference_result = report.inputs[0]
+        self.assertTrue(reference_result.success)
+        self.assertEqual(reference_result.offset_samples, 0)
+        self.assertEqual(reference_result.time_scale, 1.0)
+        self.assertEqual(reference_result.estimated_time_scale, 1.0)
+        self.assertEqual(reference_result.drift_ppm, 0.0)
+        self.assertEqual(reference_result.drift_span_ms, 0.0)
+        self.assertEqual(reference_result.correction_method, "reference")
+        self.assertFalse(reference_result.correction_applied)
+        self.assertFalse(reference_result.requires_manual_review)
+
+        payload = report.to_dict()
+        result_payload = payload["inputs"][1]
+        for field in (
+            "time_scale",
+            "estimated_time_scale",
+            "drift_ppm",
+            "drift_span_ms",
+            "pre_correction_error_ms",
+            "post_correction_error_ms",
+            "max_post_correction_error_ms",
+            "correction_method",
+            "correction_applied",
+            "requires_manual_review",
+            "warning_code",
+            "drift_anchors",
+        ):
+            self.assertIn(field, result_payload)
+        json.dumps(payload, allow_nan=False)
+
+        warped_reference = warp_signal_to_reference_timeline(
+            reference,
+            reference_result,
+            reference.samples.size,
+        )
+        np.testing.assert_array_equal(warped_reference.samples, reference.samples)
+        np.testing.assert_array_equal(
+            warped_reference.valid_mask,
+            reference.valid_mask,
+        )
+
+        warped_target = warp_signal_to_reference_timeline(
+            target,
+            result,
+            reference.samples.size,
+        )
+        self.assertEqual(warped_target.samples.size, reference.samples.size)
+        self.assertEqual(warped_target.valid_mask.size, reference.valid_mask.size)
+        overlap = warped_target.valid_mask & reference.valid_mask
+        self.assertGreater(np.count_nonzero(overlap), reference.samples.size * 0.95)
+        correlation = np.corrcoef(
+            warped_target.samples[overlap],
+            reference.samples[overlap],
+        )[0, 1]
+        self.assertGreater(correlation, 0.98)
+
+    def test_nonlinear_drift_requires_manual_review_and_is_not_warped(self) -> None:
+        reference, target = long_drift_recordings(
+            nonlinear_drift_seconds=0.80,
+        )
+
+        result = estimate_time_alignment(reference, target)
+
+        self.assertFalse(result.success)
+        self.assertTrue(result.requires_manual_review)
+        self.assertEqual(result.status, "manual_review")
+        self.assertFalse(result.correction_applied)
+        self.assertEqual(result.failure_code, "unstable_drift")
+        self.assertEqual(result.warning_code, "manual_review_required")
+        self.assertIsNotNone(result.estimated_time_scale)
+        self.assertGreaterEqual(len(result.drift_anchors), 3)
+        self.assertGreater(
+            result.max_post_correction_error_ms,
+            AlignmentConfig().drift_residual_tolerance_ms,
+        )
+        self.assertTrue(any(not anchor.inlier for anchor in result.drift_anchors))
+        json.dumps(result.to_dict(), allow_nan=False)
+        with self.assertRaisesRegex(ValueError, "manual review"):
+            warp_signal_to_reference_timeline(
+                target,
+                result,
+                reference.samples.size,
+            )
+
+    def test_affine_warp_uses_inverse_mapping_and_conservative_mask(self) -> None:
+        source = AnalysisSignal(
+            samples=np.array([0.0, 10.0, 20.0, 30.0], dtype=np.float32),
+            valid_mask=np.array([True, True, False, True]),
+            sample_rate=4,
+        )
+        alignment = InputAlignment(
+            input_index=1,
+            reference_index=0,
+            offset_samples=1,
+            offset_ms=250.0,
+            confidence=1.0,
+            method="test",
+            failure=None,
+            selected_window_count=3,
+            accepted_window_count=3,
+            consistent_window_count=3,
+            offset_dispersion_ms=0.0,
+            window_observations=(),
+            time_scale=2.0,
+            estimated_time_scale=2.0,
+            drift_ppm=1_000_000.0,
+            drift_span_ms=0.0,
+            pre_correction_error_ms=0.0,
+            post_correction_error_ms=0.0,
+            max_post_correction_error_ms=0.0,
+            correction_method="affine",
+            correction_applied=True,
+            requires_manual_review=False,
+            drift_anchors=(),
+        )
+
+        warped = warp_signal_to_reference_timeline(
+            source,
+            alignment,
+            8,
+            chunk_size=2,
+        )
+
+        np.testing.assert_array_equal(
+            warped.valid_mask,
+            np.array([False, True, True, True, False, False, False, True]),
+        )
+        np.testing.assert_allclose(
+            warped.samples,
+            np.array([0.0, 0.0, 5.0, 10.0, 0.0, 0.0, 0.0, 30.0]),
+        )
+        with self.assertRaisesRegex(ValueError, "timeline_sample_count"):
+            warp_signal_to_reference_timeline(source, alignment, True)
 
 
 class AlignmentPipelineTests(unittest.TestCase):
@@ -514,6 +797,41 @@ class AlignmentPipelineTests(unittest.TestCase):
         for index, item in enumerate(prepared.inputs):
             np.testing.assert_array_equal(item.samples, original_samples[index])
             np.testing.assert_array_equal(item.valid_mask, original_masks[index])
+
+    def test_prepared_input_wrapper_uses_drift_aware_estimator(self) -> None:
+        reference, positive, _ = cropped_recordings()
+        prepared = PreparedMultiAudio(
+            inputs=tuple(
+                PreparedAudioInput(
+                    metadata=metadata(index, signal.samples.size),
+                    analysis=signal,
+                )
+                for index, signal in enumerate((reference, positive))
+            ),
+            warnings=(),
+            analysis_sample_rate=SAMPLE_RATE,
+        )
+        expected = mock.sentinel.alignment_report
+        config = AlignmentConfig()
+
+        with mock.patch(
+            "multimic.pipeline.estimate_time_alignments",
+            return_value=expected,
+        ) as estimator:
+            result = align_prepared_inputs(
+                prepared,
+                reference_index=1,
+                config=config,
+            )
+
+        self.assertIs(result, expected)
+        estimator.assert_called_once()
+        signals = estimator.call_args.args[0]
+        self.assertEqual(len(signals), 2)
+        self.assertIs(signals[0], reference)
+        self.assertIs(signals[1], positive)
+        self.assertEqual(estimator.call_args.kwargs["reference_index"], 1)
+        self.assertIs(estimator.call_args.kwargs["config"], config)
 
 
 if __name__ == "__main__":

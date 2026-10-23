@@ -20,10 +20,13 @@ from .pipeline import (
     place_signal_on_timeline,
     prepare_inputs,
     prepare_multi_audio_inputs,
+    warp_signal_to_reference_timeline,
 )
 from .align import (
     AlignmentConfig,
     AlignmentFailure,
+    AlignmentWarning,
+    DriftAnchor,
     InputAlignment,
     InputAlignmentResult,
     MultiAudioAlignment,
@@ -31,6 +34,8 @@ from .align import (
     WindowAlignment,
     estimate_initial_offset,
     estimate_initial_offsets,
+    estimate_time_alignment,
+    estimate_time_alignments,
 )
 
 __all__ = [
@@ -41,7 +46,9 @@ __all__ = [
     "AnalysisSignal",
     "AlignmentConfig",
     "AlignmentFailure",
+    "AlignmentWarning",
     "AudioInputMetadata",
+    "DriftAnchor",
     "InputFailure",
     "InputAlignment",
     "InputAlignmentResult",
@@ -62,4 +69,7 @@ __all__ = [
     "prepare_multi_audio_inputs",
     "estimate_initial_offset",
     "estimate_initial_offsets",
+    "estimate_time_alignment",
+    "estimate_time_alignments",
+    "warp_signal_to_reference_timeline",
 ]

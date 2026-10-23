@@ -1,4 +1,4 @@
-"""Initial time-offset estimation for offline multi-microphone recordings.
+"""Offset and clock-drift alignment for offline multi-microphone recordings.
 
 The canonical ``offset_samples`` in this module is a *timeline placement*
 offset: it is the position on the reference timeline where target sample zero
@@ -8,6 +8,11 @@ reference recording.  This convention is intentionally compatible with
 the opposite of the target-minus-reference lag commonly returned by a cross
 correlator.
 
+For long recordings the drift-aware entry points fit the guarded affine map
+``reference = time_scale * target + offset_samples``.  They retain the initial
+offset API for short recordings and reject unstable/nonlinear fits for manual
+review rather than resampling them automatically.
+
 Only decoded analysis samples and their validity masks are considered.  File
 timestamps are deliberately absent from this API, so they cannot accidentally
 become synchronization evidence.
@@ -15,7 +20,7 @@ become synchronization evidence.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import math
 from numbers import Real
 import operator
@@ -60,6 +65,13 @@ class AlignmentConfig:
     use_gcc_phat: bool = True
     gcc_compare_below_correlation: float = 0.75
     gcc_compare_below_prominence: float = 0.08
+    drift_min_duration_seconds: float = 30.0
+    drift_min_anchors: int = 3
+    drift_min_inlier_ratio: float = 0.80
+    drift_min_span_ratio: float = 0.60
+    drift_residual_tolerance_ms: float = 20.0
+    drift_max_abs_ppm: float = 2_000.0
+    drift_min_correction_ms: float = 20.0
 
     def __post_init__(self) -> None:
         _require_positive("window_seconds", self.window_seconds)
@@ -70,6 +82,16 @@ class AlignmentConfig:
         _require_positive(
             "max_offset_dispersion_ms", self.max_offset_dispersion_ms
         )
+        _require_positive(
+            "drift_min_duration_seconds", self.drift_min_duration_seconds
+        )
+        _require_positive(
+            "drift_residual_tolerance_ms", self.drift_residual_tolerance_ms
+        )
+        _require_positive("drift_max_abs_ppm", self.drift_max_abs_ppm)
+        _require_non_negative(
+            "drift_min_correction_ms", self.drift_min_correction_ms
+        )
         _require_non_negative("min_signal_rms", self.min_signal_rms)
 
         _require_integer_at_least("max_windows", self.max_windows, 1)
@@ -79,10 +101,16 @@ class AlignmentConfig:
         _require_integer_at_least(
             "min_consistent_windows", self.min_consistent_windows, 1
         )
+        _require_integer_at_least("drift_min_anchors", self.drift_min_anchors, 3)
         if self.min_reference_windows > self.max_windows:
             raise ValueError("min_reference_windows must not exceed max_windows")
         if self.min_consistent_windows > self.max_windows:
             raise ValueError("min_consistent_windows must not exceed max_windows")
+        # Preserve legacy two-window offset-only configurations, while
+        # rejecting drift configurations that can never collect their stated
+        # minimum once at least three affine anchors are otherwise possible.
+        if self.max_windows >= 3 and self.drift_min_anchors > self.max_windows:
+            raise ValueError("drift_min_anchors must not exceed max_windows")
         if self.hop_seconds > self.window_seconds:
             raise ValueError("hop_seconds must not exceed window_seconds")
 
@@ -95,6 +123,8 @@ class AlignmentConfig:
             ("min_confidence", self.min_confidence),
             ("gcc_compare_below_correlation", self.gcc_compare_below_correlation),
             ("gcc_compare_below_prominence", self.gcc_compare_below_prominence),
+            ("drift_min_inlier_ratio", self.drift_min_inlier_ratio),
+            ("drift_min_span_ratio", self.drift_min_span_ratio),
         ):
             _require_unit_interval(name, value)
 
@@ -109,6 +139,49 @@ class AlignmentFailure:
 
     def to_dict(self) -> dict[str, str]:
         return {"code": self.code, "message": self.message}
+
+
+@dataclass(frozen=True)
+class AlignmentWarning:
+    """A recoverable diagnostic that still requires explicit user review."""
+
+    code: str
+    message: str
+
+    def to_dict(self) -> dict[str, str]:
+        return {"code": self.code, "message": self.message}
+
+
+@dataclass(frozen=True)
+class DriftAnchor:
+    """One local delay observation used to diagnose an affine clock fit."""
+
+    reference_sample: int
+    target_sample: int
+    observed_offset_samples: int
+    observed_offset_ms: float
+    predicted_reference_sample: float
+    residual_samples: float
+    residual_ms: float
+    correlation: float
+    peak_prominence: float
+    inlier: bool
+    region: str
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "reference_sample": self.reference_sample,
+            "target_sample": self.target_sample,
+            "observed_offset_samples": self.observed_offset_samples,
+            "observed_offset_ms": self.observed_offset_ms,
+            "predicted_reference_sample": self.predicted_reference_sample,
+            "residual_samples": self.residual_samples,
+            "residual_ms": self.residual_ms,
+            "correlation": self.correlation,
+            "peak_prominence": self.peak_prominence,
+            "inlier": self.inlier,
+            "region": self.region,
+        }
 
 
 @dataclass(frozen=True)
@@ -163,10 +236,26 @@ class InputAlignment:
     consistent_window_count: int
     offset_dispersion_ms: float | None
     window_observations: tuple[WindowAlignment, ...] = ()
+    time_scale: float | None = None
+    estimated_time_scale: float | None = None
+    drift_ppm: float | None = None
+    drift_span_ms: float | None = None
+    pre_correction_error_ms: float | None = None
+    post_correction_error_ms: float | None = None
+    max_post_correction_error_ms: float | None = None
+    correction_method: str = "none"
+    correction_applied: bool = False
+    requires_manual_review: bool = False
+    warning: AlignmentWarning | None = None
+    drift_anchors: tuple[DriftAnchor, ...] = ()
 
     @property
     def ok(self) -> bool:
-        return self.failure is None and self.offset_samples is not None
+        return (
+            self.failure is None
+            and self.offset_samples is not None
+            and not self.requires_manual_review
+        )
 
     @property
     def success(self) -> bool:
@@ -184,6 +273,22 @@ class InputAlignment:
     def offset_milliseconds(self) -> float | None:
         return self.offset_ms
 
+    @property
+    def warning_code(self) -> str | None:
+        return self.warning.code if self.warning is not None else None
+
+    @property
+    def warning_reason(self) -> str | None:
+        return self.warning.message if self.warning is not None else None
+
+    @property
+    def status(self) -> str:
+        if self.requires_manual_review:
+            return "manual_review"
+        if self.success:
+            return "aligned"
+        return "failed"
+
     def to_dict(self) -> dict[str, object]:
         return {
             "input_index": self.input_index,
@@ -199,6 +304,20 @@ class InputAlignment:
             "accepted_window_count": self.accepted_window_count,
             "consistent_window_count": self.consistent_window_count,
             "offset_dispersion_ms": self.offset_dispersion_ms,
+            "time_scale": self.time_scale,
+            "estimated_time_scale": self.estimated_time_scale,
+            "drift_ppm": self.drift_ppm,
+            "drift_span_ms": self.drift_span_ms,
+            "pre_correction_error_ms": self.pre_correction_error_ms,
+            "post_correction_error_ms": self.post_correction_error_ms,
+            "max_post_correction_error_ms": self.max_post_correction_error_ms,
+            "correction_method": self.correction_method,
+            "correction_applied": self.correction_applied,
+            "requires_manual_review": self.requires_manual_review,
+            "status": self.status,
+            "warning_code": self.warning_code,
+            "warning_reason": self.warning_reason,
+            "drift_anchors": [anchor.to_dict() for anchor in self.drift_anchors],
             "windows": [window.to_dict() for window in self.window_observations],
         }
 
@@ -290,6 +409,28 @@ class _CandidateCluster:
     @property
     def count(self) -> int:
         return len(self.choices)
+
+
+@dataclass(frozen=True)
+class _AffineFit:
+    """Robust target-to-reference model selected from per-window peaks."""
+
+    scale: float
+    intercept: float
+    choices: tuple[tuple[int, WindowAlignment], ...]
+    residuals: tuple[float, ...]
+    weight: float
+    rms_residual: float
+    span_ratio: float
+    regions: tuple[str, ...]
+
+    @property
+    def count(self) -> int:
+        return len(self.choices)
+
+    @property
+    def drift_ppm(self) -> float:
+        return (self.scale - 1.0) * 1_000_000.0
 
 
 def _require_positive(name: str, value: float) -> None:
@@ -411,6 +552,8 @@ def _prefix_sum(values: np.ndarray, *, dtype: object) -> np.ndarray:
 def _select_reference_windows(
     reference: _SignalView,
     config: AlignmentConfig,
+    *,
+    reserve_drift_edges: bool = False,
 ) -> tuple[tuple[int, int], ...]:
     window = _window_samples(config, reference.sample_rate)
     hop = max(1, int(round(config.hop_seconds * reference.sample_rate)))
@@ -500,13 +643,47 @@ def _select_reference_windows(
         (int(index) for index in eligible_indexes),
         key=lambda index: (-float(scores[index]), int(starts[index])),
     )
-    seed_ranked = sorted(
-        set(seeds),
-        key=lambda index: (-float(scores[index]), int(starts[index])),
-    )
+    if reserve_drift_edges:
+        # A drift fit must actually observe the start, middle, and end.  Keep
+        # edge windows inside the offset search margin so a cropped target can
+        # still overlap the complete template at the configured search bound.
+        edge_margin = int(
+            math.ceil(config.max_offset_seconds * reference.sample_rate)
+        )
+        safe_edge_indexes = eligible_indexes[
+            (starts[eligible_indexes] >= edge_margin)
+            & (ends[eligible_indexes] <= reference.samples.size - edge_margin)
+        ]
+        edge_pool = safe_edge_indexes if safe_edge_indexes.size else eligible_indexes
+        reserved_seeds = [int(edge_pool[0])]
+        if int(edge_pool[-1]) != reserved_seeds[0]:
+            reserved_seeds.append(int(edge_pool[-1]))
+
+        middle_indexes = eligible_indexes[
+            (centers[eligible_indexes] >= reference.samples.size / 3.0)
+            & (centers[eligible_indexes] < 2.0 * reference.samples.size / 3.0)
+        ]
+        if middle_indexes.size:
+            middle_seed = int(middle_indexes[np.argmax(scores[middle_indexes])])
+            if middle_seed not in reserved_seeds:
+                reserved_seeds.append(middle_seed)
+        seed_ranked = sorted(
+            set(seeds) - set(reserved_seeds),
+            key=lambda index: (-float(scores[index]), int(starts[index])),
+        )
+        selection_order = (*reserved_seeds, *seed_ranked, *ranked)
+    else:
+        # Preserve the MM-DEV-004 selection order exactly for the public
+        # initial-offset APIs and for short offset-only recordings.
+        seed_ranked = sorted(
+            set(seeds),
+            key=lambda index: (-float(scores[index]), int(starts[index])),
+        )
+        selection_order = (*seed_ranked, *ranked)
+
     selected: list[int] = []
     minimum_separation = max(1, window // 2)
-    for index in (*seed_ranked, *ranked):
+    for index in selection_order:
         if index in selected:
             continue
         center = int(centers[index])
@@ -1053,6 +1230,343 @@ def _candidate_clusters(
     )
 
 
+def _observation_coordinates(observation: WindowAlignment) -> tuple[float, float]:
+    """Return corresponding ``(target, reference)`` sample coordinates."""
+
+    if observation.offset_samples is None:
+        raise ValueError("an affine anchor must have an offset")
+    reference_sample = float(observation.reference_start_sample)
+    target_sample = reference_sample - float(observation.offset_samples)
+    return target_sample, reference_sample
+
+
+def _weighted_affine_parameters(
+    choices: Sequence[tuple[int, WindowAlignment]],
+) -> tuple[float, float] | None:
+    """Fit ``reference = scale * target + intercept`` with centered WLS."""
+
+    if len(choices) < 2:
+        return None
+    observations = tuple(item for _, item in choices)
+    coordinates = tuple(_observation_coordinates(item) for item in observations)
+    target = np.asarray([item[0] for item in coordinates], dtype=np.float64)
+    reference = np.asarray([item[1] for item in coordinates], dtype=np.float64)
+    weights = _observation_weights(observations)
+    total_weight = float(np.sum(weights))
+    if total_weight <= np.finfo(np.float64).eps:
+        return None
+
+    target_mean = float(np.sum(weights * target) / total_weight)
+    reference_mean = float(np.sum(weights * reference) / total_weight)
+    centered_target = target - target_mean
+    denominator = float(np.sum(weights * np.square(centered_target)))
+    if denominator <= np.finfo(np.float64).eps:
+        return None
+    scale = float(
+        np.sum(weights * centered_target * (reference - reference_mean))
+        / denominator
+    )
+    intercept = reference_mean - scale * target_mean
+    if not math.isfinite(scale) or not math.isfinite(intercept) or scale <= 0.0:
+        return None
+    return scale, intercept
+
+
+def _affine_residual(
+    observation: WindowAlignment,
+    scale: float,
+    intercept: float,
+) -> float:
+    target_sample, reference_sample = _observation_coordinates(observation)
+    return reference_sample - (scale * target_sample + intercept)
+
+
+def _select_affine_choices(
+    candidate_windows: Sequence[tuple[WindowAlignment, ...]],
+    scale: float,
+    intercept: float,
+    tolerance_samples: float,
+) -> tuple[tuple[int, WindowAlignment], ...]:
+    """Select at most one peak from each window for an affine hypothesis."""
+
+    selected: list[tuple[int, WindowAlignment]] = []
+    for window_index, candidates in enumerate(candidate_windows):
+        eligible = tuple(
+            candidate
+            for candidate in candidates
+            if candidate.accepted and candidate.offset_samples is not None
+        )
+        if not eligible:
+            continue
+        weights = _observation_weights(eligible)
+        best_index = min(
+            range(len(eligible)),
+            key=lambda index: (
+                abs(_affine_residual(eligible[index], scale, intercept)),
+                -float(weights[index]),
+                -eligible[index].correlation,
+                eligible[index].selected_peak_rank or 1,
+                int(eligible[index].offset_samples),
+            ),
+        )
+        best = eligible[best_index]
+        if abs(_affine_residual(best, scale, intercept)) <= tolerance_samples:
+            selected.append((window_index, best))
+    return tuple(selected)
+
+
+def _anchor_region(reference_sample: float, reference_sample_count: int) -> str:
+    fraction = reference_sample / max(1.0, float(reference_sample_count))
+    if fraction < 1.0 / 3.0:
+        return "start"
+    if fraction < 2.0 / 3.0:
+        return "middle"
+    return "end"
+
+
+def _refine_affine_fit(
+    initial_scale: float,
+    initial_intercept: float,
+    candidate_windows: Sequence[tuple[WindowAlignment, ...]],
+    *,
+    tolerance_samples: float,
+    reference_sample_count: int,
+    max_abs_ppm: float,
+) -> _AffineFit | None:
+    scale = initial_scale
+    intercept = initial_intercept
+    previous_signature: tuple[tuple[int, int], ...] | None = None
+    choices: tuple[tuple[int, WindowAlignment], ...] = ()
+    for _ in range(6):
+        if (
+            not math.isfinite(scale)
+            or not math.isfinite(intercept)
+            or scale <= 0.0
+            or abs((scale - 1.0) * 1_000_000.0) > max_abs_ppm
+        ):
+            return None
+        choices = _select_affine_choices(
+            candidate_windows,
+            scale,
+            intercept,
+            tolerance_samples,
+        )
+        if len(choices) < 2:
+            return None
+        signature = tuple(
+            (window_index, int(observation.offset_samples))
+            for window_index, observation in choices
+        )
+        parameters = _weighted_affine_parameters(choices)
+        if parameters is None:
+            return None
+        scale, intercept = parameters
+        if signature == previous_signature:
+            break
+        previous_signature = signature
+
+    choices = _select_affine_choices(
+        candidate_windows,
+        scale,
+        intercept,
+        tolerance_samples,
+    )
+    parameters = _weighted_affine_parameters(choices)
+    if parameters is None:
+        return None
+    scale, intercept = parameters
+    drift_ppm = (scale - 1.0) * 1_000_000.0
+    if abs(drift_ppm) > max_abs_ppm:
+        return None
+
+    residuals = tuple(
+        _affine_residual(observation, scale, intercept)
+        for _, observation in choices
+    )
+    observations = tuple(observation for _, observation in choices)
+    weights = _observation_weights(observations)
+    total_weight = float(np.sum(weights))
+    rms_residual = math.sqrt(
+        float(
+            np.sum(weights * np.square(np.asarray(residuals, dtype=np.float64)))
+            / max(total_weight, np.finfo(np.float64).eps)
+        )
+    )
+    reference_positions = np.asarray(
+        [item.reference_start_sample for item in observations],
+        dtype=np.float64,
+    )
+    span_ratio = (
+        float(np.ptp(reference_positions)) / max(1.0, reference_sample_count - 1.0)
+        if reference_positions.size
+        else 0.0
+    )
+    regions = tuple(
+        sorted(
+            {
+                _anchor_region(position, reference_sample_count)
+                for position in reference_positions
+            }
+        )
+    )
+    return _AffineFit(
+        scale=scale,
+        intercept=intercept,
+        choices=choices,
+        residuals=residuals,
+        weight=total_weight,
+        rms_residual=rms_residual,
+        span_ratio=span_ratio,
+        regions=regions,
+    )
+
+
+def _affine_candidate_fits(
+    candidate_windows: Sequence[tuple[WindowAlignment, ...]],
+    *,
+    tolerance_samples: float,
+    reference_sample_count: int,
+    max_abs_ppm: float,
+) -> tuple[_AffineFit, ...]:
+    """Build deterministic pair hypotheses and retain unique refined fits."""
+
+    hypotheses: list[tuple[float, float]] = []
+    populated = tuple(
+        (window_index, candidates)
+        for window_index, candidates in enumerate(candidate_windows)
+        if candidates
+    )
+    for _, candidates in populated:
+        for candidate in candidates:
+            target_sample, reference_sample = _observation_coordinates(candidate)
+            hypotheses.append((1.0, reference_sample - target_sample))
+
+    for left_index in range(len(populated)):
+        _, left_candidates = populated[left_index]
+        for right_index in range(left_index + 1, len(populated)):
+            _, right_candidates = populated[right_index]
+            for left in left_candidates:
+                left_target, left_reference = _observation_coordinates(left)
+                for right in right_candidates:
+                    right_target, right_reference = _observation_coordinates(right)
+                    target_delta = right_target - left_target
+                    if abs(target_delta) <= np.finfo(np.float64).eps:
+                        continue
+                    scale = (right_reference - left_reference) / target_delta
+                    intercept = left_reference - scale * left_target
+                    hypotheses.append((float(scale), float(intercept)))
+
+    fits: dict[tuple[tuple[int, int], ...], _AffineFit] = {}
+    for scale, intercept in hypotheses:
+        fit = _refine_affine_fit(
+            scale,
+            intercept,
+            candidate_windows,
+            tolerance_samples=tolerance_samples,
+            reference_sample_count=reference_sample_count,
+            max_abs_ppm=max_abs_ppm,
+        )
+        if fit is None:
+            continue
+        signature = tuple(
+            (window_index, int(observation.offset_samples))
+            for window_index, observation in fit.choices
+        )
+        previous = fits.get(signature)
+        if previous is None or (
+            fit.rms_residual,
+            -fit.weight,
+            abs(fit.drift_ppm),
+        ) < (
+            previous.rms_residual,
+            -previous.weight,
+            abs(previous.drift_ppm),
+        ):
+            fits[signature] = fit
+
+    return tuple(
+        sorted(
+            fits.values(),
+            key=lambda fit: (
+                -fit.count,
+                -len(fit.regions),
+                -fit.span_ratio,
+                -fit.weight,
+                fit.rms_residual,
+                abs(fit.drift_ppm),
+                fit.intercept,
+            ),
+        )
+    )
+
+
+def _closest_affine_observations(
+    candidate_windows: Sequence[tuple[WindowAlignment, ...]],
+    primary_observations: Sequence[WindowAlignment],
+    scale: float,
+    intercept: float,
+) -> tuple[WindowAlignment, ...]:
+    selected: list[WindowAlignment] = []
+    for candidates, primary in zip(candidate_windows, primary_observations):
+        if not candidates:
+            selected.append(primary)
+            continue
+        selected.append(
+            min(
+                candidates,
+                key=lambda candidate: (
+                    abs(_affine_residual(candidate, scale, intercept)),
+                    -candidate.correlation,
+                    candidate.selected_peak_rank or 1,
+                ),
+            )
+        )
+    return tuple(selected)
+
+
+def _weighted_rms(values: np.ndarray, weights: np.ndarray) -> float:
+    total_weight = float(np.sum(weights))
+    if not values.size or total_weight <= np.finfo(np.float64).eps:
+        return 0.0
+    return math.sqrt(float(np.sum(weights * np.square(values)) / total_weight))
+
+
+def _drift_anchors(
+    observations: Sequence[WindowAlignment],
+    *,
+    scale: float,
+    intercept: float,
+    tolerance_samples: float,
+    reference_sample_count: int,
+    sample_rate: int,
+) -> tuple[DriftAnchor, ...]:
+    anchors: list[DriftAnchor] = []
+    for observation in observations:
+        if observation.offset_samples is None or not observation.accepted:
+            continue
+        target_sample, reference_sample = _observation_coordinates(observation)
+        predicted = scale * target_sample + intercept
+        residual = reference_sample - predicted
+        anchors.append(
+            DriftAnchor(
+                reference_sample=int(round(reference_sample)),
+                target_sample=int(round(target_sample)),
+                observed_offset_samples=int(observation.offset_samples),
+                observed_offset_ms=(
+                    float(observation.offset_samples) * 1000.0 / sample_rate
+                ),
+                predicted_reference_sample=float(predicted),
+                residual_samples=float(residual),
+                residual_ms=float(residual * 1000.0 / sample_rate),
+                correlation=float(observation.correlation),
+                peak_prominence=float(observation.peak_prominence),
+                inlier=abs(residual) <= tolerance_samples,
+                region=_anchor_region(reference_sample, reference_sample_count),
+            )
+        )
+    return tuple(anchors)
+
+
 def _failure_confidence(
     observations: Sequence[WindowAlignment],
     selected_window_count: int,
@@ -1418,6 +1932,541 @@ def _estimate_pair(
     )
 
 
+def _offset_only_diagnostics(result: InputAlignment) -> InputAlignment:
+    """Add identity clock diagnostics to a successful legacy offset result."""
+
+    if not result.success:
+        return replace(result, correction_method="none")
+    residual = float(result.offset_dispersion_ms or 0.0)
+    method = "reference" if result.method == "reference" else "offset_only"
+    return replace(
+        result,
+        time_scale=1.0,
+        estimated_time_scale=1.0,
+        drift_ppm=0.0,
+        drift_span_ms=0.0,
+        pre_correction_error_ms=residual,
+        post_correction_error_ms=residual,
+        max_post_correction_error_ms=residual,
+        correction_method=method,
+        correction_applied=False,
+    )
+
+
+def _reference_time_alignment(
+    *,
+    input_index: int,
+    reference_index: int,
+    selected_window_count: int,
+) -> InputAlignment:
+    return InputAlignment(
+        input_index=input_index,
+        reference_index=reference_index,
+        offset_samples=0,
+        offset_ms=0.0,
+        confidence=1.0,
+        method="reference",
+        failure=None,
+        selected_window_count=selected_window_count,
+        accepted_window_count=selected_window_count,
+        consistent_window_count=selected_window_count,
+        offset_dispersion_ms=0.0,
+        window_observations=(),
+        time_scale=1.0,
+        estimated_time_scale=1.0,
+        drift_ppm=0.0,
+        drift_span_ms=0.0,
+        pre_correction_error_ms=0.0,
+        post_correction_error_ms=0.0,
+        max_post_correction_error_ms=0.0,
+        correction_method="reference",
+        correction_applied=False,
+    )
+
+
+def _insufficient_window_failure(
+    primary_observations: Sequence[WindowAlignment],
+    accepted_window_count: int,
+    config: AlignmentConfig,
+) -> AlignmentFailure:
+    available = tuple(
+        item for item in primary_observations if item.offset_samples is not None
+    )
+    if accepted_window_count:
+        return AlignmentFailure(
+            "insufficient_shared_audio",
+            "Too few windows contained a reliable shared event.",
+        )
+    if sum(
+        item.rejection_code == "target_insufficient_signal"
+        for item in primary_observations
+    ) >= config.min_consistent_windows:
+        return AlignmentFailure(
+            "target_insufficient_signal",
+            "The target input did not contain enough usable signal for alignment.",
+        )
+    if len(available) < config.min_consistent_windows:
+        return AlignmentFailure(
+            "insufficient_shared_audio",
+            "Too few valid overlapping windows were available for automatic alignment.",
+        )
+    if sum(
+        item.rejection_code == "offset_at_search_boundary" for item in available
+    ) >= config.min_consistent_windows:
+        return AlignmentFailure(
+            "offset_at_search_boundary",
+            "The best offset reached the configured search boundary.",
+        )
+    if sum(
+        item.correlation >= config.min_peak_correlation for item in available
+    ) < config.min_consistent_windows:
+        return AlignmentFailure(
+            "low_correlation",
+            "The recordings did not contain enough strongly correlated windows.",
+        )
+    return AlignmentFailure(
+        "ambiguous_peak",
+        "Correlation peaks were too ambiguous to choose reliable drift anchors.",
+    )
+
+
+def _estimate_time_pair(
+    reference: _SignalView,
+    target: _SignalView,
+    reference_windows: Sequence[tuple[int, int]],
+    *,
+    input_index: int,
+    reference_index: int,
+    config: AlignmentConfig,
+    conditioned_reference_pair: tuple[np.ndarray, np.ndarray] | None = None,
+) -> InputAlignment:
+    """Estimate a guarded affine target-to-reference clock transform."""
+
+    if conditioned_reference_pair is None:
+        conditioned_reference, conditioned_reference_mask = _condition_signal(
+            reference.samples,
+            reference.valid_mask,
+        )
+    else:
+        conditioned_reference, conditioned_reference_mask = conditioned_reference_pair
+    conditioned_target, conditioned_target_mask = _condition_signal(
+        target.samples,
+        target.valid_mask,
+    )
+    window_estimates = tuple(
+        _estimate_window(
+            reference,
+            target,
+            conditioned_reference,
+            conditioned_target,
+            conditioned_reference_mask,
+            conditioned_target_mask,
+            start,
+            end,
+            config,
+        )
+        for start, end in reference_windows
+    )
+    primary_observations = tuple(item.primary for item in window_estimates)
+    method = (
+        "normalized_cross_correlation+gcc_phat"
+        if any(
+            candidate.gcc_phat_agrees is not None
+            for item in window_estimates
+            for candidate in (item.primary, *item.candidates)
+        )
+        else "normalized_cross_correlation"
+    )
+    candidate_windows = tuple(
+        tuple(candidate for candidate in item.candidates if candidate.accepted)
+        for item in window_estimates
+    )
+    primary_or_candidate = tuple(
+        candidates[0] if candidates else primary
+        for candidates, primary in zip(candidate_windows, primary_observations)
+    )
+    accepted_window_count = sum(bool(candidates) for candidates in candidate_windows)
+    minimum_anchor_count = max(
+        config.min_consistent_windows,
+        config.drift_min_anchors,
+    )
+    if accepted_window_count < minimum_anchor_count:
+        return _failed_input(
+            input_index=input_index,
+            reference_index=reference_index,
+            method=method,
+            failure=_insufficient_window_failure(
+                primary_observations,
+                accepted_window_count,
+                config,
+            ),
+            selected_window_count=len(reference_windows),
+            observations=primary_or_candidate,
+            accepted_window_count=accepted_window_count,
+        )
+
+    tolerance_samples = max(
+        1.0,
+        config.drift_residual_tolerance_ms * reference.sample_rate / 1000.0,
+    )
+    fits = _affine_candidate_fits(
+        candidate_windows,
+        tolerance_samples=tolerance_samples,
+        reference_sample_count=reference.samples.size,
+        # Keep a wider diagnostic search than the automatic-correction limit.
+        # Otherwise an over-limit real trend can be discarded in favor of a
+        # short, wrong within-limit subset and its reported drift can have the
+        # wrong sign.  The configured limit is enforced below before success.
+        max_abs_ppm=max(100_000.0, config.drift_max_abs_ppm * 10.0),
+    )
+    if not fits:
+        message = (
+            "Reliable local delays did not form a plausible linear clock model; "
+            "manual review is required."
+        )
+        return InputAlignment(
+            input_index=input_index,
+            reference_index=reference_index,
+            offset_samples=None,
+            offset_ms=None,
+            confidence=_failure_confidence(
+                primary_or_candidate,
+                len(reference_windows),
+            ),
+            method=method,
+            failure=AlignmentFailure("unstable_drift", message),
+            selected_window_count=len(reference_windows),
+            accepted_window_count=accepted_window_count,
+            consistent_window_count=0,
+            offset_dispersion_ms=None,
+            window_observations=primary_or_candidate,
+            correction_method="manual_review",
+            correction_applied=False,
+            requires_manual_review=True,
+            warning=AlignmentWarning("manual_review_required", message),
+        )
+
+    best = fits[0]
+    comparison_positions = (0.0, max(0.0, reference.samples.size - 1.0))
+
+    def fitted_offset(fit: _AffineFit, reference_position: float) -> float:
+        target_position = (reference_position - fit.intercept) / fit.scale
+        return reference_position - target_position
+
+    runner_up = next(
+        (
+            candidate
+            for candidate in fits[1:]
+            if candidate.count >= minimum_anchor_count
+            and candidate.count / max(1, best.count) >= config.min_consensus_ratio
+            and candidate.span_ratio >= config.drift_min_span_ratio
+            and set(candidate.regions) == {"start", "middle", "end"}
+            and max(
+                abs(
+                    fitted_offset(candidate, position)
+                    - fitted_offset(best, position)
+                )
+                for position in comparison_positions
+            )
+            > tolerance_samples
+        ),
+        None,
+    )
+    selected_observations = _closest_affine_observations(
+        candidate_windows,
+        primary_observations,
+        best.scale,
+        best.intercept,
+    )
+    reliable_observations = tuple(
+        observation
+        for observation in selected_observations
+        if observation.accepted and observation.offset_samples is not None
+    )
+    offsets = np.asarray(
+        [observation.offset_samples for observation in reliable_observations],
+        dtype=np.float64,
+    )
+    weights = _observation_weights(reliable_observations)
+    constant_offset = _weighted_median(offsets, weights)
+    static_residuals = offsets - constant_offset
+    pre_error_samples = _weighted_rms(static_residuals, weights)
+    dispersion_samples = _weighted_median(np.abs(static_residuals), weights)
+
+    proposed_residuals = np.asarray(
+        [
+            _affine_residual(observation, best.scale, best.intercept)
+            for observation in reliable_observations
+        ],
+        dtype=np.float64,
+    )
+    proposed_error_samples = _weighted_rms(proposed_residuals, weights)
+    proposed_max_error_samples = (
+        float(np.max(np.abs(proposed_residuals)))
+        if proposed_residuals.size
+        else 0.0
+    )
+    best_targets = np.asarray(
+        [
+            _observation_coordinates(observation)[0]
+            for _, observation in best.choices
+        ],
+        dtype=np.float64,
+    )
+    drift_span_ms = (
+        (best.scale - 1.0)
+        * (float(np.ptp(best_targets)) if best_targets.size else 0.0)
+        * 1000.0
+        / reference.sample_rate
+    )
+    inlier_ratio = best.count / max(1, accepted_window_count)
+    median_correlation = float(
+        np.median([observation.correlation for _, observation in best.choices])
+    )
+    median_prominence = float(
+        np.median([observation.peak_prominence for _, observation in best.choices])
+    )
+    correlation_component = float(
+        np.clip(
+            (median_correlation - config.min_peak_correlation)
+            / max(1.0e-9, 1.0 - config.min_peak_correlation),
+            0.0,
+            1.0,
+        )
+    )
+    prominence_component = float(np.clip(median_prominence / 0.10, 0.0, 1.0))
+    residual_component = float(
+        np.clip(
+            1.0
+            - (best.rms_residual * 1000.0 / reference.sample_rate)
+            / config.drift_residual_tolerance_ms,
+            0.0,
+            1.0,
+        )
+    )
+    confidence = float(
+        np.clip(
+            0.35 * correlation_component
+            + 0.20 * prominence_component
+            + 0.20 * inlier_ratio
+            + 0.15 * min(1.0, best.span_ratio)
+            + 0.10 * residual_component,
+            0.0,
+            1.0,
+        )
+    )
+
+    issue_code: str | None = None
+    issue_message: str | None = None
+    if best.count < minimum_anchor_count:
+        issue_code = "insufficient_drift_anchors"
+        issue_message = "Too few delay anchors supported one clock model."
+    elif inlier_ratio < config.drift_min_inlier_ratio:
+        issue_code = "unstable_drift"
+        issue_message = "Delay anchors changed nonlinearly or inconsistently over time."
+    elif best.span_ratio < config.drift_min_span_ratio:
+        issue_code = "insufficient_drift_coverage"
+        issue_message = "Delay anchors did not cover enough of the recording duration."
+    elif set(best.regions) != {"start", "middle", "end"}:
+        issue_code = "insufficient_drift_coverage"
+        issue_message = "Start, middle, and end delay anchors were not all available."
+    elif runner_up is not None:
+        issue_code = "ambiguous_drift_model"
+        issue_message = "Multiple incompatible clock-drift tracks remained plausible."
+    elif median_prominence < config.min_peak_prominence:
+        issue_code = "ambiguous_peak"
+        issue_message = "Drift anchors were ambiguous because of repeated correlation peaks."
+    elif (
+        proposed_max_error_samples * 1000.0 / reference.sample_rate
+        > config.drift_residual_tolerance_ms
+    ):
+        issue_code = "unstable_drift"
+        issue_message = "At least one reliable delay anchor was not explained linearly."
+    elif (
+        best.rms_residual * 1000.0 / reference.sample_rate
+        > config.drift_residual_tolerance_ms
+    ):
+        issue_code = "unstable_drift"
+        issue_message = "Affine correction left excessive timing residuals."
+    elif abs(best.drift_ppm) > config.drift_max_abs_ppm:
+        issue_code = "drift_out_of_range"
+        issue_message = "The estimated clock drift exceeds the automatic limit."
+    elif confidence < config.min_confidence:
+        issue_code = "drift_low_confidence"
+        issue_message = "The affine clock estimate did not meet the confidence threshold."
+
+    if issue_code is not None:
+        assert issue_message is not None
+        review_message = f"{issue_message} Manual review is required."
+        anchors = _drift_anchors(
+            reliable_observations,
+            scale=best.scale,
+            intercept=best.intercept,
+            tolerance_samples=tolerance_samples,
+            reference_sample_count=reference.samples.size,
+            sample_rate=reference.sample_rate,
+        )
+        return InputAlignment(
+            input_index=input_index,
+            reference_index=reference_index,
+            offset_samples=None,
+            offset_ms=None,
+            confidence=confidence,
+            method=method,
+            failure=AlignmentFailure(issue_code, review_message),
+            selected_window_count=len(reference_windows),
+            accepted_window_count=accepted_window_count,
+            consistent_window_count=best.count,
+            offset_dispersion_ms=float(
+                dispersion_samples * 1000.0 / reference.sample_rate
+            ),
+            window_observations=selected_observations,
+            time_scale=None,
+            estimated_time_scale=float(best.scale),
+            drift_ppm=float(best.drift_ppm),
+            drift_span_ms=float(drift_span_ms),
+            pre_correction_error_ms=float(
+                pre_error_samples * 1000.0 / reference.sample_rate
+            ),
+            post_correction_error_ms=float(
+                proposed_error_samples * 1000.0 / reference.sample_rate
+            ),
+            max_post_correction_error_ms=float(
+                proposed_max_error_samples * 1000.0 / reference.sample_rate
+            ),
+            correction_method="manual_review",
+            correction_applied=False,
+            requires_manual_review=True,
+            warning=AlignmentWarning("manual_review_required", review_message),
+            drift_anchors=anchors,
+        )
+
+    def applied_statistics(
+        scale: float,
+        intercept: float,
+    ) -> tuple[np.ndarray, float, float]:
+        residuals = np.asarray(
+            [
+                _affine_residual(observation, scale, intercept)
+                for observation in reliable_observations
+            ],
+            dtype=np.float64,
+        )
+        rms = _weighted_rms(residuals, weights)
+        maximum = float(np.max(np.abs(residuals))) if residuals.size else 0.0
+        return residuals, rms, maximum
+
+    static_intercept = float(round(constant_offset))
+    static_statistics = applied_statistics(1.0, static_intercept)
+    affine_options = []
+    for candidate_intercept in sorted(
+        {math.floor(best.intercept), math.ceil(best.intercept)}
+    ):
+        statistics = applied_statistics(best.scale, float(candidate_intercept))
+        affine_options.append((float(candidate_intercept), *statistics))
+    (
+        affine_intercept,
+        affine_residuals,
+        affine_error_samples,
+        affine_max_error_samples,
+    ) = min(
+        affine_options,
+        key=lambda option: (
+            option[3],
+            option[2],
+            abs(option[0] - best.intercept),
+            option[0],
+        ),
+    )
+
+    correction_threshold_ms = max(
+        config.drift_min_correction_ms,
+        3.0 * proposed_error_samples * 1000.0 / reference.sample_rate,
+    )
+    correction_applied = (
+        abs(drift_span_ms) >= correction_threshold_ms
+        or static_statistics[2] > tolerance_samples
+    )
+    if correction_applied:
+        applied_scale = best.scale
+        applied_intercept = affine_intercept
+        applied_residuals = affine_residuals
+        post_error_samples = affine_error_samples
+        max_post_error_samples = affine_max_error_samples
+        correction_method = "affine"
+    else:
+        applied_scale = 1.0
+        applied_intercept = static_intercept
+        applied_residuals, post_error_samples, max_post_error_samples = (
+            static_statistics
+        )
+        correction_method = "offset_only"
+    anchors = _drift_anchors(
+        reliable_observations,
+        scale=applied_scale,
+        intercept=applied_intercept,
+        tolerance_samples=tolerance_samples,
+        reference_sample_count=reference.samples.size,
+        sample_rate=reference.sample_rate,
+    )
+    offset_samples = int(round(applied_intercept))
+    result = InputAlignment(
+        input_index=input_index,
+        reference_index=reference_index,
+        offset_samples=offset_samples,
+        offset_ms=float(offset_samples * 1000.0 / reference.sample_rate),
+        confidence=confidence,
+        method=method,
+        failure=None,
+        selected_window_count=len(reference_windows),
+        accepted_window_count=accepted_window_count,
+        consistent_window_count=best.count,
+        offset_dispersion_ms=float(
+            dispersion_samples * 1000.0 / reference.sample_rate
+        ),
+        window_observations=selected_observations,
+        time_scale=float(applied_scale),
+        estimated_time_scale=float(best.scale),
+        drift_ppm=float(best.drift_ppm),
+        drift_span_ms=float(drift_span_ms),
+        pre_correction_error_ms=float(
+            pre_error_samples * 1000.0 / reference.sample_rate
+        ),
+        post_correction_error_ms=float(
+            post_error_samples * 1000.0 / reference.sample_rate
+        ),
+        max_post_correction_error_ms=float(
+            max_post_error_samples * 1000.0 / reference.sample_rate
+        ),
+        correction_method=correction_method,
+        correction_applied=correction_applied,
+        requires_manual_review=False,
+        warning=None,
+        drift_anchors=anchors,
+    )
+    rounding_epsilon = (
+        np.finfo(np.float64).eps * max(1.0, tolerance_samples) * 16.0
+    )
+    if max_post_error_samples > tolerance_samples + rounding_epsilon:
+        review_message = (
+            "The applicable affine correction left excessive timing residuals. "
+            "Manual review is required."
+        )
+        return replace(
+            result,
+            offset_samples=None,
+            offset_ms=None,
+            failure=AlignmentFailure("unstable_drift", review_message),
+            time_scale=None,
+            correction_method="manual_review",
+            correction_applied=False,
+            requires_manual_review=True,
+            warning=AlignmentWarning("manual_review_required", review_message),
+        )
+    assert max_post_error_samples <= tolerance_samples + rounding_epsilon
+    return result
+
+
 def estimate_initial_offset(
     reference: AnalysisSignalLike,
     target: AnalysisSignalLike,
@@ -1561,9 +2610,194 @@ def estimate_initial_offsets(
     )
 
 
+def estimate_time_alignment(
+    reference: AnalysisSignalLike,
+    target: AnalysisSignalLike,
+    *,
+    config: AlignmentConfig | None = None,
+    input_index: int = 1,
+    reference_index: int = 0,
+) -> InputAlignment:
+    """Estimate offset and, for long inputs, a guarded affine clock model.
+
+    The returned transform maps target samples onto the unchanged reference
+    time axis as ``reference = time_scale * target + offset_samples``.  Short
+    inputs retain the MM-DEV-004 offset-only behavior because their baseline is
+    too small for a reliable clock-rate estimate.
+    """
+
+    settings = config if config is not None else AlignmentConfig()
+    if not isinstance(settings, AlignmentConfig):
+        raise TypeError("config must be an AlignmentConfig")
+    target_index = _index("input_index", input_index)
+    base_index = _index("reference_index", reference_index)
+    if target_index < 0:
+        raise ValueError("input_index must not be negative")
+    if base_index < 0:
+        raise ValueError("reference_index must not be negative")
+    reference_view = _coerce_signal(reference, "reference")
+    target_view = _coerce_signal(target, "target")
+    if reference_view.sample_rate != target_view.sample_rate:
+        raise ValueError("reference and target sample rates must match")
+
+    duration_seconds = reference_view.samples.size / reference_view.sample_rate
+    analyze_drift = (
+        duration_seconds >= settings.drift_min_duration_seconds
+        and settings.max_windows >= settings.drift_min_anchors
+    )
+    windows = _select_reference_windows(
+        reference_view,
+        settings,
+        reserve_drift_edges=analyze_drift,
+    )
+    if len(windows) < settings.min_reference_windows:
+        return _failed_input(
+            input_index=target_index,
+            reference_index=base_index,
+            method="normalized_cross_correlation",
+            failure=AlignmentFailure(
+                "reference_insufficient_signal",
+                "The reference input does not contain enough valid active windows.",
+            ),
+            selected_window_count=len(windows),
+        )
+    if not analyze_drift:
+        return _offset_only_diagnostics(
+            _estimate_pair(
+                reference_view,
+                target_view,
+                windows,
+                input_index=target_index,
+                reference_index=base_index,
+                config=settings,
+            )
+        )
+    return _estimate_time_pair(
+        reference_view,
+        target_view,
+        windows,
+        input_index=target_index,
+        reference_index=base_index,
+        config=settings,
+    )
+
+
+def estimate_time_alignments(
+    signals: Sequence[AnalysisSignalLike],
+    *,
+    reference_index: int = 0,
+    config: AlignmentConfig | None = None,
+) -> MultiAudioAlignment:
+    """Estimate safe per-input affine transforms on one reference time axis."""
+
+    settings = config if config is not None else AlignmentConfig()
+    if not isinstance(settings, AlignmentConfig):
+        raise TypeError("config must be an AlignmentConfig")
+    views = tuple(
+        _coerce_signal(signal, f"signals[{index}]")
+        for index, signal in enumerate(signals)
+    )
+    if len(views) < 2:
+        raise ValueError("at least two analysis signals are required")
+    base_index = _index("reference_index", reference_index)
+    if base_index < 0 or base_index >= len(views):
+        raise ValueError("reference_index is outside the input range")
+    sample_rate = views[0].sample_rate
+    if any(view.sample_rate != sample_rate for view in views[1:]):
+        raise ValueError("all analysis signal sample rates must match")
+
+    reference = views[base_index]
+    analyze_drift = (
+        reference.samples.size / reference.sample_rate
+        >= settings.drift_min_duration_seconds
+        and settings.max_windows >= settings.drift_min_anchors
+    )
+    windows = _select_reference_windows(
+        reference,
+        settings,
+        reserve_drift_edges=analyze_drift,
+    )
+    if len(windows) < settings.min_reference_windows:
+        failure = AlignmentFailure(
+            "reference_insufficient_signal",
+            "The reference input does not contain enough valid active windows.",
+        )
+        results = tuple(
+            _failed_input(
+                input_index=index,
+                reference_index=base_index,
+                method=(
+                    "reference"
+                    if index == base_index
+                    else "normalized_cross_correlation"
+                ),
+                failure=failure,
+                selected_window_count=len(windows),
+            )
+            for index in range(len(views))
+        )
+        return MultiAudioAlignment(
+            reference_index=base_index,
+            sample_rate=sample_rate,
+            inputs=results,
+            reference_windows=windows,
+        )
+
+    conditioned_reference_pair = _condition_signal(
+        reference.samples,
+        reference.valid_mask,
+    )
+    results: list[InputAlignment] = []
+    for index, target in enumerate(views):
+        if index == base_index:
+            results.append(
+                _reference_time_alignment(
+                    input_index=index,
+                    reference_index=base_index,
+                    selected_window_count=len(windows),
+                )
+            )
+            continue
+        if analyze_drift:
+            results.append(
+                _estimate_time_pair(
+                    reference,
+                    target,
+                    windows,
+                    input_index=index,
+                    reference_index=base_index,
+                    config=settings,
+                    conditioned_reference_pair=conditioned_reference_pair,
+                )
+            )
+        else:
+            results.append(
+                _offset_only_diagnostics(
+                    _estimate_pair(
+                        reference,
+                        target,
+                        windows,
+                        input_index=index,
+                        reference_index=base_index,
+                        config=settings,
+                        conditioned_reference_pair=conditioned_reference_pair,
+                    )
+                )
+            )
+
+    return MultiAudioAlignment(
+        reference_index=base_index,
+        sample_rate=sample_rate,
+        inputs=tuple(results),
+        reference_windows=windows,
+    )
+
+
 __all__ = [
     "AlignmentConfig",
     "AlignmentFailure",
+    "AlignmentWarning",
+    "DriftAnchor",
     "InputAlignment",
     "InputAlignmentResult",
     "MultiAudioAlignment",
@@ -1571,4 +2805,6 @@ __all__ = [
     "WindowAlignment",
     "estimate_initial_offset",
     "estimate_initial_offsets",
+    "estimate_time_alignment",
+    "estimate_time_alignments",
 ]
