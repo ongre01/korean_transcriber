@@ -10,6 +10,7 @@ import importlib
 import json
 import math
 from numbers import Integral
+import os
 from pathlib import Path
 import sys
 import traceback
@@ -34,6 +35,11 @@ DEFAULT_EMBEDDING_MODEL = (
     DEFAULT_DIARIZATION_DIR
     / "3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx"
 )
+MULTI_INPUT_MANIFEST_VERSION = 1
+MULTI_INPUT_ALIGNMENT_MODE = "auto"
+MULTI_INPUT_SELECTION_MODE = "automatic"
+MIN_SIGNED_64_BIT_INTEGER = -(2 ** 63)
+MAX_SIGNED_64_BIT_INTEGER = 2 ** 63 - 1
 
 
 class BridgeArgumentError(ValueError):
@@ -121,11 +127,360 @@ def _diarization_device(value: str) -> str:
     return result
 
 
+def _manifest_field(payload: dict, name: str, location: str):
+    if name not in payload:
+        raise BridgeArgumentError(
+            f"multi-input manifest {location}.{name} is required"
+        )
+    return payload[name]
+
+
+def _manifest_object(value: object, location: str) -> dict:
+    if not isinstance(value, dict):
+        raise BridgeArgumentError(
+            f"multi-input manifest {location} must be a JSON object"
+        )
+    return value
+
+
+def _reject_unknown_manifest_fields(
+    payload: dict,
+    allowed_fields: set[str],
+    location: str,
+) -> None:
+    unknown_fields = [name for name in payload if name not in allowed_fields]
+    if unknown_fields:
+        names = ", ".join(repr(name) for name in unknown_fields)
+        raise BridgeArgumentError(
+            f"multi-input manifest {location} contains unknown field(s): {names}"
+        )
+
+
+def _manifest_string(value: object, location: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise BridgeArgumentError(
+            f"multi-input manifest {location} must be a non-empty string"
+        )
+    return value.strip()
+
+
+def _manifest_number(value: object, location: str) -> int | float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise BridgeArgumentError(
+            f"multi-input manifest {location} must be a number"
+        )
+    try:
+        finite_value = math.isfinite(float(value))
+    except (OverflowError, ValueError) as exc:
+        raise BridgeArgumentError(
+            f"multi-input manifest {location} must be finite"
+        ) from exc
+    if not finite_value:
+        raise BridgeArgumentError(
+            f"multi-input manifest {location} must be finite"
+        )
+    return value
+
+
+def _manifest_milliseconds(value: object, location: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise BridgeArgumentError(
+            f"multi-input manifest {location} must be an integer number of milliseconds"
+        )
+    if not MIN_SIGNED_64_BIT_INTEGER <= value <= MAX_SIGNED_64_BIT_INTEGER:
+        raise BridgeArgumentError(
+            f"multi-input manifest {location} is outside the signed 64-bit range"
+        )
+    return value
+
+
+def _resolve_manifest_input_path(
+    value: object,
+    *,
+    location: str,
+    base_directory: Path,
+) -> Path:
+    path_text = _manifest_string(value, location)
+    try:
+        path = Path(path_text).expanduser()
+        if not path.is_absolute():
+            path = base_directory / path
+        path = path.resolve()
+        is_file = path.is_file()
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise BridgeArgumentError(
+            f"multi-input manifest {location} is invalid: {exc}"
+        ) from exc
+    if not is_file:
+        raise BridgeArgumentError(
+            f"multi-input manifest {location} does not identify an existing file: {path}"
+        )
+    return path
+
+
+def validate_multi_input_manifest(
+    payload: object,
+    *,
+    base_directory: str | Path,
+) -> dict[str, object]:
+    """Validate and normalize a version 1 multi-input manifest.
+
+    Input paths are returned as resolved absolute strings. Relative paths are
+    interpreted from the directory containing the manifest, not from the
+    process working directory.
+    """
+
+    manifest = _manifest_object(payload, "root")
+    _reject_unknown_manifest_fields(
+        manifest,
+        {"version", "inputs", "reference_index", "alignment", "selection"},
+        "root",
+    )
+
+    version = _manifest_field(manifest, "version", "root")
+    if (
+        isinstance(version, bool)
+        or not isinstance(version, int)
+        or version != MULTI_INPUT_MANIFEST_VERSION
+    ):
+        raise BridgeArgumentError(
+            "multi-input manifest version must be the integer 1"
+        )
+
+    raw_inputs = _manifest_field(manifest, "inputs", "root")
+    if not isinstance(raw_inputs, list):
+        raise BridgeArgumentError(
+            "multi-input manifest inputs must be a JSON array"
+        )
+    if len(raw_inputs) < 2:
+        raise BridgeArgumentError(
+            "multi-input manifest inputs must contain at least two files"
+        )
+
+    try:
+        manifest_directory = Path(base_directory).expanduser().resolve()
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise BridgeArgumentError(
+            f"multi-input manifest base directory is invalid: {exc}"
+        ) from exc
+
+    normalized_inputs: list[dict[str, str]] = []
+    input_path_indexes: dict[str, int] = {}
+    for index, raw_input in enumerate(raw_inputs):
+        location = f"inputs[{index}]"
+        item = _manifest_object(raw_input, location)
+        _reject_unknown_manifest_fields(item, {"path", "label"}, location)
+        path = _resolve_manifest_input_path(
+            _manifest_field(item, "path", location),
+            location=f"{location}.path",
+            base_directory=manifest_directory,
+        )
+        label = _manifest_string(
+            _manifest_field(item, "label", location),
+            f"{location}.label",
+        )
+
+        path_key = os.path.normcase(str(path))
+        previous_index = input_path_indexes.get(path_key)
+        if previous_index is not None:
+            raise BridgeArgumentError(
+                f"multi-input manifest {location}.path duplicates inputs[{previous_index}].path"
+            )
+        input_path_indexes[path_key] = index
+        normalized_inputs.append({"path": str(path), "label": label})
+
+    reference_index = _manifest_field(manifest, "reference_index", "root")
+    if isinstance(reference_index, bool) or not isinstance(reference_index, int):
+        raise BridgeArgumentError(
+            "multi-input manifest reference_index must be an integer"
+        )
+    if reference_index < 0 or reference_index >= len(normalized_inputs):
+        raise BridgeArgumentError(
+            "multi-input manifest reference_index must identify an input file"
+        )
+
+    alignment = _manifest_object(
+        _manifest_field(manifest, "alignment", "root"),
+        "alignment",
+    )
+    _reject_unknown_manifest_fields(
+        alignment,
+        {"mode", "manual_offsets_ms"},
+        "alignment",
+    )
+    alignment_mode = _manifest_string(
+        _manifest_field(alignment, "mode", "alignment"),
+        "alignment.mode",
+    )
+    if alignment_mode != MULTI_INPUT_ALIGNMENT_MODE:
+        raise BridgeArgumentError(
+            'multi-input manifest alignment.mode must be "auto"'
+        )
+    raw_manual_offsets = _manifest_object(
+        _manifest_field(alignment, "manual_offsets_ms", "alignment"),
+        "alignment.manual_offsets_ms",
+    )
+    manual_offsets: dict[int, int] = {}
+    for raw_index, raw_offset in raw_manual_offsets.items():
+        if not isinstance(raw_index, str):
+            raise BridgeArgumentError(
+                "multi-input manifest alignment.manual_offsets_ms indexes must be strings"
+            )
+        try:
+            input_index = int(raw_index, 10)
+        except ValueError as exc:
+            raise BridgeArgumentError(
+                "multi-input manifest alignment.manual_offsets_ms indexes must be "
+                "canonical zero-based integers"
+            ) from exc
+        if input_index < 0 or raw_index != str(input_index):
+            raise BridgeArgumentError(
+                "multi-input manifest alignment.manual_offsets_ms indexes must be "
+                "canonical zero-based integers"
+            )
+        if input_index >= len(normalized_inputs):
+            raise BridgeArgumentError(
+                "multi-input manifest alignment.manual_offsets_ms index "
+                f"{raw_index} does not identify an input file"
+            )
+        manual_offsets[input_index] = _manifest_milliseconds(
+            raw_offset,
+            f"alignment.manual_offsets_ms.{raw_index}",
+        )
+
+    selection = _manifest_object(
+        _manifest_field(manifest, "selection", "root"),
+        "selection",
+    )
+    _reject_unknown_manifest_fields(
+        selection,
+        {"mode", "window_seconds", "hop_seconds"},
+        "selection",
+    )
+    selection_mode = _manifest_string(
+        _manifest_field(selection, "mode", "selection"),
+        "selection.mode",
+    )
+    if selection_mode != MULTI_INPUT_SELECTION_MODE:
+        raise BridgeArgumentError(
+            'multi-input manifest selection.mode must be "automatic"'
+        )
+    window_seconds = _manifest_number(
+        _manifest_field(selection, "window_seconds", "selection"),
+        "selection.window_seconds",
+    )
+    hop_seconds = _manifest_number(
+        _manifest_field(selection, "hop_seconds", "selection"),
+        "selection.hop_seconds",
+    )
+    if window_seconds <= 0:
+        raise BridgeArgumentError(
+            "multi-input manifest selection.window_seconds must be greater than 0"
+        )
+    if hop_seconds <= 0 or hop_seconds > window_seconds:
+        raise BridgeArgumentError(
+            "multi-input manifest selection.hop_seconds must be greater than 0 "
+            "and no greater than selection.window_seconds"
+        )
+
+    return {
+        "version": version,
+        "inputs": normalized_inputs,
+        "reference_index": reference_index,
+        "alignment": {
+            "mode": alignment_mode,
+            "manual_offsets_ms": manual_offsets,
+        },
+        "selection": {
+            "mode": selection_mode,
+            "window_seconds": window_seconds,
+            "hop_seconds": hop_seconds,
+        },
+    }
+
+
+def _reject_non_json_manifest_number(value: str):
+    raise BridgeArgumentError(
+        f"multi-input manifest contains a non-JSON number: {value}"
+    )
+
+
+def _reject_duplicate_manifest_fields(
+    pairs: list[tuple[str, object]],
+) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for name, value in pairs:
+        if name in result:
+            raise BridgeArgumentError(
+                f"multi-input manifest contains a duplicate JSON field: {name!r}"
+            )
+        result[name] = value
+    return result
+
+
+def _load_multi_input_manifest(
+    manifest_path: str | Path,
+) -> tuple[Path, dict[str, object]]:
+    path_text = str(manifest_path).strip()
+    if not path_text:
+        raise BridgeArgumentError(
+            "--multi-input-manifest must identify a JSON file"
+        )
+    try:
+        path = Path(path_text).expanduser().resolve()
+        is_file = path.is_file()
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise BridgeArgumentError(
+            f"multi-input manifest path is invalid: {exc}"
+        ) from exc
+    if not is_file:
+        raise BridgeArgumentError(
+            f"multi-input manifest file not found: {path}"
+        )
+
+    try:
+        document = path.read_text(encoding="utf-8-sig")
+    except (OSError, UnicodeError) as exc:
+        raise BridgeArgumentError(
+            f"multi-input manifest could not be read as UTF-8: {path}: {exc}"
+        ) from exc
+    try:
+        payload = json.loads(
+            document,
+            parse_constant=_reject_non_json_manifest_number,
+            object_pairs_hook=_reject_duplicate_manifest_fields,
+        )
+    except BridgeArgumentError:
+        raise
+    except json.JSONDecodeError as exc:
+        raise BridgeArgumentError(
+            "multi-input manifest is not valid JSON: "
+            f"{path} (line {exc.lineno}, column {exc.colno})"
+        ) from exc
+    except (RecursionError, ValueError) as exc:
+        raise BridgeArgumentError(
+            f"multi-input manifest could not be decoded as JSON: {path}: {exc}"
+        ) from exc
+
+    return path, validate_multi_input_manifest(
+        payload,
+        base_directory=path.parent,
+    )
+
+
+def load_multi_input_manifest(manifest_path: str | Path) -> dict[str, object]:
+    """Load a UTF-8 JSON manifest file and return its normalized schema."""
+
+    return _load_multi_input_manifest(manifest_path)[1]
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = BridgeArgumentParser(
         description="Qt JSON Lines bridge for Korean transcription"
     )
-    parser.add_argument("--input", required=True)
+    input_group = parser.add_mutually_exclusive_group(required=True)
+    input_group.add_argument("--input")
+    input_group.add_argument("--multi-input-manifest", metavar="JSON_PATH")
     parser.add_argument("--device", type=_device, default="AUTO")
     parser.add_argument("--model-dir", required=True)
     parser.add_argument("--model-label", default="")
@@ -170,6 +525,13 @@ def build_parser() -> argparse.ArgumentParser:
 
 def parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
     args = build_parser().parse_args(argv)
+    args.multi_input_manifest_path = None
+    args.multi_input_manifest_data = None
+    if args.multi_input_manifest is not None:
+        (
+            args.multi_input_manifest_path,
+            args.multi_input_manifest_data,
+        ) = _load_multi_input_manifest(args.multi_input_manifest)
     if args.beams < 1:
         raise BridgeArgumentError("--beams must be at least 1")
     if not math.isfinite(args.window_seconds) or args.window_seconds < 30.0:
@@ -343,6 +705,14 @@ def run_bridge(
     *,
     diarize_function: Callable | None = None,
 ) -> int:
+    if getattr(args, "multi_input_manifest", None) is not None:
+        # The manifest contract is intentionally established before the
+        # alignment/selection pipeline is connected. Never misrepresent a
+        # validated multi-input job by transcribing only its reference file.
+        raise BridgeFailure(
+            "Multi-input manifest processing is not available in this bridge yet."
+        )
+
     writer.state("preparing")
     writer.progress(None)
 
@@ -612,7 +982,10 @@ def main(
 
     try:
         with redirect_stdout(diagnostic):
-            if engine_module is None:
+            if (
+                engine_module is None
+                and getattr(args, "multi_input_manifest", None) is None
+            ):
                 engine_module = importlib.import_module("transcribe_npu")
             return run_bridge(
                 args,

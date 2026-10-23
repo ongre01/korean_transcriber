@@ -97,9 +97,15 @@ directory가 아닌 이 절대 경로를 그대로 해석한다. `--output-dir`�
 실행 파일, 스크립트 경로와 아래 인자를 각각 `QProcess::setProgram()` 및
 `setArguments()`에 전달하고 shell quoting을 직접 만들지 않는다.
 
+`--input`과 `--multi-input-manifest` 중 하나만 반드시 지정한다. 다중 입력
+매니페스트는 UTF-8 JSON 파일(BOM 허용)이며, Bridge는 모델이나 오디오 처리 모듈을 불러오기
+전에 파일과 스키마를 검증한다. 매니페스트 파일 안의 상대 입력 경로는 매니페스트
+파일의 부모 폴더를 기준으로 해석한다.
+
 | 인자 | 필수/기본값 | 계약 및 기존 엔진 매핑 |
 |---|---|---|
-| `--input PATH` | 필수 | 존재하는 입력 파일. 기존 CLI의 positional `input`. |
+| `--input PATH` | 다중 매니페스트와 택일 | 존재하는 단일 입력 파일. 기존 CLI의 positional `input`. |
+| `--multi-input-manifest JSON_PATH` | 단일 입력과 택일 | 아래 버전 1 스키마를 따르는 UTF-8 JSON 파일. JSON 파일 경로와 각 입력 경로는 Bridge가 개별 경로로 처리하며 shell 명령 문자열을 만들지 않는다. |
 | `--device AUTO\|NPU\|CPU\|GPU` | `AUTO` | `AUTO`는 가용 장치에서 NPU, GPU, CPU 순으로 하나를 선택한 뒤 기존 엔진에 concrete device를 전달한다. 명시 장치는 사용할 수 없으면 오류다. |
 | `--diarization` | off | 기존 엔진의 `--diarize`에 대응한다. |
 | `--num-speakers auto\|2\|3\|4\|5` | `auto` | `auto -> -1`, 숫자는 같은 정수로 기존 `num_speakers`에 전달한다. diarization이 꺼져 있으면 무시한다. |
@@ -118,6 +124,54 @@ directory가 아닌 이 절대 경로를 그대로 해석한다. `--output-dir`�
 | `--speaker-threshold NUMBER` | `0.5` | `(0, 1]`; Auto 화자 수 clustering threshold. |
 | `--diarization-device NPU\|CPU\|GPU` | `NPU` | segmentation 장치. |
 | `--diarization-no-fallback` | off | 지정하면 segmentation의 CPU fallback을 금지한다. |
+
+### 다중 입력 매니페스트 버전 1
+
+```json
+{
+  "version": 1,
+  "inputs": [
+    {"path": "D:/meeting/mic_A.wav", "label": "테이블 중앙"},
+    {"path": "D:/meeting/mic_B.m4a", "label": "발표자 근처"}
+  ],
+  "reference_index": 0,
+  "alignment": {
+    "mode": "auto",
+    "manual_offsets_ms": {"1": -125}
+  },
+  "selection": {
+    "mode": "automatic",
+    "window_seconds": 3.0,
+    "hop_seconds": 1.0
+  }
+}
+```
+
+- `version`은 JSON 정수 `1`이어야 한다. `true`나 `1.0`은 버전으로 허용하지
+  않는다.
+- `inputs`는 두 개 이상의 항목을 가진 배열이다. 백엔드는 입력 개수를 8개로
+  제한하지 않으며 8개는 GUI의 초기 권장 상한일 뿐이다.
+- 각 입력의 `path`와 `label`은 공백이 아닌 문자열이다. `path`는 존재하는 일반
+  파일이어야 하고, 해석된 같은 파일을 중복 지정할 수 없다. 순서가 이후 모든
+  zero-based 입력 인덱스의 기준이다.
+- `reference_index`는 `inputs` 안의 항목을 가리키는 zero-based 정수다. 범위를
+  벗어난 값과 `true`는 허용하지 않는다.
+- `alignment.mode`는 버전 1에서 `auto`다. `manual_offsets_ms`는 입력 인덱스의
+  정규 십진 문자열(`"0"`, `"1"`, ...)을 키로 하고 signed 64-bit 정수
+  밀리초를 값으로 갖는 객체다. 수동 오프셋은 음수일 수 있지만 키는 반드시 현재
+  입력 범위 안에 있어야 한다.
+- `selection.mode`는 버전 1에서 `automatic`이다. `window_seconds`와
+  `hop_seconds`는 유한한 양수이며 `hop_seconds <= window_seconds`여야 한다.
+- 예시에 표시된 최상위 및 하위 필드는 모두 필수다. 버전 1에서 정의하지 않은
+  추가 필드와 같은 JSON 객체 안의 중복 필드 이름은 사용자 설정 오타나 모호한
+  해석을 막기 위해 거부한다.
+- JSON의 `NaN`, `Infinity`, `-Infinity`, 잘못된 필드 타입, 없는 입력 파일은
+  사용자용 인자 오류로 거부한다.
+
+이 단계의 계약은 매니페스트 전달과 검증을 정의한다. 정렬, 채널 선택, 통합 WAV
+생성과 Whisper 연결은 다중 입력 전처리 실행 경로에서 이 검증 결과를 소비한다.
+그 실행 경로가 연결되기 전에는 정상 매니페스트도 단일 입력으로 대체 실행하지
+않으며, Bridge는 `error` 이벤트와 종료 코드 1로 기능 미연결을 명시한다.
 
 Bridge 자체의 인자 오류는 `error` 이벤트 후 종료 코드 2, 입력 오류는 2, 모델
 경로 오류는 3, 실행 중 오류는 1을 사용한다. 사용자 취소로 정상적인 이벤트를
