@@ -1,0 +1,43 @@
+"""Offline multi-microphone audio preparation primitives."""
+
+from .pipeline import (
+    ANALYSIS_SAMPLE_RATE,
+    MINIMUM_INPUT_COUNT,
+    RECOMMENDED_MAX_INPUT_COUNT,
+    SUPPORTED_AUDIO_EXTENSIONS,
+    AnalysisSignal,
+    AudioInputMetadata,
+    InputFailure,
+    MultiAudioPreparationError,
+    PreparationWarning,
+    PreparedAudioInput,
+    PreparedMultiAudio,
+    SourceFingerprint,
+    build_validity_mask,
+    fingerprint_file,
+    is_supported_audio_path,
+    place_signal_on_timeline,
+    prepare_inputs,
+    prepare_multi_audio_inputs,
+)
+
+__all__ = [
+    "ANALYSIS_SAMPLE_RATE",
+    "MINIMUM_INPUT_COUNT",
+    "RECOMMENDED_MAX_INPUT_COUNT",
+    "SUPPORTED_AUDIO_EXTENSIONS",
+    "AnalysisSignal",
+    "AudioInputMetadata",
+    "InputFailure",
+    "MultiAudioPreparationError",
+    "PreparationWarning",
+    "PreparedAudioInput",
+    "PreparedMultiAudio",
+    "SourceFingerprint",
+    "build_validity_mask",
+    "fingerprint_file",
+    "is_supported_audio_path",
+    "place_signal_on_timeline",
+    "prepare_inputs",
+    "prepare_multi_audio_inputs",
+]
