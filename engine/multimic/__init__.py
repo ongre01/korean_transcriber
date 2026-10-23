@@ -1,4 +1,4 @@
-"""Offline multi-microphone preparation and initial-alignment primitives."""
+"""Offline multi-microphone preparation, alignment, and speech analysis."""
 
 from .pipeline import (
     ANALYSIS_SAMPLE_RATE,
@@ -37,6 +37,19 @@ from .align import (
     estimate_time_alignment,
     estimate_time_alignments,
 )
+from .quality import (
+    InputSpeechEvidence,
+    RegionSpeechDiagnostic,
+    SpeechActivityReport,
+    SpeechAnalysisConfig,
+    SpeechAnalysisWarning,
+    SpeechAnalysisWindow,
+    SpeechCandidateRegion,
+    WindowInputEvidence,
+    analyze_aligned_speech,
+    analyze_prepared_speech,
+    analyze_speech_candidates,
+)
 
 __all__ = [
     "ANALYSIS_SAMPLE_RATE",
@@ -52,14 +65,25 @@ __all__ = [
     "InputFailure",
     "InputAlignment",
     "InputAlignmentResult",
+    "InputSpeechEvidence",
     "MultiAudioPreparationError",
     "MultiAudioAlignment",
     "MultiAudioAlignmentResult",
     "PreparationWarning",
     "PreparedAudioInput",
     "PreparedMultiAudio",
+    "RegionSpeechDiagnostic",
     "SourceFingerprint",
+    "SpeechActivityReport",
+    "SpeechAnalysisConfig",
+    "SpeechAnalysisWarning",
+    "SpeechAnalysisWindow",
+    "SpeechCandidateRegion",
     "WindowAlignment",
+    "WindowInputEvidence",
+    "analyze_aligned_speech",
+    "analyze_prepared_speech",
+    "analyze_speech_candidates",
     "align_prepared_inputs",
     "build_validity_mask",
     "fingerprint_file",

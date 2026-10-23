@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
+import operator
+from typing import Iterable
 
 import numpy as np
 
@@ -20,9 +22,34 @@ class SpeechRegion:
     start_sample: int
     end_sample: int
 
+    def __post_init__(self) -> None:
+        bounds: list[int] = []
+        for name, value in (
+            ("start_sample", self.start_sample),
+            ("end_sample", self.end_sample),
+        ):
+            if isinstance(value, bool):
+                raise ValueError(f"{name} must be an integer")
+            try:
+                bounds.append(operator.index(value))
+            except TypeError as exc:
+                raise ValueError(f"{name} must be an integer") from exc
+        if bounds[0] < 0 or bounds[1] < bounds[0]:
+            raise ValueError(
+                "speech region bounds must satisfy 0 <= start_sample <= end_sample"
+            )
+        object.__setattr__(self, "start_sample", bounds[0])
+        object.__setattr__(self, "end_sample", bounds[1])
+
     @property
     def sample_count(self) -> int:
         return self.end_sample - self.start_sample
+
+    def to_dict(self) -> dict[str, int]:
+        return {
+            "start_sample": int(self.start_sample),
+            "end_sample": int(self.end_sample),
+        }
 
 
 def _finite_non_negative(name: str, value: float) -> float:
@@ -32,9 +59,29 @@ def _finite_non_negative(name: str, value: float) -> float:
     return value
 
 
-def _merge_regions(regions: list[SpeechRegion]) -> list[SpeechRegion]:
+def merge_speech_regions(regions: Iterable[SpeechRegion]) -> list[SpeechRegion]:
+    """Return the sorted union of half-open speech intervals.
+
+    Touching intervals are merged.  Keeping this small primitive public lets
+    multi-input analysis combine channel evidence without duplicating the
+    source-timeline interval contract used by the single-file VAD.
+    """
+
+    values = list(regions)
+    if any(not isinstance(region, SpeechRegion) for region in values):
+        raise TypeError("regions must contain SpeechRegion values")
+
     merged: list[SpeechRegion] = []
-    for region in regions:
+    for region in sorted(
+        values,
+        key=lambda item: (item.start_sample, item.end_sample),
+    ):
+        if region.start_sample < 0 or region.end_sample < region.start_sample:
+            raise ValueError(
+                "speech region bounds must satisfy 0 <= start_sample <= end_sample"
+            )
+        if region.sample_count == 0:
+            continue
         if not merged or region.start_sample > merged[-1].end_sample:
             merged.append(region)
             continue
@@ -44,6 +91,99 @@ def _merge_regions(regions: list[SpeechRegion]) -> list[SpeechRegion]:
             max(previous.end_sample, region.end_sample),
         )
     return merged
+
+
+def _merge_regions(regions: list[SpeechRegion]) -> list[SpeechRegion]:
+    """Backward-compatible private alias used by the original detector."""
+
+    return merge_speech_regions(regions)
+
+
+def _valid_intervals(valid_mask: np.ndarray) -> list[tuple[int, int]]:
+    if valid_mask.size == 0:
+        return []
+    padded = np.pad(valid_mask, (1, 1), constant_values=False)
+    edges = np.flatnonzero(padded[1:] != padded[:-1])
+    return [
+        (int(start), int(end))
+        for start, end in zip(edges[0::2], edges[1::2])
+    ]
+
+
+def _detect_interval(
+    samples: np.ndarray,
+    sample_rate: int,
+    *,
+    interval_start: int,
+    interval_end: int,
+    threshold_db: float,
+    min_speech_duration: float,
+    min_silence_duration: float,
+    padding_duration: float,
+    frame_duration: float,
+    hop_duration: float,
+) -> list[SpeechRegion]:
+    """Run the legacy energy detector inside one contiguous valid interval."""
+
+    interval_samples = samples[interval_start:interval_end]
+    if not interval_samples.size:
+        return []
+
+    frame_samples = max(1, int(round(frame_duration * sample_rate)))
+    hop_samples = max(1, int(round(hop_duration * sample_rate)))
+    starts = np.arange(0, interval_samples.size, hop_samples, dtype=np.int64)
+    ends = np.minimum(starts + frame_samples, interval_samples.size)
+
+    squares = np.square(interval_samples, dtype=np.float64)
+    cumulative_energy = np.concatenate(
+        (np.zeros(1, dtype=np.float64), np.cumsum(squares))
+    )
+    mean_energy = (
+        cumulative_energy[ends] - cumulative_energy[starts]
+    ) / (ends - starts)
+    dbfs = 10.0 * np.log10(
+        np.maximum(mean_energy, np.finfo(np.float64).tiny)
+    )
+    speech_indices = np.flatnonzero(dbfs >= threshold_db)
+    if not speech_indices.size:
+        return []
+
+    min_silence_samples = int(round(min_silence_duration * sample_rate))
+    raw_regions: list[SpeechRegion] = []
+    for index in speech_indices:
+        region = SpeechRegion(
+            interval_start + int(starts[index]),
+            interval_start + int(ends[index]),
+        )
+        if (
+            raw_regions
+            and region.start_sample - raw_regions[-1].end_sample
+            <= min_silence_samples
+        ):
+            previous = raw_regions[-1]
+            raw_regions[-1] = SpeechRegion(
+                previous.start_sample,
+                region.end_sample,
+            )
+        else:
+            raw_regions.append(region)
+
+    min_speech_samples = int(round(min_speech_duration * sample_rate))
+    retained = [
+        region
+        for region in raw_regions
+        if region.sample_count >= min_speech_samples
+    ]
+    padding_samples = int(round(padding_duration * sample_rate))
+    return _merge_regions(
+        [
+            SpeechRegion(
+                max(interval_start, region.start_sample - padding_samples),
+                min(interval_end, region.end_sample + padding_samples),
+            )
+            for region in retained
+        ]
+    )
 
 
 def detect_speech_regions(
@@ -56,13 +196,16 @@ def detect_speech_regions(
     padding_duration: float = 0.2,
     frame_duration: float = 0.03,
     hop_duration: float = 0.01,
+    valid_mask: np.ndarray | None = None,
 ) -> list[SpeechRegion]:
     """Return energy-detected speech regions using original sample positions.
 
     ``threshold_db`` is measured in dBFS.  Adjacent voiced runs separated by
     less than ``min_silence_duration`` are merged; then short runs are removed
     and the requested padding is added.  The default values favor retaining
-    quiet Korean speech while ignoring long digital silence.
+    quiet Korean speech while ignoring long digital silence.  When
+    ``valid_mask`` is supplied, each contiguous recorded interval is analyzed
+    independently, so missing audio cannot bridge regions or receive padding.
     """
 
     if sample_rate <= 0:
@@ -81,42 +224,44 @@ def detect_speech_regions(
         raise ValueError("frame_duration and hop_duration must be greater than 0")
 
     samples = np.asarray(audio, dtype=np.float32).reshape(-1)
-    if not samples.size:
-        return []
     if not np.isfinite(samples).all():
         raise ValueError("audio samples must be finite")
 
-    frame_samples = max(1, int(round(frame_duration * sample_rate)))
-    hop_samples = max(1, int(round(hop_duration * sample_rate)))
-    starts = np.arange(0, samples.size, hop_samples, dtype=np.int64)
-    ends = np.minimum(starts + frame_samples, samples.size)
+    if valid_mask is None:
+        intervals = [(0, samples.size)]
+    else:
+        mask = np.asarray(valid_mask)
+        if mask.ndim != 1:
+            raise ValueError("valid_mask must be one-dimensional")
+        if mask.shape != samples.shape:
+            raise ValueError("valid_mask must have the same shape as audio")
+        mask = np.ascontiguousarray(mask, dtype=np.bool_)
+        intervals = _valid_intervals(mask)
 
-    squares = np.square(samples, dtype=np.float64)
-    cumulative_energy = np.concatenate((np.zeros(1, dtype=np.float64), np.cumsum(squares)))
-    mean_energy = (cumulative_energy[ends] - cumulative_energy[starts]) / (ends - starts)
-    dbfs = 10.0 * np.log10(np.maximum(mean_energy, np.finfo(np.float64).tiny))
-    speech_indices = np.flatnonzero(dbfs >= threshold_db)
-    if not speech_indices.size:
+    if not samples.size:
         return []
 
-    min_silence_samples = int(round(min_silence_duration * sample_rate))
-    raw_regions: list[SpeechRegion] = []
-    for index in speech_indices:
-        region = SpeechRegion(int(starts[index]), int(ends[index]))
-        if raw_regions and region.start_sample - raw_regions[-1].end_sample <= min_silence_samples:
-            previous = raw_regions[-1]
-            raw_regions[-1] = SpeechRegion(previous.start_sample, region.end_sample)
-        else:
-            raw_regions.append(region)
-
-    min_speech_samples = int(round(min_speech_duration * sample_rate))
-    retained = [region for region in raw_regions if region.sample_count >= min_speech_samples]
-    padding_samples = int(round(padding_duration * sample_rate))
-    padded = [
-        SpeechRegion(
-            max(0, region.start_sample - padding_samples),
-            min(samples.size, region.end_sample + padding_samples),
+    regions: list[SpeechRegion] = []
+    for interval_start, interval_end in intervals:
+        regions.extend(
+            _detect_interval(
+                samples,
+                sample_rate,
+                interval_start=interval_start,
+                interval_end=interval_end,
+                threshold_db=threshold_db,
+                min_speech_duration=min_speech_duration,
+                min_silence_duration=min_silence_duration,
+                padding_duration=padding_duration,
+                frame_duration=frame_duration,
+                hop_duration=hop_duration,
+            )
         )
-        for region in retained
-    ]
-    return _merge_regions(padded)
+    return _merge_regions(regions)
+
+
+__all__ = [
+    "SpeechRegion",
+    "detect_speech_regions",
+    "merge_speech_regions",
+]

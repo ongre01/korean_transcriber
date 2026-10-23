@@ -11,7 +11,7 @@ ENGINE_DIR = Path(__file__).resolve().parents[1]
 if str(ENGINE_DIR) not in sys.path:
     sys.path.insert(0, str(ENGINE_DIR))
 
-from vad import detect_speech_regions
+from vad import SpeechRegion, detect_speech_regions, merge_speech_regions
 
 
 class SpeechDetectionTests(unittest.TestCase):
@@ -60,6 +60,51 @@ class SpeechDetectionTests(unittest.TestCase):
         audio[400:550] = 0.1
 
         self.assertEqual(self.detect(audio), [])
+
+    def test_invalid_samples_are_not_treated_as_recorded_silence_or_speech(self) -> None:
+        audio = np.full(2_000, 0.5, dtype=np.float32)
+        valid_mask = np.zeros(audio.size, dtype=np.bool_)
+
+        regions = self.detect(audio, valid_mask=valid_mask)
+
+        self.assertEqual(regions, [])
+
+    def test_invalid_gap_is_not_bridged_and_padding_stays_inside_valid_audio(self) -> None:
+        audio = np.zeros(2_000, dtype=np.float32)
+        valid_mask = np.ones(audio.size, dtype=np.bool_)
+        valid_mask[900:1_100] = False
+        audio[700:900] = 0.1
+        audio[1_100:1_300] = 0.1
+
+        regions = self.detect(
+            audio,
+            valid_mask=valid_mask,
+            min_speech_duration=0.1,
+            min_silence_duration=1.0,
+            padding_duration=0.2,
+        )
+
+        self.assertEqual(len(regions), 2)
+        self.assertLessEqual(regions[0].end_sample, 900)
+        self.assertGreaterEqual(regions[1].start_sample, 1_100)
+
+    def test_public_region_union_sorts_and_merges_touching_bounds(self) -> None:
+        self.assertEqual(
+            merge_speech_regions(
+                (
+                    SpeechRegion(20, 30),
+                    SpeechRegion(0, 10),
+                    SpeechRegion(10, 15),
+                )
+            ),
+            [SpeechRegion(0, 15), SpeechRegion(20, 30)],
+        )
+
+    def test_region_bounds_must_be_non_negative_integers(self) -> None:
+        for start, end in ((0.5, 2), (False, 2), (2, 1), (-1, 2)):
+            with self.subTest(start=start, end=end):
+                with self.assertRaises(ValueError):
+                    SpeechRegion(start, end)
 
 
 if __name__ == "__main__":
