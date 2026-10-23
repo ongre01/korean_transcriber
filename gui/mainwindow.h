@@ -6,6 +6,7 @@
 #include "backend/BackendProcess.h"
 #include "backend/TranscriptSegment.h"
 #include "input/AudioFileInfo.h"
+#include "input/MultiAudioInputModel.h"
 #include "logging/AppLogger.h"
 #include "settings/Settings.h"
 
@@ -24,6 +25,15 @@ class QAction;
 class LogDialog;
 class QTimer;
 
+enum class InputMode
+{
+    SingleFile,
+    Recording,
+    MultiAudioFiles
+};
+
+Q_DECLARE_METATYPE(InputMode)
+
 class MainWindow : public QMainWindow
 {
     Q_OBJECT
@@ -33,8 +43,11 @@ public:
     ~MainWindow() override;
 
     AppState appState() const noexcept;
+    InputMode inputMode() const noexcept;
     QString currentInputFile() const;
     bool hasValidInput() const;
+    QVector<MultiAudioInput> multiAudioInputs() const;
+    int multiAudioReferenceRow() const noexcept;
     AudioRecorder *audioRecorder() const noexcept;
     AudioFileInfo *audioFileInfo() const noexcept;
     BackendProcess *backendProcess() const noexcept;
@@ -42,12 +55,14 @@ public:
 public slots:
     void setCurrentInputFile(const QString &filePath);
     void selectInputFile(const QString &filePath);
+    void setInputMode(InputMode mode);
     void setAppState(AppState state, const QString &message = QString());
     void processingCompleted();
     void processingFailed(const QString &message);
 
 signals:
     void appStateChanged(AppState state);
+    void inputModeChanged(InputMode mode);
     void inputFileSelectionRequested();
     void recordingStartRequested();
     void recordingStopRequested();
@@ -59,6 +74,7 @@ private slots:
     void handleRecordStart();
     void handleRecordStop();
     void handleFileSelection();
+    void handleMultiAudioInput();
     void handleTranscriptionStart();
     void handleCancellation();
     void handleResultSave();
@@ -100,6 +116,8 @@ private:
     void loadInitialPromptText();
     bool saveInitialPromptText(QString *errorMessage = nullptr);
     bool validateSettingsForRun(bool diarizationEnabled);
+    bool hasValidMultiAudioInput() const;
+    bool hasReadyInputForCurrentMode() const;
     bool hasAvailableResult() const;
     void showResultError(const QString &message);
     void logInfo(const QString &event, const QString &detail = QString());
@@ -126,10 +144,13 @@ private:
     AppLogger m_logger;
     Settings m_settings;
     AppState m_state = AppState::Idle;
+    InputMode m_inputMode = InputMode::SingleFile;
     QString m_currentInputFile;
     QString m_pendingInputFile;
     qint64 m_inputDurationMilliseconds = -1;
     qint64 m_recordingDurationMilliseconds = 0;
+    QVector<MultiAudioInput> m_multiAudioInputs;
+    int m_multiAudioReferenceRow = -1;
     bool m_inputInspectionPending = false;
     bool m_cancellationPending = false;
     bool m_closeRequested = false;

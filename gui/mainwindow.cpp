@@ -1,5 +1,6 @@
 #include "mainwindow.h"
 #include "app/EnginePaths.h"
+#include "input/MultiAudioInputDialog.h"
 #include "logging/LogDialog.h"
 #include "settings/SettingsDialog.h"
 #include "ui_mainwindow.h"
@@ -193,6 +194,7 @@ MainWindow::MainWindow(QWidget *parent)
     , m_initialPromptSaveTimer(new QTimer(this))
 {
     ui->setupUi(this);
+    qRegisterMetaType<InputMode>();
     m_hotwordsSaveTimer->setSingleShot(true);
     m_hotwordsSaveTimer->setInterval(400);
     m_initialPromptSaveTimer->setSingleShot(true);
@@ -211,6 +213,24 @@ MainWindow::MainWindow(QWidget *parent)
             this, &MainWindow::handleRecordStop);
     connect(ui->fileSelectButton, &QPushButton::clicked,
             this, &MainWindow::handleFileSelection);
+    connect(ui->recordingModeRadioButton, &QRadioButton::toggled,
+            this, [this](bool checked) {
+                if (checked) {
+                    setInputMode(InputMode::Recording);
+                }
+            });
+    connect(ui->fileModeRadioButton, &QRadioButton::toggled,
+            this, [this](bool checked) {
+                if (checked) {
+                    setInputMode(InputMode::SingleFile);
+                }
+            });
+    connect(ui->multiFileModeRadioButton, &QRadioButton::toggled,
+            this, [this](bool checked) {
+                if (checked) {
+                    setInputMode(InputMode::MultiAudioFiles);
+                }
+            });
     connect(ui->transcribeButton, &QPushButton::clicked,
             this, &MainWindow::handleTranscriptionStart);
     connect(ui->cancelButton, &QPushButton::clicked,
@@ -343,6 +363,11 @@ AppState MainWindow::appState() const noexcept
     return m_state;
 }
 
+InputMode MainWindow::inputMode() const noexcept
+{
+    return m_inputMode;
+}
+
 QString MainWindow::currentInputFile() const
 {
     return m_currentInputFile;
@@ -352,6 +377,51 @@ bool MainWindow::hasValidInput() const
 {
     const QFileInfo inputFile(m_currentInputFile);
     return inputFile.exists() && inputFile.isFile();
+}
+
+bool MainWindow::hasValidMultiAudioInput() const
+{
+    int enabledCount = 0;
+    for (const MultiAudioInput &input : m_multiAudioInputs) {
+        if (!input.enabled) {
+            continue;
+        }
+        if (input.status != MultiAudioInput::Status::Ready
+            || input.alias.trimmed().isEmpty()
+            || !QFileInfo(input.path).isFile()) {
+            return false;
+        }
+        ++enabledCount;
+    }
+
+    if (enabledCount < 2
+        || m_multiAudioReferenceRow < 0
+        || m_multiAudioReferenceRow >= m_multiAudioInputs.size()) {
+        return false;
+    }
+
+    const MultiAudioInput &reference =
+        m_multiAudioInputs.at(m_multiAudioReferenceRow);
+    return reference.enabled
+        && reference.status == MultiAudioInput::Status::Ready
+        && QFileInfo(reference.path).isFile();
+}
+
+bool MainWindow::hasReadyInputForCurrentMode() const
+{
+    return m_inputMode == InputMode::MultiAudioFiles
+        ? hasValidMultiAudioInput()
+        : hasValidInput() && !m_inputInspectionPending;
+}
+
+QVector<MultiAudioInput> MainWindow::multiAudioInputs() const
+{
+    return m_multiAudioInputs;
+}
+
+int MainWindow::multiAudioReferenceRow() const noexcept
+{
+    return m_multiAudioReferenceRow;
 }
 
 AudioRecorder *MainWindow::audioRecorder() const noexcept
@@ -371,6 +441,7 @@ BackendProcess *MainWindow::backendProcess() const noexcept
 
 void MainWindow::setCurrentInputFile(const QString &filePath)
 {
+    setInputMode(InputMode::SingleFile);
     m_audioFileInfo->cancel();
     m_pendingInputFile.clear();
     m_inputInspectionPending = false;
@@ -395,14 +466,51 @@ void MainWindow::selectInputFile(const QString &filePath)
         return;
     }
 
+    setInputMode(InputMode::SingleFile);
     m_pendingInputFile = QFileInfo(selectedPath).absoluteFilePath();
     logInfo(tr("Input File Selected"), QDir::toNativeSeparators(m_pendingInputFile));
     m_inputInspectionPending = true;
-    ui->fileModeRadioButton->setChecked(true);
     updateInputFileUi();
     setAppState(hasValidInput() ? AppState::InputReady : AppState::Idle,
                 tr("파일 정보를 확인하는 중입니다..."));
     m_audioFileInfo->inspect(m_pendingInputFile);
+}
+
+void MainWindow::setInputMode(InputMode mode)
+{
+    if ((m_state == AppState::Recording || m_state == AppState::Processing)
+        && mode != m_inputMode) {
+        return;
+    }
+
+    const bool changed = m_inputMode != mode;
+    m_inputMode = mode;
+
+    const QSignalBlocker recordingBlocker(ui->recordingModeRadioButton);
+    const QSignalBlocker fileBlocker(ui->fileModeRadioButton);
+    const QSignalBlocker multiFileBlocker(ui->multiFileModeRadioButton);
+    ui->recordingModeRadioButton->setChecked(mode == InputMode::Recording);
+    ui->fileModeRadioButton->setChecked(mode == InputMode::SingleFile);
+    ui->multiFileModeRadioButton->setChecked(mode == InputMode::MultiAudioFiles);
+
+    updateInputFileUi();
+    const bool preserveCompletedResult = changed && m_state == AppState::Completed;
+    if (preserveCompletedResult) {
+        updateUiForState();
+    } else if (m_state != AppState::Recording && m_state != AppState::Processing) {
+        const bool ready = hasReadyInputForCurrentMode();
+        QString message;
+        if (mode == InputMode::MultiAudioFiles && ready) {
+            message = tr("다중 마이크 파일 준비 완료");
+        }
+        setAppState(ready ? AppState::InputReady : AppState::Idle, message);
+    } else {
+        updateUiForState();
+    }
+
+    if (changed) {
+        emit inputModeChanged(m_inputMode);
+    }
 }
 
 void MainWindow::setAppState(AppState state, const QString &message)
@@ -475,7 +583,7 @@ void MainWindow::handleRecordStart()
         return;
     }
 
-    ui->recordingModeRadioButton->setChecked(true);
+    setInputMode(InputMode::Recording);
     m_recordingDurationMilliseconds = 0;
     ui->recordingTimeLabel->setText(formattedDuration(0));
     ui->inputLevelProgressBar->setValue(0);
@@ -502,8 +610,14 @@ void MainWindow::handleRecordStop()
 
 void MainWindow::handleFileSelection()
 {
-    const AppActionPolicy policy = appActionPolicy(m_state, hasValidInput());
+    const AppActionPolicy policy = appActionPolicy(
+        m_state, hasReadyInputForCurrentMode());
     if (!policy.canSelectFile) {
+        return;
+    }
+
+    if (m_inputMode == InputMode::MultiAudioFiles) {
+        handleMultiAudioInput();
         return;
     }
 
@@ -528,8 +642,60 @@ void MainWindow::handleFileSelection()
     }
 }
 
+void MainWindow::handleMultiAudioInput()
+{
+    const AppActionPolicy policy = appActionPolicy(
+        m_state, hasReadyInputForCurrentMode());
+    if (!policy.canSelectFile
+        || m_state == AppState::Recording
+        || m_state == AppState::Processing) {
+        return;
+    }
+
+    MultiAudioInputDialog dialog(this);
+    dialog.setAudioFileInfoConfiguration(m_audioFileInfo->pythonProgram(),
+                                         m_audioFileInfo->probeScript());
+    QString initialDirectory = m_settings.lastInputDirectory;
+    if (initialDirectory.isEmpty() || !QFileInfo(initialDirectory).isDir()) {
+        initialDirectory = QDir::homePath();
+    }
+    dialog.setInitialDirectory(initialDirectory);
+    dialog.setInputs(m_multiAudioInputs);
+    dialog.setReferenceRow(m_multiAudioReferenceRow);
+
+    if (dialog.exec() != QDialog::Accepted) {
+        return;
+    }
+
+    m_multiAudioInputs = dialog.inputs();
+    m_multiAudioReferenceRow = dialog.referenceRow();
+    if (QFileInfo(dialog.lastDirectory()).isDir()) {
+        m_settings.lastInputDirectory = dialog.lastDirectory();
+        saveSettings();
+    }
+
+    QStringList selectedPaths;
+    for (const MultiAudioInput &input : m_multiAudioInputs) {
+        if (input.enabled) {
+            selectedPaths.append(QDir::toNativeSeparators(input.path));
+        }
+    }
+    logInfo(tr("Multi Audio Input"),
+            tr("Files: %1\nReference row: %2\n%3")
+                .arg(selectedPaths.size())
+                .arg(m_multiAudioReferenceRow)
+                .arg(selectedPaths.join(QLatin1Char('\n'))));
+    setInputMode(InputMode::MultiAudioFiles);
+}
+
 void MainWindow::handleTranscriptionStart()
 {
+    if (m_inputMode == InputMode::MultiAudioFiles) {
+        statusBar()->showMessage(
+            tr("다중 마이크 파일 전사는 후속 처리 연동이 완료된 뒤 사용할 수 있습니다."));
+        return;
+    }
+
     if (!m_currentInputFile.isEmpty() && !hasValidInput()) {
         m_currentInputFile.clear();
         m_inputDurationMilliseconds = -1;
@@ -1076,6 +1242,61 @@ void MainWindow::updateTranscriptUi()
 
 void MainWindow::updateInputFileUi()
 {
+    if (m_inputMode == InputMode::MultiAudioFiles) {
+        ui->fileGroupBox->setTitle(tr("다중 입력 파일"));
+        ui->fileSelectButton->setText(tr("다중 파일 설정..."));
+        ui->fileSelectButton->setToolTip(
+            tr("동일한 녹음을 담은 마이크 파일을 추가하고 기준 파일을 선택합니다."));
+
+        int enabledCount = 0;
+        qint64 totalSize = 0;
+        for (const MultiAudioInput &input : m_multiAudioInputs) {
+            if (!input.enabled) {
+                continue;
+            }
+            ++enabledCount;
+            const QFileInfo file(input.path);
+            if (file.isFile()) {
+                totalSize += file.size();
+            }
+        }
+
+        if (m_multiAudioInputs.isEmpty()) {
+            ui->fileNameValueLabel->setText(tr("설정된 파일 없음"));
+            ui->filePathValueLabel->setText(
+                tr("다중 파일 설정에서 2개 이상의 파일을 추가하세요."));
+            ui->fileDurationValueLabel->setText(tr("—"));
+            ui->fileSizeValueLabel->setText(tr("—"));
+            return;
+        }
+
+        ui->fileNameValueLabel->setText(
+            tr("전체 %1개 · 사용 %2개")
+                .arg(m_multiAudioInputs.size())
+                .arg(enabledCount));
+        ui->fileSizeValueLabel->setText(formattedFileSize(totalSize));
+
+        if (m_multiAudioReferenceRow >= 0
+            && m_multiAudioReferenceRow < m_multiAudioInputs.size()) {
+            const MultiAudioInput &reference =
+                m_multiAudioInputs.at(m_multiAudioReferenceRow);
+            ui->filePathValueLabel->setText(
+                tr("기준: %1 — %2")
+                    .arg(reference.alias,
+                         QDir::toNativeSeparators(reference.path)));
+            ui->fileDurationValueLabel->setText(
+                formattedDuration(reference.durationMilliseconds));
+        } else {
+            ui->filePathValueLabel->setText(tr("기준 파일이 선택되지 않았습니다."));
+            ui->fileDurationValueLabel->setText(tr("—"));
+        }
+        return;
+    }
+
+    ui->fileGroupBox->setTitle(tr("입력 파일"));
+    ui->fileSelectButton->setText(tr("파일 선택"));
+    ui->fileSelectButton->setToolTip(QString());
+
     if (m_inputInspectionPending) {
         const QFileInfo pendingFile(m_pendingInputFile);
         ui->fileNameValueLabel->setText(pendingFile.fileName());
@@ -1514,7 +1735,7 @@ bool MainWindow::validateSettingsForRun(bool diarizationEnabled)
 
 void MainWindow::updateUiForState()
 {
-    const bool hasInput = hasValidInput() && !m_inputInspectionPending;
+    const bool hasInput = hasReadyInputForCurrentMode();
     const AppActionPolicy policy = appActionPolicy(m_state, hasInput);
     const bool backendBusy = m_backendProcess && m_backendProcess->isRunning();
     const bool controlsEnabled = m_state != AppState::Recording
@@ -1526,11 +1747,21 @@ void MainWindow::updateUiForState()
         policy.canStartRecording && !m_inputInspectionPending && !backendBusy);
     ui->fileSelectButton->setEnabled(policy.canSelectFile && !backendBusy);
     ui->recordStopButton->setEnabled(policy.canStopRecording);
-    ui->transcribeButton->setEnabled(policy.canStartTranscription && !backendBusy);
+    const bool multiInputAwaitingBackend =
+        m_inputMode == InputMode::MultiAudioFiles;
+    ui->transcribeButton->setEnabled(
+        policy.canStartTranscription
+        && !multiInputAwaitingBackend
+        && !backendBusy);
+    ui->transcribeButton->setToolTip(
+        multiInputAwaitingBackend
+            ? tr("다중 마이크 파일 전사 연동은 후속 개발 단계에서 제공됩니다.")
+            : QString());
     ui->cancelButton->setEnabled(policy.canCancel && !m_cancellationPending);
 
     ui->recordingModeRadioButton->setEnabled(controlsEnabled);
     ui->fileModeRadioButton->setEnabled(controlsEnabled);
+    ui->multiFileModeRadioButton->setEnabled(controlsEnabled);
     ui->microphoneComboBox->setEnabled(
         controlsEnabled && !m_audioRecorder->inputDevices().isEmpty());
     ui->diarizationCheckBox->setEnabled(controlsEnabled);

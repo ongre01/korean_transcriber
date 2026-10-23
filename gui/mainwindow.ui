@@ -72,13 +72,10 @@
          </property>
         </widget>
        </item>
-       <item row="0" column="0" colspan="2">
+       <item row="0" column="0">
         <widget class="QRadioButton" name="recordingModeRadioButton">
          <property name="text">
           <string>실시간 녹음</string>
-         </property>
-         <property name="checked">
-          <bool>true</bool>
          </property>
         </widget>
        </item>
@@ -91,10 +88,20 @@
          </item>
         </widget>
        </item>
-       <item row="0" column="2" colspan="2">
+       <item row="0" column="1">
         <widget class="QRadioButton" name="fileModeRadioButton">
          <property name="text">
-          <string>기존 파일</string>
+          <string>단일 파일</string>
+         </property>
+         <property name="checked">
+          <bool>true</bool>
+         </property>
+        </widget>
+       </item>
+       <item row="0" column="2" colspan="2">
+        <widget class="QRadioButton" name="multiFileModeRadioButton">
+         <property name="text">
+          <string>다중 마이크 파일</string>
          </property>
         </widget>
        </item>
