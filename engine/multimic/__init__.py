@@ -1,4 +1,4 @@
-"""Offline multi-microphone preparation, alignment, and quality analysis."""
+"""Offline multi-microphone preparation, alignment, quality, and selection."""
 
 from .pipeline import (
     ANALYSIS_SAMPLE_RATE,
@@ -58,6 +58,17 @@ from .quality import (
     analyze_speech_candidates,
     score_aligned_quality,
 )
+from .select import (
+    ChannelSelectionConfig,
+    ChannelSelectionOverride,
+    ChannelSelectionReport,
+    ChannelSelectionSegment,
+    ChannelSelectionWarning,
+    ManualChannelOverride,
+    select_channel_segments,
+    select_channels,
+    select_optimal_channels,
+)
 
 __all__ = [
     "ANALYSIS_SAMPLE_RATE",
@@ -70,6 +81,11 @@ __all__ = [
     "AlignmentWarning",
     "AudioInputMetadata",
     "ChannelQualityReport",
+    "ChannelSelectionConfig",
+    "ChannelSelectionOverride",
+    "ChannelSelectionReport",
+    "ChannelSelectionSegment",
+    "ChannelSelectionWarning",
     "DriftAnchor",
     "InputFailure",
     "InputAlignment",
@@ -77,6 +93,7 @@ __all__ = [
     "InputQualityScore",
     "InputQualitySummary",
     "InputSpeechEvidence",
+    "ManualChannelOverride",
     "MultiAudioPreparationError",
     "MultiAudioAlignment",
     "MultiAudioAlignmentResult",
@@ -107,6 +124,9 @@ __all__ = [
     "prepare_inputs",
     "prepare_multi_audio_inputs",
     "score_aligned_quality",
+    "select_channel_segments",
+    "select_channels",
+    "select_optimal_channels",
     "estimate_initial_offset",
     "estimate_initial_offsets",
     "estimate_time_alignment",
