@@ -26,6 +26,7 @@
 #include <QUrl>
 
 #include <algorithm>
+#include <cmath>
 
 namespace {
 QString statusText(AppState state)
@@ -72,6 +73,25 @@ QString processingStateText(const QString &state)
         return MainWindow::tr("결과 저장 중...");
     }
     return MainWindow::tr("처리 중...");
+}
+
+QString alignmentStatusName(MultiAudioInput::AlignmentStatus status)
+{
+    switch (status) {
+    case MultiAudioInput::AlignmentStatus::NotAnalyzed:
+        return QStringLiteral("not_analyzed");
+    case MultiAudioInput::AlignmentStatus::Analyzing:
+        return QStringLiteral("analyzing");
+    case MultiAudioInput::AlignmentStatus::Aligned:
+        return QStringLiteral("aligned");
+    case MultiAudioInput::AlignmentStatus::Warning:
+        return QStringLiteral("warning");
+    case MultiAudioInput::AlignmentStatus::Failed:
+        return QStringLiteral("failed");
+    case MultiAudioInput::AlignmentStatus::Manual:
+        return QStringLiteral("manual");
+    }
+    return QStringLiteral("unknown");
 }
 
 QString formattedFileSize(qint64 byteCount)
@@ -407,6 +427,77 @@ bool MainWindow::hasValidMultiAudioInput() const
         && QFileInfo(reference.path).isFile();
 }
 
+bool MainWindow::hasResolvedMultiAudioAlignment(QString *reason) const
+{
+    if (!hasValidMultiAudioInput()) {
+        if (reason) {
+            *reason = tr("먼저 사용할 다중 마이크 파일과 기준 파일을 올바르게 설정하세요.");
+        }
+        return false;
+    }
+
+    const MultiAudioInput &reference =
+        m_multiAudioInputs.at(m_multiAudioReferenceRow);
+    const bool referenceIsIdentity =
+        reference.alignmentStatus == MultiAudioInput::AlignmentStatus::Aligned
+        && reference.hasAlignmentOffset
+        && reference.alignmentOffsetMilliseconds == 0
+        && !reference.alignmentOffsetIsManual
+        && reference.hasDrift
+        && std::isfinite(reference.driftPpm)
+        && reference.driftPpm == 0.0;
+    if (!referenceIsIdentity) {
+        if (reason) {
+            *reason = tr("기준 파일의 시간 정렬 상태가 올바르지 않습니다. 시간 정렬 분석을 다시 실행하세요.");
+        }
+        return false;
+    }
+
+    for (int row = 0; row < m_multiAudioInputs.size(); ++row) {
+        const MultiAudioInput &input = m_multiAudioInputs.at(row);
+        if (!input.enabled || row == m_multiAudioReferenceRow) {
+            continue;
+        }
+
+        const bool automaticallyAligned =
+            input.alignmentStatus == MultiAudioInput::AlignmentStatus::Aligned
+            && input.hasAlignmentOffset;
+        const bool manuallyResolved =
+            input.alignmentStatus == MultiAudioInput::AlignmentStatus::Manual
+            && input.hasAlignmentOffset
+            && input.alignmentOffsetIsManual
+            && input.manualAlignmentCorrectionAllowed;
+        if (automaticallyAligned || manuallyResolved) {
+            continue;
+        }
+
+        if (reason) {
+            switch (input.alignmentStatus) {
+            case MultiAudioInput::AlignmentStatus::Analyzing:
+                *reason = tr("시간 정렬 분석이 진행 중입니다.");
+                break;
+            case MultiAudioInput::AlignmentStatus::Warning:
+                *reason = tr("정렬 경고가 있는 파일을 수동 보정하거나 제외하세요.");
+                break;
+            case MultiAudioInput::AlignmentStatus::Failed:
+                *reason = tr("정렬에 실패한 파일을 수동 보정하거나 제외하세요.");
+                break;
+            case MultiAudioInput::AlignmentStatus::NotAnalyzed:
+            case MultiAudioInput::AlignmentStatus::Aligned:
+            case MultiAudioInput::AlignmentStatus::Manual:
+                *reason = tr("사용할 모든 파일의 시간 정렬을 완료하세요.");
+                break;
+            }
+        }
+        return false;
+    }
+
+    if (reason) {
+        reason->clear();
+    }
+    return true;
+}
+
 bool MainWindow::hasReadyInputForCurrentMode() const
 {
     return m_inputMode == InputMode::MultiAudioFiles
@@ -655,6 +746,10 @@ void MainWindow::handleMultiAudioInput()
     MultiAudioInputDialog dialog(this);
     dialog.setAudioFileInfoConfiguration(m_audioFileInfo->pythonProgram(),
                                          m_audioFileInfo->probeScript());
+    const EnginePaths enginePaths = EnginePaths::discover();
+    dialog.setAlignmentAnalyzerConfiguration(
+        m_settings.pythonPath,
+        enginePaths.assetPath(QStringLiteral("multimic_alignment.py")));
     QString initialDirectory = m_settings.lastInputDirectory;
     if (initialDirectory.isEmpty() || !QFileInfo(initialDirectory).isDir()) {
         initialDirectory = QDir::homePath();
@@ -674,23 +769,53 @@ void MainWindow::handleMultiAudioInput()
         saveSettings();
     }
 
-    QStringList selectedPaths;
-    for (const MultiAudioInput &input : m_multiAudioInputs) {
+    QStringList inputDetails;
+    int enabledInputCount = 0;
+    for (int row = 0; row < m_multiAudioInputs.size(); ++row) {
+        const MultiAudioInput &input = m_multiAudioInputs.at(row);
         if (input.enabled) {
-            selectedPaths.append(QDir::toNativeSeparators(input.path));
+            ++enabledInputCount;
         }
+        const QString offset = input.hasAlignmentOffset
+            ? QStringLiteral("%1 ms").arg(input.alignmentOffsetMilliseconds)
+            : QStringLiteral("-");
+        const QString drift = input.hasDrift && std::isfinite(input.driftPpm)
+            ? QStringLiteral("%1 ppm").arg(input.driftPpm, 0, 'f', 3)
+            : QStringLiteral("-");
+        const QString confidence = std::isfinite(input.confidence)
+                && input.confidence >= 0.0
+            ? QStringLiteral("%1").arg(input.confidence, 0, 'f', 3)
+            : QStringLiteral("-");
+        inputDetails.append(
+            tr("[%1] %2\nPath: %3\nEnabled: %4; Reference: %5; Alignment: %6; Offset: %7; Drift: %8; Confidence: %9; Manual: %10")
+                .arg(row)
+                .arg(input.alias,
+                     QDir::toNativeSeparators(input.path),
+                     input.enabled ? tr("yes") : tr("no"),
+                     row == m_multiAudioReferenceRow ? tr("yes") : tr("no"),
+                     alignmentStatusName(input.alignmentStatus),
+                     offset,
+                     drift,
+                     confidence,
+                     input.alignmentOffsetIsManual ? tr("yes") : tr("no")));
     }
     logInfo(tr("Multi Audio Input"),
-            tr("Files: %1\nReference row: %2\n%3")
-                .arg(selectedPaths.size())
+            tr("Files: %1; Enabled: %2\nReference row: %3\n%4")
+                .arg(m_multiAudioInputs.size())
+                .arg(enabledInputCount)
                 .arg(m_multiAudioReferenceRow)
-                .arg(selectedPaths.join(QLatin1Char('\n'))));
+                .arg(inputDetails.join(QStringLiteral("\n"))));
     setInputMode(InputMode::MultiAudioFiles);
 }
 
 void MainWindow::handleTranscriptionStart()
 {
     if (m_inputMode == InputMode::MultiAudioFiles) {
+        QString alignmentReason;
+        if (!hasResolvedMultiAudioAlignment(&alignmentReason)) {
+            statusBar()->showMessage(alignmentReason);
+            return;
+        }
         statusBar()->showMessage(
             tr("다중 마이크 파일 전사는 후속 처리 연동이 완료된 뒤 사용할 수 있습니다."));
         return;
@@ -1247,6 +1372,7 @@ void MainWindow::updateInputFileUi()
         ui->fileSelectButton->setText(tr("다중 파일 설정..."));
         ui->fileSelectButton->setToolTip(
             tr("동일한 녹음을 담은 마이크 파일을 추가하고 기준 파일을 선택합니다."));
+        ui->fileNameValueLabel->setToolTip(QString());
 
         int enabledCount = 0;
         qint64 totalSize = 0;
@@ -1270,10 +1396,17 @@ void MainWindow::updateInputFileUi()
             return;
         }
 
+        QString alignmentReason;
+        const bool alignmentResolved =
+            hasResolvedMultiAudioAlignment(&alignmentReason);
         ui->fileNameValueLabel->setText(
-            tr("전체 %1개 · 사용 %2개")
+            tr("전체 %1개 · 사용 %2개 · 시간 정렬 %3")
                 .arg(m_multiAudioInputs.size())
-                .arg(enabledCount));
+                .arg(enabledCount)
+                .arg(alignmentResolved ? tr("완료") : tr("미해결")));
+        ui->fileNameValueLabel->setToolTip(
+            alignmentResolved ? tr("사용할 모든 파일의 시간 정렬이 해결되었습니다.")
+                              : alignmentReason);
         ui->fileSizeValueLabel->setText(formattedFileSize(totalSize));
 
         if (m_multiAudioReferenceRow >= 0
@@ -1296,6 +1429,7 @@ void MainWindow::updateInputFileUi()
     ui->fileGroupBox->setTitle(tr("입력 파일"));
     ui->fileSelectButton->setText(tr("파일 선택"));
     ui->fileSelectButton->setToolTip(QString());
+    ui->fileNameValueLabel->setToolTip(QString());
 
     if (m_inputInspectionPending) {
         const QFileInfo pendingFile(m_pendingInputFile);
@@ -1753,10 +1887,14 @@ void MainWindow::updateUiForState()
         policy.canStartTranscription
         && !multiInputAwaitingBackend
         && !backendBusy);
-    ui->transcribeButton->setToolTip(
-        multiInputAwaitingBackend
-            ? tr("다중 마이크 파일 전사 연동은 후속 개발 단계에서 제공됩니다.")
-            : QString());
+    QString transcribeToolTip;
+    if (multiInputAwaitingBackend) {
+        QString alignmentReason;
+        transcribeToolTip = hasResolvedMultiAudioAlignment(&alignmentReason)
+            ? tr("시간 정렬은 완료되었습니다. 다중 마이크 파일 전사 연동은 후속 개발 단계에서 제공됩니다.")
+            : alignmentReason;
+    }
+    ui->transcribeButton->setToolTip(transcribeToolTip);
     ui->cancelButton->setEnabled(policy.canCancel && !m_cancellationPending);
 
     ui->recordingModeRadioButton->setEnabled(controlsEnabled);

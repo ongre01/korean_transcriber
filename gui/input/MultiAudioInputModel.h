@@ -16,19 +16,36 @@ struct MultiAudioInput
         Error
     };
 
+    enum class AlignmentStatus
+    {
+        NotAnalyzed,
+        Analyzing,
+        Aligned,
+        Warning,
+        Failed,
+        Manual
+    };
+
     QString path;
     QString alias;
     qint64 durationMilliseconds = -1;
     bool enabled = true;
     bool hasAlignmentOffset = false;
     qint64 alignmentOffsetMilliseconds = 0;
+    bool alignmentOffsetIsManual = false;
+    bool manualAlignmentCorrectionAllowed = false;
+    bool hasDrift = false;
+    double driftPpm = 0.0;
     double confidence = -1.0;
     Status status = Status::Pending;
     QString statusDetail;
+    AlignmentStatus alignmentStatus = AlignmentStatus::NotAnalyzed;
+    QString alignmentDetail;
 };
 
 Q_DECLARE_METATYPE(MultiAudioInput)
 Q_DECLARE_METATYPE(MultiAudioInput::Status)
+Q_DECLARE_METATYPE(MultiAudioInput::AlignmentStatus)
 
 class MultiAudioInputModel final : public QAbstractTableModel
 {
@@ -42,6 +59,7 @@ public:
         DurationColumn,
         AliasColumn,
         OffsetColumn,
+        DriftColumn,
         ConfidenceColumn,
         StatusColumn,
         ColumnCount,
@@ -62,6 +80,11 @@ public:
         StatusRole,
         StatusDetailRole,
         ReferenceRole,
+        AlignmentOffsetIsManualRole,
+        HasDriftRole,
+        DriftPpmRole,
+        AlignmentStatusRole,
+        AlignmentDetailRole,
 
         DurationMillisecondsRole = DurationRole,
         AlignmentOffsetMillisecondsRole = AlignmentOffsetRole,
@@ -95,8 +118,10 @@ public:
 
     int referenceRow() const noexcept;
     void setReferenceRow(int row);
+    bool restoreReferenceRow(int row);
 
     bool isConfigurationValid(QString *reason = nullptr) const;
+    bool isAlignmentResolved(QString *reason = nullptr) const;
 
     bool setInspectionStarted(const QString &path);
     bool setInspectionSucceeded(const QString &path,
@@ -107,11 +132,27 @@ public:
                             qint64 offsetMilliseconds,
                             double confidence,
                             const QString &detail = QString());
+    bool startAlignmentAnalysis();
+    bool applyAlignmentResult(const QString &path,
+                              MultiAudioInput::AlignmentStatus status,
+                              bool hasOffset,
+                              qint64 offsetMilliseconds,
+                              double confidence,
+                              bool hasDrift,
+                              double driftPpm,
+                              const QString &detail = QString(),
+                              bool allowManualCorrection = true);
+    bool setManualAlignmentOffset(const QString &path,
+                                  qint64 offsetMilliseconds,
+                                  const QString &detail = QString());
+    void cancelAlignmentAnalysis();
     bool clearAlignmentResult(const QString &path);
+    void clearAlignmentResults();
 
 signals:
     void referenceRowChanged(int row);
     void configurationValidityChanged(bool valid);
+    void alignmentResolutionChanged(bool resolved);
 
 private:
     static QString normalizedPath(const QString &path);
@@ -119,14 +160,20 @@ private:
     static QString defaultAlias(const QString &path);
     static QString formatDuration(qint64 milliseconds);
     static QString formatOffset(qint64 milliseconds);
+    static QString formatDrift(double driftPpm);
     static QString formatConfidence(double confidence);
     static QString statusText(MultiAudioInput::Status status);
+    static QString alignmentStatusText(MultiAudioInput::AlignmentStatus status);
 
     bool isReferenceCandidate(int row) const;
     void correctReferenceRow();
     void setReferenceRowInternal(int row);
     void emitValidityChangeIfNeeded(bool wasValid);
+    void emitAlignmentResolutionChangeIfNeeded(bool wasResolved);
     void emitReferenceRoleChanged(int oldRow, int newRow);
+    void clearAlignmentData(MultiAudioInput &input);
+    void setReferenceIdentity(int row);
+    void emitAlignmentDataChanged(int firstRow, int lastRow);
 
     QVector<MultiAudioInput> m_inputs;
     int m_referenceRow = -1;

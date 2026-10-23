@@ -46,6 +46,7 @@ public:
     InputMode inputMode() const noexcept;
     QString currentInputFile() const;
     bool hasValidInput() const;
+    bool hasResolvedMultiAudioAlignment(QString *reason = nullptr) const;
     QVector<MultiAudioInput> multiAudioInputs() const;
     int multiAudioReferenceRow() const noexcept;
     AudioRecorder *audioRecorder() const noexcept;

@@ -19,6 +19,7 @@ MultiAudioInputModel::MultiAudioInputModel(QObject *parent)
 {
     qRegisterMetaType<MultiAudioInput>();
     qRegisterMetaType<MultiAudioInput::Status>();
+    qRegisterMetaType<MultiAudioInput::AlignmentStatus>();
 }
 
 int MultiAudioInputModel::rowCount(const QModelIndex &parent) const
@@ -61,6 +62,16 @@ QVariant MultiAudioInputModel::data(const QModelIndex &index, int role) const
         return input.statusDetail;
     case ReferenceRole:
         return index.row() == m_referenceRow;
+    case AlignmentOffsetIsManualRole:
+        return input.alignmentOffsetIsManual;
+    case HasDriftRole:
+        return input.hasDrift;
+    case DriftPpmRole:
+        return input.driftPpm;
+    case AlignmentStatusRole:
+        return static_cast<int>(input.alignmentStatus);
+    case AlignmentDetailRole:
+        return input.alignmentDetail;
     case Qt::CheckStateRole:
         if (index.column() == UseColumn) {
             return input.enabled ? Qt::Checked : Qt::Unchecked;
@@ -78,10 +89,17 @@ QVariant MultiAudioInputModel::data(const QModelIndex &index, int role) const
         if (index.column() == StatusColumn && !input.statusDetail.isEmpty()) {
             return input.statusDetail;
         }
+        if (index.column() == StatusColumn && !input.alignmentDetail.isEmpty()) {
+            return input.alignmentDetail;
+        }
+        if (index.column() == OffsetColumn && input.alignmentOffsetIsManual) {
+            return tr("사용자가 지정한 정렬 오프셋입니다.");
+        }
         return {};
     case Qt::TextAlignmentRole:
         if (index.column() == UseColumn || index.column() == DurationColumn
             || index.column() == OffsetColumn
+            || index.column() == DriftColumn
             || index.column() == ConfidenceColumn
             || index.column() == StatusColumn) {
             return static_cast<int>(Qt::AlignCenter);
@@ -101,10 +119,19 @@ QVariant MultiAudioInputModel::data(const QModelIndex &index, int role) const
             return input.hasAlignmentOffset
                 ? formatOffset(input.alignmentOffsetMilliseconds)
                 : QStringLiteral("\u2014");
+        case DriftColumn:
+            return input.hasDrift
+                ? formatDrift(input.driftPpm)
+                : QStringLiteral("\u2014");
         case ConfidenceColumn:
             return formatConfidence(input.confidence);
         case StatusColumn:
-            return statusText(input.status);
+            if (!input.enabled && input.status == MultiAudioInput::Status::Ready) {
+                return tr("제외됨");
+            }
+            return input.status == MultiAudioInput::Status::Ready
+                ? alignmentStatusText(input.alignmentStatus)
+                : statusText(input.status);
         default:
             return {};
         }
@@ -135,6 +162,8 @@ QVariant MultiAudioInputModel::headerData(int section,
         return tr("마이크 별칭");
     case OffsetColumn:
         return tr("정렬 오프셋");
+    case DriftColumn:
+        return tr("드리프트");
     case ConfidenceColumn:
         return tr("신뢰도");
     case StatusColumn:
@@ -168,6 +197,7 @@ bool MultiAudioInputModel::setData(const QModelIndex &index,
     }
 
     const bool wasValid = isConfigurationValid();
+    const bool wasResolved = isAlignmentResolved();
     MultiAudioInput &input = m_inputs[index.row()];
 
     if (index.column() == AliasColumn && (role == Qt::EditRole || role == AliasRole)) {
@@ -178,6 +208,7 @@ bool MultiAudioInputModel::setData(const QModelIndex &index,
         input.alias = alias;
         emit dataChanged(index, index, {Qt::DisplayRole, Qt::EditRole, AliasRole});
         emitValidityChangeIfNeeded(wasValid);
+        emitAlignmentResolutionChangeIfNeeded(wasResolved);
         return true;
     }
 
@@ -191,11 +222,27 @@ bool MultiAudioInputModel::setData(const QModelIndex &index,
         }
 
         const int oldReference = m_referenceRow;
+        const QString oldReferencePath = isValidRow(m_inputs, oldReference)
+            ? m_inputs.at(oldReference).path
+            : QString();
         input.enabled = enabled;
         emit dataChanged(index, index, {Qt::CheckStateRole, EnabledRole});
+        const QModelIndex statusIndex = this->index(index.row(), StatusColumn);
+        emit dataChanged(statusIndex, statusIndex, {Qt::DisplayRole});
         correctReferenceRow();
+        const QString newReferencePath = isValidRow(m_inputs, m_referenceRow)
+            ? m_inputs.at(m_referenceRow).path
+            : QString();
+        if (pathKey(oldReferencePath) != pathKey(newReferencePath)) {
+            for (MultiAudioInput &item : m_inputs) {
+                clearAlignmentData(item);
+            }
+            setReferenceIdentity(m_referenceRow);
+            emitAlignmentDataChanged(0, m_inputs.size() - 1);
+        }
         emitReferenceRoleChanged(oldReference, m_referenceRow);
         emitValidityChangeIfNeeded(wasValid);
+        emitAlignmentResolutionChangeIfNeeded(wasResolved);
         return true;
     }
 
@@ -211,7 +258,11 @@ bool MultiAudioInputModel::removeRows(int row, int count,
     }
 
     const bool wasValid = isConfigurationValid();
+    const bool wasResolved = isAlignmentResolved();
     const int oldReference = m_referenceRow;
+    const QString oldReferencePath = isValidRow(m_inputs, oldReference)
+        ? m_inputs.at(oldReference).path
+        : QString();
     const bool referenceRemoved = oldReference >= row
         && oldReference < row + count;
 
@@ -226,12 +277,23 @@ bool MultiAudioInputModel::removeRows(int row, int count,
 
     const int adjustedReference = m_referenceRow;
     correctReferenceRow();
+    const QString newReferencePath = isValidRow(m_inputs, m_referenceRow)
+        ? m_inputs.at(m_referenceRow).path
+        : QString();
+    if (pathKey(oldReferencePath) != pathKey(newReferencePath)) {
+        for (MultiAudioInput &input : m_inputs) {
+            clearAlignmentData(input);
+        }
+        setReferenceIdentity(m_referenceRow);
+        emitAlignmentDataChanged(0, m_inputs.size() - 1);
+    }
     if (adjustedReference == m_referenceRow && m_referenceRow != oldReference) {
         emit referenceRowChanged(m_referenceRow);
     }
     emitReferenceRoleChanged(referenceRemoved ? -1 : oldReference,
                              m_referenceRow);
     emitValidityChangeIfNeeded(wasValid);
+    emitAlignmentResolutionChangeIfNeeded(wasResolved);
     return true;
 }
 
@@ -248,6 +310,11 @@ QHash<int, QByteArray> MultiAudioInputModel::roleNames() const
     roles.insert(StatusRole, "status");
     roles.insert(StatusDetailRole, "statusDetail");
     roles.insert(ReferenceRole, "reference");
+    roles.insert(AlignmentOffsetIsManualRole, "alignmentOffsetIsManual");
+    roles.insert(HasDriftRole, "hasDrift");
+    roles.insert(DriftPpmRole, "driftPpm");
+    roles.insert(AlignmentStatusRole, "alignmentStatus");
+    roles.insert(AlignmentDetailRole, "alignmentDetail");
     return roles;
 }
 
@@ -264,6 +331,7 @@ MultiAudioInput MultiAudioInputModel::inputAt(int row) const
 void MultiAudioInputModel::setInputs(const QVector<MultiAudioInput> &inputs)
 {
     const bool wasValid = isConfigurationValid();
+    const bool wasResolved = isAlignmentResolved();
     const int oldReference = m_referenceRow;
     const QString previousReferencePath = isValidRow(m_inputs, m_referenceRow)
         ? m_inputs.at(m_referenceRow).path
@@ -334,6 +402,7 @@ void MultiAudioInputModel::setInputs(const QVector<MultiAudioInput> &inputs)
         emit referenceRowChanged(m_referenceRow);
     }
     emitValidityChangeIfNeeded(wasValid);
+    emitAlignmentResolutionChangeIfNeeded(wasResolved);
 }
 
 bool MultiAudioInputModel::addInput(const QString &path, const QString &alias)
@@ -344,7 +413,11 @@ bool MultiAudioInputModel::addInput(const QString &path, const QString &alias)
     }
 
     const bool wasValid = isConfigurationValid();
+    const bool wasResolved = isAlignmentResolved();
     const int oldReference = m_referenceRow;
+    const QString oldReferencePath = isValidRow(m_inputs, oldReference)
+        ? m_inputs.at(oldReference).path
+        : QString();
     MultiAudioInput input;
     input.path = normalized;
     input.alias = alias.trimmed();
@@ -358,8 +431,19 @@ bool MultiAudioInputModel::addInput(const QString &path, const QString &alias)
     endInsertRows();
 
     correctReferenceRow();
+    const QString newReferencePath = isValidRow(m_inputs, m_referenceRow)
+        ? m_inputs.at(m_referenceRow).path
+        : QString();
+    if (pathKey(oldReferencePath) != pathKey(newReferencePath)) {
+        for (MultiAudioInput &item : m_inputs) {
+            clearAlignmentData(item);
+        }
+        setReferenceIdentity(m_referenceRow);
+        emitAlignmentDataChanged(0, m_inputs.size() - 1);
+    }
     emitReferenceRoleChanged(oldReference, m_referenceRow);
     emitValidityChangeIfNeeded(wasValid);
+    emitAlignmentResolutionChangeIfNeeded(wasResolved);
     return true;
 }
 
@@ -405,10 +489,39 @@ void MultiAudioInputModel::setReferenceRow(int row)
     }
 
     const bool wasValid = isConfigurationValid();
+    const bool wasResolved = isAlignmentResolved();
     const int oldReference = m_referenceRow;
+    for (MultiAudioInput &input : m_inputs) {
+        clearAlignmentData(input);
+    }
     setReferenceRowInternal(row);
+    setReferenceIdentity(m_referenceRow);
+    emitAlignmentDataChanged(0, m_inputs.size() - 1);
     emitReferenceRoleChanged(oldReference, m_referenceRow);
     emitValidityChangeIfNeeded(wasValid);
+    emitAlignmentResolutionChangeIfNeeded(wasResolved);
+}
+
+bool MultiAudioInputModel::restoreReferenceRow(int row)
+{
+    if (!isReferenceCandidate(row)) {
+        return false;
+    }
+
+    const bool wasValid = isConfigurationValid();
+    const bool wasResolved = isAlignmentResolved();
+    const int oldReference = m_referenceRow;
+    setReferenceRowInternal(row);
+    const auto restoredStatus = m_inputs.at(row).alignmentStatus;
+    if (restoredStatus == MultiAudioInput::AlignmentStatus::NotAnalyzed
+        || restoredStatus == MultiAudioInput::AlignmentStatus::Aligned) {
+        setReferenceIdentity(m_referenceRow);
+    }
+    emitAlignmentDataChanged(row, row);
+    emitReferenceRoleChanged(oldReference, m_referenceRow);
+    emitValidityChangeIfNeeded(wasValid);
+    emitAlignmentResolutionChangeIfNeeded(wasResolved);
+    return true;
 }
 
 bool MultiAudioInputModel::isConfigurationValid(QString *reason) const
@@ -468,6 +581,81 @@ bool MultiAudioInputModel::isConfigurationValid(QString *reason) const
     return true;
 }
 
+bool MultiAudioInputModel::isAlignmentResolved(QString *reason) const
+{
+    if (!isConfigurationValid(reason)) {
+        return false;
+    }
+
+    const MultiAudioInput &reference = m_inputs.at(m_referenceRow);
+    const bool referenceIsIdentity =
+        reference.alignmentStatus == MultiAudioInput::AlignmentStatus::Aligned
+        && reference.hasAlignmentOffset
+        && reference.alignmentOffsetMilliseconds == 0
+        && !reference.alignmentOffsetIsManual
+        && reference.hasDrift
+        && std::isfinite(reference.driftPpm)
+        && reference.driftPpm == 0.0;
+    if (!referenceIsIdentity) {
+        if (reason) {
+            if (reference.alignmentStatus
+                    == MultiAudioInput::AlignmentStatus::Warning) {
+                *reason = tr("기준 파일의 정렬 경고를 확인하고 기준 파일을 변경하거나 제외하세요.");
+            } else if (reference.alignmentStatus
+                       == MultiAudioInput::AlignmentStatus::Failed) {
+                *reason = tr("기준 파일의 시간 정렬에 실패했습니다. 다른 기준 파일을 선택하거나 해당 파일을 제외하세요.");
+            } else {
+                *reason = tr("기준 파일의 시간 정렬을 완료하세요.");
+            }
+        }
+        return false;
+    }
+
+    for (int row = 0; row < m_inputs.size(); ++row) {
+        const MultiAudioInput &input = m_inputs.at(row);
+        if (!input.enabled || row == m_referenceRow) {
+            continue;
+        }
+
+        const bool aligned = input.alignmentStatus
+                == MultiAudioInput::AlignmentStatus::Aligned
+            && input.hasAlignmentOffset;
+        const bool manual = input.alignmentStatus
+                == MultiAudioInput::AlignmentStatus::Manual
+            && input.hasAlignmentOffset
+            && input.alignmentOffsetIsManual
+            && input.manualAlignmentCorrectionAllowed;
+        if (aligned || manual) {
+            continue;
+        }
+
+        if (reason) {
+            switch (input.alignmentStatus) {
+            case MultiAudioInput::AlignmentStatus::Analyzing:
+                *reason = tr("시간 정렬 분석이 진행 중입니다.");
+                break;
+            case MultiAudioInput::AlignmentStatus::Warning:
+                *reason = tr("정렬 경고가 있는 파일을 수동 보정하거나 제외하세요.");
+                break;
+            case MultiAudioInput::AlignmentStatus::Failed:
+                *reason = tr("정렬에 실패한 파일을 수동 보정하거나 제외하세요.");
+                break;
+            case MultiAudioInput::AlignmentStatus::NotAnalyzed:
+            case MultiAudioInput::AlignmentStatus::Aligned:
+            case MultiAudioInput::AlignmentStatus::Manual:
+                *reason = tr("사용할 모든 파일의 시간 정렬을 완료하세요.");
+                break;
+            }
+        }
+        return false;
+    }
+
+    if (reason) {
+        reason->clear();
+    }
+    return true;
+}
+
 bool MultiAudioInputModel::setInspectionStarted(const QString &path)
 {
     const int row = rowForPath(path);
@@ -476,16 +664,40 @@ bool MultiAudioInputModel::setInspectionStarted(const QString &path)
     }
 
     const bool wasValid = isConfigurationValid();
+    const bool wasResolved = isAlignmentResolved();
     const int oldReference = m_referenceRow;
+    const QString oldReferencePath = isValidRow(m_inputs, oldReference)
+        ? m_inputs.at(oldReference).path
+        : QString();
+    const bool inspectingReference = row == oldReference;
+    if (inspectingReference) {
+        for (MultiAudioInput &item : m_inputs) {
+            clearAlignmentData(item);
+        }
+    } else {
+        clearAlignmentData(m_inputs[row]);
+    }
     MultiAudioInput &input = m_inputs[row];
     input.durationMilliseconds = -1;
     input.status = MultiAudioInput::Status::Inspecting;
     input.statusDetail.clear();
-    emit dataChanged(index(row, DurationColumn), index(row, StatusColumn),
-                     {Qt::DisplayRole, DurationRole, StatusRole, StatusDetailRole});
     correctReferenceRow();
+    const QString newReferencePath = isValidRow(m_inputs, m_referenceRow)
+        ? m_inputs.at(m_referenceRow).path
+        : QString();
+    if (pathKey(oldReferencePath) != pathKey(newReferencePath)) {
+        for (MultiAudioInput &item : m_inputs) {
+            clearAlignmentData(item);
+        }
+    }
+    emit dataChanged(index(row, DurationColumn), index(row, StatusColumn),
+                     {Qt::DisplayRole, Qt::ToolTipRole, DurationRole,
+                      StatusRole, StatusDetailRole});
+    emitAlignmentDataChanged(inspectingReference ? 0 : row,
+                             inspectingReference ? m_inputs.size() - 1 : row);
     emitReferenceRoleChanged(oldReference, m_referenceRow);
     emitValidityChangeIfNeeded(wasValid);
+    emitAlignmentResolutionChangeIfNeeded(wasResolved);
     return true;
 }
 
@@ -499,16 +711,35 @@ bool MultiAudioInputModel::setInspectionSucceeded(const QString &path,
     }
 
     const bool wasValid = isConfigurationValid();
+    const bool wasResolved = isAlignmentResolved();
     const int oldReference = m_referenceRow;
+    const QString oldReferencePath = isValidRow(m_inputs, oldReference)
+        ? m_inputs.at(oldReference).path
+        : QString();
     MultiAudioInput &input = m_inputs[row];
     input.durationMilliseconds = durationMilliseconds;
     input.status = MultiAudioInput::Status::Ready;
     input.statusDetail.clear();
-    emit dataChanged(index(row, DurationColumn), index(row, StatusColumn),
-                     {Qt::DisplayRole, DurationRole, StatusRole, StatusDetailRole});
     correctReferenceRow();
+    const QString newReferencePath = isValidRow(m_inputs, m_referenceRow)
+        ? m_inputs.at(m_referenceRow).path
+        : QString();
+    if (pathKey(oldReferencePath) != pathKey(newReferencePath)) {
+        for (MultiAudioInput &item : m_inputs) {
+            clearAlignmentData(item);
+        }
+        emitAlignmentDataChanged(0, m_inputs.size() - 1);
+    }
+    setReferenceIdentity(m_referenceRow);
+    emit dataChanged(index(row, DurationColumn), index(row, StatusColumn),
+                     {Qt::DisplayRole, Qt::ToolTipRole, DurationRole,
+                      StatusRole, StatusDetailRole, HasAlignmentOffsetRole,
+                      AlignmentOffsetRole, AlignmentOffsetIsManualRole,
+                      HasDriftRole, DriftPpmRole, ConfidenceRole,
+                      AlignmentStatusRole, AlignmentDetailRole});
     emitReferenceRoleChanged(oldReference, m_referenceRow);
     emitValidityChangeIfNeeded(wasValid);
+    emitAlignmentResolutionChangeIfNeeded(wasResolved);
     return true;
 }
 
@@ -522,17 +753,39 @@ bool MultiAudioInputModel::setInspectionFailed(const QString &path,
     }
 
     const bool wasValid = isConfigurationValid();
+    const bool wasResolved = isAlignmentResolved();
     const int oldReference = m_referenceRow;
+    const QString oldReferencePath = isValidRow(m_inputs, oldReference)
+        ? m_inputs.at(oldReference).path
+        : QString();
+    if (row == oldReference) {
+        for (MultiAudioInput &item : m_inputs) {
+            clearAlignmentData(item);
+        }
+    } else {
+        clearAlignmentData(m_inputs[row]);
+    }
     MultiAudioInput &input = m_inputs[row];
     input.durationMilliseconds = -1;
     input.status = MultiAudioInput::Status::Error;
     input.statusDetail = detail.trimmed();
+    correctReferenceRow();
+    const QString newReferencePath = isValidRow(m_inputs, m_referenceRow)
+        ? m_inputs.at(m_referenceRow).path
+        : QString();
+    if (pathKey(oldReferencePath) != pathKey(newReferencePath)) {
+        for (MultiAudioInput &item : m_inputs) {
+            clearAlignmentData(item);
+        }
+    }
+    setReferenceIdentity(m_referenceRow);
     emit dataChanged(index(row, DurationColumn), index(row, StatusColumn),
                      {Qt::DisplayRole, Qt::ToolTipRole, DurationRole,
                       StatusRole, StatusDetailRole});
-    correctReferenceRow();
+    emitAlignmentDataChanged(0, m_inputs.size() - 1);
     emitReferenceRoleChanged(oldReference, m_referenceRow);
     emitValidityChangeIfNeeded(wasValid);
+    emitAlignmentResolutionChangeIfNeeded(wasResolved);
     return true;
 }
 
@@ -541,21 +794,138 @@ bool MultiAudioInputModel::setAlignmentResult(const QString &path,
                                               double confidence,
                                               const QString &detail)
 {
-    const int row = rowForPath(path);
-    if (row < 0 || !std::isfinite(confidence) || confidence < 0.0) {
+    return applyAlignmentResult(path,
+                                MultiAudioInput::AlignmentStatus::Aligned,
+                                true,
+                                offsetMilliseconds,
+                                confidence,
+                                false,
+                                0.0,
+                                detail);
+}
+
+bool MultiAudioInputModel::startAlignmentAnalysis()
+{
+    if (!isConfigurationValid()) {
         return false;
     }
 
+    const bool wasResolved = isAlignmentResolved();
+    for (int row = 0; row < m_inputs.size(); ++row) {
+        MultiAudioInput &input = m_inputs[row];
+        clearAlignmentData(input);
+        if (input.enabled && row != m_referenceRow) {
+            input.alignmentStatus = MultiAudioInput::AlignmentStatus::Analyzing;
+        }
+    }
+    setReferenceIdentity(m_referenceRow);
+    emitAlignmentDataChanged(0, m_inputs.size() - 1);
+    emitAlignmentResolutionChangeIfNeeded(wasResolved);
+    return true;
+}
+
+bool MultiAudioInputModel::applyAlignmentResult(
+    const QString &path,
+    MultiAudioInput::AlignmentStatus status,
+    bool hasOffset,
+    qint64 offsetMilliseconds,
+    double confidence,
+    bool hasDrift,
+    double driftPpm,
+    const QString &detail,
+    bool allowManualCorrection)
+{
+    const int row = rowForPath(path);
+    if (row < 0 || m_inputs.at(row).status != MultiAudioInput::Status::Ready
+        || !std::isfinite(confidence) || confidence < 0.0 || confidence > 1.0
+        || (hasDrift && !std::isfinite(driftPpm))) {
+        return false;
+    }
+    if (status != MultiAudioInput::AlignmentStatus::Aligned
+        && status != MultiAudioInput::AlignmentStatus::Warning
+        && status != MultiAudioInput::AlignmentStatus::Failed) {
+        return false;
+    }
+    if (status == MultiAudioInput::AlignmentStatus::Aligned && !hasOffset) {
+        return false;
+    }
+
+    const bool wasResolved = isAlignmentResolved();
+    if (row == m_referenceRow
+        && status == MultiAudioInput::AlignmentStatus::Aligned) {
+        setReferenceIdentity(row);
+    } else {
+        MultiAudioInput &input = m_inputs[row];
+        input.hasAlignmentOffset = hasOffset;
+        input.alignmentOffsetMilliseconds = hasOffset ? offsetMilliseconds : 0;
+        input.alignmentOffsetIsManual = false;
+        input.manualAlignmentCorrectionAllowed =
+            allowManualCorrection
+            && (status == MultiAudioInput::AlignmentStatus::Warning
+                || status == MultiAudioInput::AlignmentStatus::Failed);
+        input.hasDrift = hasDrift;
+        input.driftPpm = hasDrift ? driftPpm : 0.0;
+        input.confidence = confidence;
+        input.alignmentStatus = status;
+        input.alignmentDetail = detail.trimmed();
+    }
+    emitAlignmentDataChanged(row, row);
+    emitAlignmentResolutionChangeIfNeeded(wasResolved);
+    return true;
+}
+
+bool MultiAudioInputModel::setManualAlignmentOffset(
+    const QString &path,
+    qint64 offsetMilliseconds,
+    const QString &detail)
+{
+    const int row = rowForPath(path);
+    if (row < 0 || row == m_referenceRow
+        || m_inputs.at(row).status != MultiAudioInput::Status::Ready
+        || !m_inputs.at(row).manualAlignmentCorrectionAllowed
+        || (m_inputs.at(row).alignmentStatus
+                != MultiAudioInput::AlignmentStatus::Warning
+            && m_inputs.at(row).alignmentStatus
+                != MultiAudioInput::AlignmentStatus::Failed
+            && m_inputs.at(row).alignmentStatus
+                != MultiAudioInput::AlignmentStatus::Manual)) {
+        return false;
+    }
+
+    const bool wasResolved = isAlignmentResolved();
     MultiAudioInput &input = m_inputs[row];
     input.hasAlignmentOffset = true;
     input.alignmentOffsetMilliseconds = offsetMilliseconds;
-    input.confidence = confidence;
-    input.statusDetail = detail.trimmed();
-    emit dataChanged(index(row, OffsetColumn), index(row, StatusColumn),
-                     {Qt::DisplayRole, Qt::ToolTipRole,
-                      HasAlignmentOffsetRole, AlignmentOffsetRole,
-                      ConfidenceRole, StatusDetailRole});
+    input.alignmentOffsetIsManual = true;
+    input.manualAlignmentCorrectionAllowed = true;
+    input.alignmentStatus = MultiAudioInput::AlignmentStatus::Manual;
+    input.alignmentDetail = detail.trimmed().isEmpty()
+        ? tr("사용자가 정렬 오프셋을 수동으로 지정했습니다.")
+        : detail.trimmed();
+    emitAlignmentDataChanged(row, row);
+    emitAlignmentResolutionChangeIfNeeded(wasResolved);
     return true;
+}
+
+void MultiAudioInputModel::cancelAlignmentAnalysis()
+{
+    const bool wasResolved = isAlignmentResolved();
+    int firstChanged = m_inputs.size();
+    int lastChanged = -1;
+    for (int row = 0; row < m_inputs.size(); ++row) {
+        if (m_inputs.at(row).alignmentStatus
+            != MultiAudioInput::AlignmentStatus::Analyzing) {
+            continue;
+        }
+        clearAlignmentData(m_inputs[row]);
+        firstChanged = qMin(firstChanged, row);
+        lastChanged = qMax(lastChanged, row);
+    }
+    setReferenceIdentity(m_referenceRow);
+    if (lastChanged >= firstChanged) {
+        emitAlignmentDataChanged(firstChanged, lastChanged);
+    }
+    emitAlignmentResolutionChangeIfNeeded(wasResolved);
 }
 
 bool MultiAudioInputModel::clearAlignmentResult(const QString &path)
@@ -565,17 +935,25 @@ bool MultiAudioInputModel::clearAlignmentResult(const QString &path)
         return false;
     }
 
-    MultiAudioInput &input = m_inputs[row];
-    if (!input.hasAlignmentOffset && input.confidence < 0.0) {
-        return true;
+    const bool wasResolved = isAlignmentResolved();
+    clearAlignmentData(m_inputs[row]);
+    if (row == m_referenceRow) {
+        setReferenceIdentity(row);
     }
-    input.hasAlignmentOffset = false;
-    input.alignmentOffsetMilliseconds = 0;
-    input.confidence = -1.0;
-    emit dataChanged(index(row, OffsetColumn), index(row, ConfidenceColumn),
-                     {Qt::DisplayRole, HasAlignmentOffsetRole,
-                      AlignmentOffsetRole, ConfidenceRole});
+    emitAlignmentDataChanged(row, row);
+    emitAlignmentResolutionChangeIfNeeded(wasResolved);
     return true;
+}
+
+void MultiAudioInputModel::clearAlignmentResults()
+{
+    const bool wasResolved = isAlignmentResolved();
+    for (MultiAudioInput &input : m_inputs) {
+        clearAlignmentData(input);
+    }
+    setReferenceIdentity(m_referenceRow);
+    emitAlignmentDataChanged(0, m_inputs.size() - 1);
+    emitAlignmentResolutionChangeIfNeeded(wasResolved);
 }
 
 QString MultiAudioInputModel::normalizedPath(const QString &path)
@@ -635,6 +1013,16 @@ QString MultiAudioInputModel::formatOffset(qint64 milliseconds)
     return tr("%1%2 ms").arg(prefix).arg(milliseconds);
 }
 
+QString MultiAudioInputModel::formatDrift(double driftPpm)
+{
+    if (!std::isfinite(driftPpm)) {
+        return QStringLiteral("\u2014");
+    }
+    const QString prefix = driftPpm > 0.0 ? QStringLiteral("+") : QString();
+    return tr("%1%2 ppm")
+        .arg(prefix, QLocale().toString(driftPpm, 'f', 1));
+}
+
 QString MultiAudioInputModel::formatConfidence(double confidence)
 {
     if (!std::isfinite(confidence) || confidence < 0.0) {
@@ -655,6 +1043,26 @@ QString MultiAudioInputModel::statusText(MultiAudioInput::Status status)
         return tr("준비됨");
     case MultiAudioInput::Status::Error:
         return tr("오류");
+    }
+    return {};
+}
+
+QString MultiAudioInputModel::alignmentStatusText(
+    MultiAudioInput::AlignmentStatus status)
+{
+    switch (status) {
+    case MultiAudioInput::AlignmentStatus::NotAnalyzed:
+        return tr("분석 전");
+    case MultiAudioInput::AlignmentStatus::Analyzing:
+        return tr("분석 중");
+    case MultiAudioInput::AlignmentStatus::Aligned:
+        return tr("성공");
+    case MultiAudioInput::AlignmentStatus::Warning:
+        return tr("경고");
+    case MultiAudioInput::AlignmentStatus::Failed:
+        return tr("실패");
+    case MultiAudioInput::AlignmentStatus::Manual:
+        return tr("수동 보정");
     }
     return {};
 }
@@ -710,6 +1118,15 @@ void MultiAudioInputModel::emitValidityChangeIfNeeded(bool wasValid)
     }
 }
 
+void MultiAudioInputModel::emitAlignmentResolutionChangeIfNeeded(
+    bool wasResolved)
+{
+    const bool resolved = isAlignmentResolved();
+    if (resolved != wasResolved) {
+        emit alignmentResolutionChanged(resolved);
+    }
+}
+
 void MultiAudioInputModel::emitReferenceRoleChanged(int oldRow, int newRow)
 {
     if (oldRow == newRow) {
@@ -723,4 +1140,49 @@ void MultiAudioInputModel::emitReferenceRoleChanged(int oldRow, int newRow)
         const QModelIndex changed = index(newRow, 0);
         emit dataChanged(changed, index(newRow, ColumnCount - 1), {ReferenceRole});
     }
+}
+
+void MultiAudioInputModel::clearAlignmentData(MultiAudioInput &input)
+{
+    input.hasAlignmentOffset = false;
+    input.alignmentOffsetMilliseconds = 0;
+    input.alignmentOffsetIsManual = false;
+    input.manualAlignmentCorrectionAllowed = false;
+    input.hasDrift = false;
+    input.driftPpm = 0.0;
+    input.confidence = -1.0;
+    input.alignmentStatus = MultiAudioInput::AlignmentStatus::NotAnalyzed;
+    input.alignmentDetail.clear();
+}
+
+void MultiAudioInputModel::setReferenceIdentity(int row)
+{
+    if (!isValidRow(m_inputs, row)
+        || m_inputs.at(row).status != MultiAudioInput::Status::Ready) {
+        return;
+    }
+
+    MultiAudioInput &input = m_inputs[row];
+    clearAlignmentData(input);
+    input.hasAlignmentOffset = true;
+    input.alignmentOffsetMilliseconds = 0;
+    input.hasDrift = true;
+    input.driftPpm = 0.0;
+    input.confidence = 1.0;
+    input.alignmentStatus = MultiAudioInput::AlignmentStatus::Aligned;
+}
+
+void MultiAudioInputModel::emitAlignmentDataChanged(int firstRow, int lastRow)
+{
+    if (m_inputs.isEmpty() || firstRow < 0 || lastRow < firstRow
+        || lastRow >= m_inputs.size()) {
+        return;
+    }
+
+    emit dataChanged(index(firstRow, OffsetColumn), index(lastRow, StatusColumn),
+                     {Qt::DisplayRole, Qt::ToolTipRole,
+                      HasAlignmentOffsetRole, AlignmentOffsetRole,
+                      AlignmentOffsetIsManualRole, HasDriftRole, DriftPpmRole,
+                      ConfidenceRole, AlignmentStatusRole,
+                      AlignmentDetailRole});
 }
