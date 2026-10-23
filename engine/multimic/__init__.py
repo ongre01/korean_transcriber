@@ -1,4 +1,4 @@
-"""Offline multi-microphone preparation, alignment, and speech analysis."""
+"""Offline multi-microphone preparation, alignment, and quality analysis."""
 
 from .pipeline import (
     ANALYSIS_SAMPLE_RATE,
@@ -38,7 +38,12 @@ from .align import (
     estimate_time_alignments,
 )
 from .quality import (
+    ChannelQualityReport,
+    InputQualityScore,
+    InputQualitySummary,
     InputSpeechEvidence,
+    QualityAnalysisWindow,
+    QualityScoringConfig,
     RegionSpeechDiagnostic,
     SpeechActivityReport,
     SpeechAnalysisConfig,
@@ -46,9 +51,12 @@ from .quality import (
     SpeechAnalysisWindow,
     SpeechCandidateRegion,
     WindowInputEvidence,
+    analyze_aligned_quality,
     analyze_aligned_speech,
+    analyze_prepared_quality,
     analyze_prepared_speech,
     analyze_speech_candidates,
+    score_aligned_quality,
 )
 
 __all__ = [
@@ -61,10 +69,13 @@ __all__ = [
     "AlignmentFailure",
     "AlignmentWarning",
     "AudioInputMetadata",
+    "ChannelQualityReport",
     "DriftAnchor",
     "InputFailure",
     "InputAlignment",
     "InputAlignmentResult",
+    "InputQualityScore",
+    "InputQualitySummary",
     "InputSpeechEvidence",
     "MultiAudioPreparationError",
     "MultiAudioAlignment",
@@ -72,6 +83,8 @@ __all__ = [
     "PreparationWarning",
     "PreparedAudioInput",
     "PreparedMultiAudio",
+    "QualityAnalysisWindow",
+    "QualityScoringConfig",
     "RegionSpeechDiagnostic",
     "SourceFingerprint",
     "SpeechActivityReport",
@@ -81,7 +94,9 @@ __all__ = [
     "SpeechCandidateRegion",
     "WindowAlignment",
     "WindowInputEvidence",
+    "analyze_aligned_quality",
     "analyze_aligned_speech",
+    "analyze_prepared_quality",
     "analyze_prepared_speech",
     "analyze_speech_candidates",
     "align_prepared_inputs",
@@ -91,6 +106,7 @@ __all__ = [
     "place_signal_on_timeline",
     "prepare_inputs",
     "prepare_multi_audio_inputs",
+    "score_aligned_quality",
     "estimate_initial_offset",
     "estimate_initial_offsets",
     "estimate_time_alignment",
