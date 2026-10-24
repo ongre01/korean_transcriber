@@ -42,6 +42,7 @@ HEADERS += \
     audio/AudioRecorder.h \
     audio/WavWriter.h \
     backend/BackendEvent.h \
+    backend/BackendFailure.h \
     backend/BackendProcess.h \
     backend/TranscriptSegment.h \
     backend/TranscribeOptions.h \

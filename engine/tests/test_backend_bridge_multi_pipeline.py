@@ -125,7 +125,9 @@ def state_values(events) -> list[str]:
     return [event.value.value for event in events if isinstance(event, StateEvent)]
 
 
-class BackendBridgeMultiPipelineTests(unittest.TestCase):
+class MultiInputBridgeTestCase(unittest.TestCase):
+    """Two offset recordings of one meeting and a bridge run helper."""
+
     def setUp(self) -> None:
         self.temporary_directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary_directory.cleanup)
@@ -202,16 +204,25 @@ class BackendBridgeMultiPipelineTests(unittest.TestCase):
         events = validate_stream(output.getvalue().splitlines(), result)
         return result, events, diagnostic.getvalue()
 
+    def assert_no_staging(self, directory: Path) -> None:
+        self.assertFalse(
+            [path.name for path in directory.iterdir() if path.name.endswith(".partial")]
+        )
+
     def assert_no_multi_input_outputs(self, directory: Path) -> None:
         names = {path.name for path in directory.iterdir()}
         for name in (
             multimic.MERGED_AUDIO_FILE_NAME,
             multimic.ALIGNMENT_FILE_NAME,
             multimic.CHANNEL_SELECTION_FILE_NAME,
+            "merged_16k_mono.txt",
+            "merged_16k_mono.srt",
         ):
             self.assertNotIn(name, names)
-        self.assertFalse([name for name in names if name.endswith(".partial")])
+        self.assert_no_staging(directory)
 
+
+class BackendBridgeMultiPipelineTests(MultiInputBridgeTestCase):
     def test_multi_input_is_transcribed_on_the_reference_timeline(self) -> None:
         paths = self.write_inputs()
         sources_before = {path: multimic.fingerprint_file(path) for path in paths}
@@ -248,9 +259,16 @@ class BackendBridgeMultiPipelineTests(unittest.TestCase):
         for name in ("text_file", "srt_file", "merged_audio_file", "alignment_file", "selection_file"):
             self.assertTrue(Path(getattr(completed, name)).is_file(), name)
 
-        # Whisper received the published merged WAV, exactly as long as the
-        # reference recording, with the silent interval at reference time.
-        self.assertEqual(self.engine.decoded_paths, [merged_path.resolve()])
+        # Whisper received the merged WAV while it was still staged with its
+        # diagnostics, exactly as long as the reference recording, with the
+        # silent interval at reference time.  Publishing removed the staging.
+        self.assertEqual(len(self.engine.decoded_paths), 1)
+        staged_path = self.engine.decoded_paths[0]
+        self.assertEqual(staged_path.name, multimic.MERGED_AUDIO_FILE_NAME)
+        self.assertEqual(staged_path.parent.parent, self.recordings.resolve())
+        self.assertTrue(staged_path.parent.name.endswith(".partial"))
+        self.assertFalse(staged_path.parent.exists())
+        self.assert_no_staging(self.recordings)
         audio = self.engine.decoded_audio[0]
         self.assertEqual(audio.size, self.reference_sample_count)
         self.assertEqual(len(self.engine.transcribed_audio), 1)

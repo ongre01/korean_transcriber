@@ -13,11 +13,15 @@ import math
 from numbers import Integral
 import os
 from pathlib import Path
+import signal
 import sys
+import threading
+import _thread
 import traceback
-from typing import TYPE_CHECKING, Callable, TextIO
+from typing import TYPE_CHECKING, BinaryIO, Callable, Mapping, TextIO
 
 from backend_protocol import EventStreamValidator, parse_event_line
+from result_staging import ResultStaging, discard_active_staging
 
 if TYPE_CHECKING:
     from vad import SpeechRegion
@@ -53,6 +57,12 @@ MULTI_INPUT_STAGE_FAILURES = {
     "selecting_channels": "Channel selection failed",
     "rendering_merged_audio": "Merged audio could not be created",
 }
+CANCEL_REQUEST = b"cancel"
+CANCELLED_MESSAGE = "Transcription was cancelled."
+CANCELLED_EXIT_CODE = 130
+# Qt kills the process 3 s after it requests cancellation, so a job that
+# cannot unwind sooner is ended by the bridge itself after its cleanup.
+CANCEL_UNWIND_SECONDS = 2.0
 
 
 class BridgeArgumentError(ValueError):
@@ -916,8 +926,9 @@ def _transcribe_and_save(
     audio,
     result_input_path: Path,
     *,
+    staging: ResultStaging,
     diarize_function: Callable | None = None,
-    artifacts: dict[str, str] | None = None,
+    artifacts: Mapping[str, str | Path] | None = None,
 ) -> int:
     """Run the Whisper, diarization and saving stages shared by both modes.
 
@@ -925,7 +936,11 @@ def _transcribe_and_save(
     every segment, TXT and SRT timestamp is measured on that timeline.
     ``result_input_path`` names the TXT/SRT files exactly as the existing
     engine names them for a user-selected file.  ``artifacts`` are the extra
-    multi-input files reported with ``completed``.
+    multi-input files reported with ``completed``; they wait in ``staging``
+    under their final names.  The TXT/SRT files are written to ``staging``
+    too, and the whole set is published, artifacts first, only after the last
+    file is complete, so a failed or cancelled job leaves no partial or
+    orphaned result under a final name.
     """
 
     duration = len(audio) / engine.TARGET_SAMPLE_RATE
@@ -1089,19 +1104,31 @@ def _transcribe_and_save(
     writer.progress(None)
 
     def save_result():
-        context.output_dir.mkdir(parents=True, exist_ok=True)
         paths = engine.save_outputs(
             result_input_path,
             segments,
             duration,
             args.output_suffix,
             diarized=args.diarization,
-            output_dir=context.output_dir,
+            output_dir=staging.directory,
         )
         txt_path, srt_path = (Path(path).resolve() for path in paths)
         if not txt_path.is_file() or not srt_path.is_file():
             raise RuntimeError("the engine did not create both result files")
-        return txt_path, srt_path
+        if {txt_path.parent, srt_path.parent} != {staging.directory.resolve()}:
+            raise RuntimeError("the engine wrote result files outside the output folder")
+        # The TXT file is what users open, so it is the last one published.
+        staging.publish(
+            [
+                *(Path(path).name for path in (artifacts or {}).values()),
+                srt_path.name,
+                txt_path.name,
+            ]
+        )
+        return (
+            staging.final_path(txt_path.name).resolve(),
+            staging.final_path(srt_path.name).resolve(),
+        )
 
     txt_path, srt_path = _call("Result files could not be saved", save_result)
     if duration > 0.0:
@@ -1139,15 +1166,17 @@ def _run_single_input(
         "Audio decoding failed",
         lambda: engine.decode_audio_16k_mono(input_path),
     )
-    return _transcribe_and_save(
-        args,
-        engine,
-        writer,
-        context,
-        audio,
-        input_path,
-        diarize_function=diarize_function,
-    )
+    with ResultStaging(context.output_dir, prefix="transcribe") as staging:
+        return _transcribe_and_save(
+            args,
+            engine,
+            writer,
+            context,
+            audio,
+            input_path,
+            staging=staging,
+            diarize_function=diarize_function,
+        )
 
 
 def _input_label(labels: list[str], input_index: int | None) -> str | None:
@@ -1201,6 +1230,7 @@ def _run_multi_audio_preprocessing(
     manifest: dict[str, object],
     output_dir: Path,
     writer: EventWriter,
+    staging: ResultStaging,
 ):
     """Report each pre-processing stage and map its failures for the user.
 
@@ -1233,6 +1263,7 @@ def _run_multi_audio_preprocessing(
             overrides=selection.get("overrides", []),
             input_labels=labels,
             on_stage=report_stage,
+            staging=staging,
         )
     except multimic.MultiAudioPreparationError as exc:
         raise _preparation_failure(exc, labels) from exc
@@ -1294,39 +1325,49 @@ def _run_multi_input(
     )
 
     multimic = multimic_module or importlib.import_module("multimic")
-    preprocessing = _run_multi_audio_preprocessing(
-        multimic,
-        manifest,
-        context.output_dir,
-        writer,
-    )
-    _warn_about_channel_plan(writer, preprocessing)
-
-    # The merged WAV is transcribed exactly like a user-selected file.  It
-    # starts at the reference recording's first sample, so Whisper and
-    # diarization timestamps are reference-timeline timestamps.
-    outputs = preprocessing.outputs
-    merged_audio_file = Path(outputs.merged_audio_file)
-    audio = _call(
-        "Merged audio could not be decoded",
-        lambda: engine.decode_audio_16k_mono(merged_audio_file),
-    )
-    if len(audio) != outputs.merged_audio.sample_count:
-        raise BridgeFailure(
-            "Merged audio does not match the reference recording timeline: "
-            f"expected {outputs.merged_audio.sample_count} samples, "
-            f"decoded {len(audio)}."
+    with ResultStaging(context.output_dir, prefix="multimic") as staging:
+        preprocessing = _run_multi_audio_preprocessing(
+            multimic,
+            manifest,
+            context.output_dir,
+            writer,
+            staging,
         )
-    return _transcribe_and_save(
-        args,
-        engine,
-        writer,
-        context,
-        audio,
-        merged_audio_file,
-        diarize_function=diarize_function,
-        artifacts=outputs.to_dict(),
-    )
+        _warn_about_channel_plan(writer, preprocessing)
+
+        # The merged WAV is transcribed exactly like a user-selected file.  It
+        # starts at the reference recording's first sample, so Whisper and
+        # diarization timestamps are reference-timeline timestamps.  It stays
+        # staged with its diagnostics until the TXT/SRT files are complete.
+        outputs = preprocessing.outputs
+        merged_audio_file = Path(outputs.merged_audio_file)
+        staged_audio_file = staging.path(merged_audio_file.name)
+        audio = _call(
+            "Merged audio could not be decoded",
+            lambda: engine.decode_audio_16k_mono(staged_audio_file),
+        )
+        if len(audio) != outputs.merged_audio.sample_count:
+            raise BridgeFailure(
+                "Merged audio does not match the reference recording timeline: "
+                f"expected {outputs.merged_audio.sample_count} samples, "
+                f"decoded {len(audio)}."
+            )
+        return _transcribe_and_save(
+            args,
+            engine,
+            writer,
+            context,
+            audio,
+            merged_audio_file,
+            staging=staging,
+            diarize_function=diarize_function,
+            # Publishing order: the diagnostics before the audio they explain.
+            artifacts={
+                "alignment_file": outputs.alignment_file,
+                "selection_file": outputs.selection_file,
+                "merged_audio_file": outputs.merged_audio_file,
+            },
+        )
 
 
 def run_bridge(
@@ -1408,7 +1449,7 @@ def main(
                 diarize_function=diarize_function,
             )
     except KeyboardInterrupt as exc:
-        exit_code = _report_failure(writer, "Transcription was cancelled.", 130)
+        exit_code = _report_failure(writer, CANCELLED_MESSAGE, CANCELLED_EXIT_CODE)
         _write_diagnostic(diagnostic, exc)
         return exit_code
     except BridgeFailure as exc:
@@ -1476,6 +1517,122 @@ def _isolate_protocol_stdout() -> TextIO:
     )
 
 
-if __name__ == "__main__":
+class CancellationWatcher:
+    """Turn a ``cancel`` line on stdin into a cooperative cancellation.
+
+    Qt cannot send a console process on Windows a signal it can catch
+    (``QProcess::terminate()`` only posts ``WM_CLOSE``), so the GUI writes
+    ``cancel`` to stdin before its terminate→kill sequence.  The main thread
+    then receives ``KeyboardInterrupt`` and unwinds through its cleanup.  If
+    it is still busy after ``unwind_seconds`` (native inference only sees the
+    interrupt once it returns), the watcher discards the job's staging
+    directories itself and ends the process with exit code 130 before Qt
+    kills it.  End of input is not a cancellation, so the bridge also runs
+    with a closed or empty stdin.
+    """
+
+    def __init__(
+        self,
+        stream: BinaryIO,
+        *,
+        unwind_seconds: float = CANCEL_UNWIND_SECONDS,
+        interrupt: Callable[[], None] = _thread.interrupt_main,
+        terminate: Callable[[int], None] = os._exit,
+        diagnostic: TextIO | None = None,
+    ):
+        self._stream = stream
+        self._unwind_seconds = unwind_seconds
+        self._interrupt = interrupt
+        self._terminate = terminate
+        self._diagnostic = diagnostic
+        self._requested = threading.Event()
+        self._finished = threading.Event()
+        self._thread = threading.Thread(
+            target=self._watch,
+            name="bridge-cancellation",
+            daemon=True,
+        )
+
+    @property
+    def requested(self) -> bool:
+        return self._requested.is_set()
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def finish(self) -> None:
+        """Record that the job has returned, so no interrupt is needed."""
+
+        self._finished.set()
+
+    def join(self, timeout: float | None = None) -> None:
+        self._thread.join(timeout)
+
+    def _watch(self) -> None:
+        try:
+            for line in self._stream:
+                if line.strip() == CANCEL_REQUEST:
+                    break
+            else:
+                return
+        except (OSError, ValueError):
+            return
+        if self._finished.is_set():
+            return
+
+        self._requested.set()
+        self._interrupt()
+        if self._finished.wait(self._unwind_seconds):
+            return
+        discard_active_staging()
+        if self._diagnostic is not None:
+            try:
+                self._diagnostic.write(
+                    "Cancellation: the job did not stop in time; "
+                    "its staged result files were removed.\n"
+                )
+                self._diagnostic.flush()
+            except (OSError, ValueError):
+                pass
+        self._terminate(CANCELLED_EXIT_CODE)
+
+
+def _cancel_on_signal(_signum, _frame) -> None:
+    raise KeyboardInterrupt
+
+
+def run_as_script(
+    argv: list[str] | None = None,
+    *,
+    engine_module=None,
+    diarize_function: Callable | None = None,
+) -> int:
+    """Run one job the way the Qt GUI starts the bridge.
+
+    stdout is reserved for protocol events and a ``cancel`` line on stdin, or
+    SIGTERM on POSIX, cancels the job after its cleanup.
+    """
+
     _configure_standard_streams()
-    raise SystemExit(main(stdout=_isolate_protocol_stdout()))
+    protocol_stream = _isolate_protocol_stdout()
+    if hasattr(signal, "SIGTERM"):
+        signal.signal(signal.SIGTERM, _cancel_on_signal)
+    stdin = getattr(sys.stdin, "buffer", None)
+    watcher = None
+    if stdin is not None:
+        watcher = CancellationWatcher(stdin, diagnostic=sys.stderr)
+        watcher.start()
+    try:
+        return main(
+            argv,
+            engine_module=engine_module,
+            diarize_function=diarize_function,
+            stdout=protocol_stream,
+        )
+    finally:
+        if watcher is not None:
+            watcher.finish()
+
+
+if __name__ == "__main__":
+    raise SystemExit(run_as_script())

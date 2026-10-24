@@ -256,5 +256,53 @@ class BackendProtocolContractSyncTests(unittest.TestCase):
                 self.assertIn(f'QStringLiteral("{name}")', header)
 
 
+class FailureClassificationContractTests(unittest.TestCase):
+    """The documented error prefixes, the bridge and the Qt classifier agree."""
+
+    DOCUMENT_KINDS = {
+        "동기화 실패": "Synchronization",
+        "디코드 실패": "Decode",
+        "변환 실패(다중 전처리)": "Conversion",
+        "모델 오류": "Model",
+        "결과 저장 실패": "ResultSave",
+    }
+
+    def documented_prefixes(self) -> set[tuple[str, str]]:
+        document = PROTOCOL_DOCUMENT.read_text(encoding="utf-8")
+        section = document.split("## 실패 분류", 1)[1].split("\n## ", 1)[0]
+        prefixes = set()
+        for category, cells in re.findall(r"(?m)^\| ([^|`]+?) \| (`.+`) \|$", section):
+            kind = self.DOCUMENT_KINDS[category]
+            prefixes.update((kind, prefix) for prefix in re.findall(r"`([^`]+)`", cells))
+        return prefixes
+
+    def test_document_covers_every_failure_kind(self) -> None:
+        kinds = {kind for kind, _prefix in self.documented_prefixes()}
+        self.assertEqual(kinds, set(self.DOCUMENT_KINDS.values()))
+
+    def test_bridge_produces_every_documented_prefix(self) -> None:
+        import backend_bridge
+
+        source = (ENGINE_DIR / "backend_bridge.py").read_text(encoding="utf-8")
+        stage_prefixes = set(backend_bridge.MULTI_INPUT_STAGE_FAILURES.values())
+        for _kind, prefix in self.documented_prefixes():
+            with self.subTest(prefix=prefix):
+                self.assertTrue(prefix in stage_prefixes or f'"{prefix}' in source)
+
+    @unittest.skipUnless(
+        (QT_EVENT_HEADER.parent / "BackendFailure.h").is_file(),
+        "Qt sources are not available",
+    )
+    def test_qt_classifier_uses_the_documented_prefixes(self) -> None:
+        header = (QT_EVENT_HEADER.parent / "BackendFailure.h").read_text(encoding="utf-8")
+        qt_prefixes = set(
+            re.findall(
+                r'\{BackendFailureKind::(\w+),\s*QLatin1String\("([^"]+)"\)\}',
+                header,
+            )
+        )
+        self.assertEqual(qt_prefixes, self.documented_prefixes())
+
+
 if __name__ == "__main__":
     unittest.main()

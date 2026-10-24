@@ -1,5 +1,6 @@
 #include "mainwindow.h"
 #include "app/EnginePaths.h"
+#include "backend/BackendFailure.h"
 #include "input/MultiAudioInputDialog.h"
 #include "logging/LogDialog.h"
 #include "settings/SettingsDialog.h"
@@ -667,7 +668,7 @@ void MainWindow::processingCancelled()
 
     if (m_state == AppState::Processing) {
         resetProcessingIndicators();
-        setAppState(hasValidInput() ? AppState::InputReady : AppState::Idle);
+        setAppState(hasReadyInputForCurrentMode() ? AppState::InputReady : AppState::Idle);
     }
 
     if (closeRequested) {
@@ -1620,34 +1621,27 @@ QString MainWindow::fileUserMessage(const QString &detail) const
 
 QString MainWindow::backendUserMessage(const QString &detail) const
 {
-    const QString normalized = detail.toCaseFolded();
-    if (normalized.contains(QStringLiteral("required python module"))
-        || normalized.contains(QStringLiteral("no module named"))
-        || normalized.contains(QStringLiteral("failed to start backend"))
-        || normalized.contains(QStringLiteral("python program"))) {
-        return tr("Python 실행 환경을 시작할 수 없습니다. engine/setup.bat을 실행하고, 고급 설정의 Python 경로를 engine/.venv/Scripts/python.exe로 지정하세요.");
-    }
-    if (normalized.contains(QStringLiteral("input file not found"))) {
-        return tr("입력 파일을 찾을 수 없습니다. 파일이 이동되거나 삭제되지 않았는지 확인하세요.");
-    }
-    if (normalized.contains(QStringLiteral("audio decoding"))
-        || normalized.contains(QStringLiteral("decode"))) {
+    switch (BackendFailure::classify(detail)) {
+    case BackendFailureKind::Synchronization:
+        return tr("녹음 파일 사이의 시간 동기화에 실패했습니다. 다중 마이크 파일 가져오기에서 시간 정렬 결과를 확인하고, 수동 오프셋을 입력하거나 해당 파일을 제외하세요.");
+    case BackendFailureKind::Decode:
         return tr("오디오를 디코딩할 수 없습니다. 파일 형식과 손상 여부를 확인하세요.");
-    }
-    if (normalized.contains(QStringLiteral("diarization"))
-        || normalized.contains(QStringLiteral("segmentation"))
-        || normalized.contains(QStringLiteral("embedding"))) {
-        return tr("화자 분리를 완료할 수 없습니다. 화자 분리 모델과 장치 설정을 확인하세요.");
-    }
-    if (normalized.contains(QStringLiteral("model directory"))
-        || normalized.contains(QStringLiteral("whisper model"))
-        || normalized.contains(QStringLiteral("whisper pipeline"))) {
+    case BackendFailureKind::Conversion:
+        return tr("다중 마이크 음성을 분석하거나 통합 음성으로 변환하지 못했습니다. 출력 폴더의 쓰기 권한과 여유 공간을 확인한 뒤 다시 시도하세요.");
+    case BackendFailureKind::Model:
         return tr("음성 인식 모델을 불러올 수 없습니다. 모델 폴더와 OpenVINO 설정을 확인하세요.");
-    }
-    if (normalized.contains(QStringLiteral("device selection"))
-        || normalized.contains(QStringLiteral("openvino device"))
-        || normalized.contains(QStringLiteral("npu"))) {
+    case BackendFailureKind::ResultSave:
+        return tr("결과 파일을 저장할 수 없습니다. 출력 폴더의 쓰기 권한과 여유 공간을 확인하고, 결과 파일을 연 프로그램을 닫은 뒤 다시 시도하세요.");
+    case BackendFailureKind::PythonEnvironment:
+        return tr("Python 실행 환경을 시작할 수 없습니다. engine/setup.bat을 실행하고, 고급 설정의 Python 경로를 engine/.venv/Scripts/python.exe로 지정하세요.");
+    case BackendFailureKind::InputFile:
+        return tr("입력 파일을 찾을 수 없습니다. 파일이 이동되거나 삭제되지 않았는지 확인하세요.");
+    case BackendFailureKind::Diarization:
+        return tr("화자 분리를 완료할 수 없습니다. 화자 분리 모델과 장치 설정을 확인하세요.");
+    case BackendFailureKind::Device:
         return tr("선택한 AI 장치를 사용할 수 없습니다. 장치를 AUTO 또는 CPU로 바꿔 다시 시도하세요.");
+    case BackendFailureKind::Other:
+        break;
     }
     return tr("음성 인식 처리 중 오류가 발생했습니다. 설정을 확인한 뒤 다시 시도하세요.");
 }

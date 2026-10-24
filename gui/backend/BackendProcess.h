@@ -64,12 +64,15 @@ private:
     void dispatchEvent(const BackendEvent &event);
     void processFinished(int exitCode, QProcess::ExitStatus exitStatus);
     void processError(QProcess::ProcessError error);
-    void escalateCancellation();
+    // Asks the bridge on stdin to clean up and exit, then terminate(); kill()
+    // follows when the process is still running after the grace period.
+    void requestStop();
+    void escalateStop();
     void finishCancellation();
     void failRun(const QString &message, bool terminateProcess = true);
 
     QProcess m_process;
-    QTimer m_cancellationTimer;
+    QTimer m_stopTimer;
     QString m_pythonProgram = QStringLiteral("python");
     QString m_bridgeScript;
     QString m_workingDirectory;

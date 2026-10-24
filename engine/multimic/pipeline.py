@@ -23,8 +23,6 @@ from numbers import Real
 import operator
 import os
 from pathlib import Path
-import shutil
-import tempfile
 from typing import TYPE_CHECKING, Callable, Iterable, Iterator, Mapping, Sequence
 import wave
 
@@ -48,6 +46,7 @@ try:  # The engine is imported both as a source directory and as a package.
         SUPPORTED_AUDIO_EXTENSIONS,
         decode_audio_stream,
     )
+    from ..result_staging import ResultStaging
 except ImportError:  # pragma: no cover - exercised by the application's import layout
     from audio_metadata import (  # type: ignore[no-redef]
         AudioStreamInfo,
@@ -55,6 +54,7 @@ except ImportError:  # pragma: no cover - exercised by the application's import 
         SUPPORTED_AUDIO_EXTENSIONS,
         decode_audio_stream,
     )
+    from result_staging import ResultStaging  # type: ignore[no-redef]
 
 
 ANALYSIS_SAMPLE_RATE = 16_000
@@ -1743,14 +1743,20 @@ def write_multi_audio_outputs(
     config: MergedAudioConfig | None = None,
     input_labels: Sequence[str] | None = None,
     source_path_policy: str = DEFAULT_SOURCE_PATH_POLICY,
+    staging: ResultStaging | None = None,
 ) -> MultiAudioOutputs:
     """Render and publish the merged WAV and both diagnostic JSON files.
 
-    Everything is first written to a hidden staging directory inside
-    ``output_directory`` and only moved to the final names once all three
-    files are complete; the staging directory is always removed.  A final
-    name that would replace a source recording is rejected before anything
-    is written, and sources are only ever read.
+    Everything is first written to a private staging directory inside
+    ``output_directory`` (see :mod:`result_staging`) and only moved to the
+    final names once all three files are complete; the staging directory is
+    always removed.  A final name that would replace a source recording is
+    rejected before anything is written, and sources are only ever read.
+
+    A caller that publishes further results of the same job passes its own
+    ``staging``: the three files are then left in it under their final names
+    for the caller to publish, and the returned paths are the locations they
+    will have once published.
     """
 
     from .select import ChannelSelectionReport
@@ -1782,6 +1788,8 @@ def write_multi_audio_outputs(
     merged = render_merged_audio(signals, selection, config=config)
 
     directory = Path(output_directory).expanduser().resolve()
+    if staging is not None and staging.output_directory != directory:
+        raise ValueError("staging must belong to the output directory")
     final_paths = {
         name: directory / name
         for name in (
@@ -1800,17 +1808,13 @@ def write_multi_audio_outputs(
                 f"output file would replace a source recording: {path.name}"
             )
 
-    directory.mkdir(parents=True, exist_ok=True)
-    staging = Path(
-        tempfile.mkdtemp(prefix=".multimic_", suffix=".partial", dir=directory)
-    )
-    published: list[Path] = []
+    job_staging = staging or ResultStaging(directory, prefix="multimic")
     try:
-        staged_audio = staging / MERGED_AUDIO_FILE_NAME
+        staged_audio = job_staging.path(MERGED_AUDIO_FILE_NAME)
         write_pcm16_wav(staged_audio, merged.samples, sample_rate=merged.sample_rate)
         audio_fingerprint = fingerprint_file(staged_audio)
         _write_json(
-            staging / ALIGNMENT_FILE_NAME,
+            job_staging.path(ALIGNMENT_FILE_NAME),
             build_alignment_diagnostics(
                 prepared,
                 alignment,
@@ -1819,7 +1823,7 @@ def write_multi_audio_outputs(
             ),
         )
         _write_json(
-            staging / CHANNEL_SELECTION_FILE_NAME,
+            job_staging.path(CHANNEL_SELECTION_FILE_NAME),
             build_channel_selection_diagnostics(
                 prepared,
                 selection,
@@ -1829,20 +1833,13 @@ def write_multi_audio_outputs(
                 source_path_policy=policy,
             ),
         )
-        # Diagnostics first, audio last: a consumer that waits for the WAV
-        # never sees it without the history that explains it.
-        for name, final_path in final_paths.items():
-            os.replace(staging / name, final_path)
-            published.append(final_path)
-    except BaseException:
-        for path in published:
-            try:
-                path.unlink()
-            except OSError:
-                pass
-        raise
+        if staging is None:
+            # Diagnostics first, audio last: a consumer that waits for the
+            # WAV never sees it without the history that explains it.
+            job_staging.publish(list(final_paths))
     finally:
-        shutil.rmtree(staging, ignore_errors=True)
+        if staging is None:
+            job_staging.discard()
 
     return MultiAudioOutputs(
         output_directory=directory,
@@ -1989,6 +1986,7 @@ def run_multi_audio_preprocessing(
     source_path_policy: str = DEFAULT_SOURCE_PATH_POLICY,
     merged_audio_config: MergedAudioConfig | None = None,
     on_stage: Callable[[str], None] | None = None,
+    staging: ResultStaging | None = None,
 ) -> MultiAudioPreprocessingResult:
     """Run every pre-processing stage and publish the transcription input.
 
@@ -1996,7 +1994,8 @@ def run_multi_audio_preprocessing(
     recording from its first sample, so timestamps measured on it are
     reference-timeline timestamps.  ``on_stage`` receives every
     :data:`PREPROCESSING_STAGES` name in order; the errors are those of
-    :func:`plan_multi_audio_selection`.
+    :func:`plan_multi_audio_selection`.  With ``staging`` the files stay
+    staged for the caller to publish, as in :func:`write_multi_audio_outputs`.
     """
 
     plan = plan_multi_audio_selection(
@@ -2018,5 +2017,6 @@ def run_multi_audio_preprocessing(
         config=merged_audio_config,
         input_labels=input_labels,
         source_path_policy=source_path_policy,
+        staging=staging,
     )
     return MultiAudioPreprocessingResult(plan=plan, outputs=outputs)

@@ -255,10 +255,11 @@ Bridge는 검증된 매니페스트를 `multimic.run_multi_audio_preprocessing()
 전처리 전에 `preparing`에서 끝낸다.
 
 통합 WAV(`merged_16k_mono.wav`)는 기준 입력의 첫 샘플부터 기준 입력과 같은 길이로
-만들어진다. Bridge는 이를 기존 엔진의 `decode_audio_16k_mono()`로 다시 읽어 단일
-입력과 같은 Whisper·화자 분리·저장 단계에 넘기며, 디코딩된 길이가 기준 시간축과
-다르면 오류로 중단한다. 화자 분리 ON/OFF, `--skip-silence`, hotwords와 초기
-프롬프트 정책은 단일 입력과 같다. 어떤 입력도 단독으로 전사하지 않는다.
+만들어진다. Bridge는 staging 폴더(아래 "결과 파일 게시")에 있는 통합 WAV를 기존
+엔진의 `decode_audio_16k_mono()`로 다시 읽어 단일 입력과 같은 Whisper·화자 분리·저장
+단계에 넘기며, 디코딩된 길이가 기준 시간축과 다르면 오류로 중단한다. 화자 분리
+ON/OFF, `--skip-silence`, hotwords와 초기 프롬프트 정책은 단일 입력과 같다. 어떤
+입력도 단독으로 전사하지 않는다.
 
 채널 선택 경고가 있거나 선택된 입력에 녹음이 없는 구간을 무음으로 채운 경우
 `warning`으로 알리고 상세 내용은 `channel_selection.json`에 남긴다. 실패는 다음과
@@ -272,9 +273,63 @@ Bridge는 검증된 매니페스트를 `multimic.run_multi_audio_preprocessing()
 | 기준 녹음 길이를 넘는 `selection.overrides` | `Invalid bridge arguments: multi-input manifest selection.overrides[i] ends after the reference timeline (...)` | 2 | traceback |
 | 그 밖의 단계 오류 | 실행 중이던 단계의 접두어(예: `Channel selection failed: ...`) | 1 | traceback |
 
-`rendering_merged_audio` 전에 실패하면 결과 파일을 만들지 않는다. 통합 WAV와 진단
-JSON은 세 파일이 모두 완성된 뒤에만 최종 이름으로 게시되며, 그 뒤 Whisper·화자
-분리·저장 단계에서 실패해도 이미 게시된 세 파일은 남는다.
+통합 WAV와 진단 JSON은 TXT/SRT와 같은 결과 세트로 게시된다. Whisper·화자 분리·저장
+단계에서 실패하거나 취소되어도 세 파일은 최종 이름으로 나타나지 않는다.
+
+## 결과 파일 게시
+
+한 실행의 결과 파일(단일 모드: TXT/SRT, 다중 모드: `alignment.json`,
+`channel_selection.json`, `merged_16k_mono.wav`, SRT, TXT)은 출력 폴더 안의 실행 전용
+staging 폴더(`.transcribe_XXXXXXXX.partial` 또는 `.multimic_XXXXXXXX.partial`)에 먼저
+쓴다. 마지막 파일까지 완성된 뒤 위 순서대로 최종 이름으로 옮기고 그 뒤에만
+`completed`를 보낸다(`engine/result_staging.py`).
+
+- 실패·취소된 실행은 어떤 결과 파일도 최종 이름으로 남기지 않는다. 같은 이름의 이전
+  실행 결과는 내용 그대로 남는다.
+- 옮기는 도중 실패하면(예: 다른 프로그램이 연 파일) 이미 옮긴 파일을 되돌리고 덮어쓴
+  이전 파일을 복원한 뒤 `Result files could not be saved: ...`로 실패한다.
+- staging 폴더는 실행이 끝나면(성공·실패·취소) 지운다. 프로세스가 강제 종료되어 남은
+  staging 폴더는 소유 잠금 파일(`.owner.lock`)이 풀려 있으므로, 같은 출력 폴더를 쓰는
+  다음 실행이 지운다. 실행 중인 다른 작업의 staging 폴더는 지우지 않는다.
+- 입력 파일과 매니페스트는 읽기만 한다. 출력 이름이 입력 파일과 같으면 쓰기 전에
+  거부한다.
+- 결과 세트 게시 후 `completed`를 보내기 전에 취소되면 완성된 결과 세트는 남고 Qt는
+  취소로 처리한다.
+
+## 취소
+
+Qt `BackendProcess`는 취소할 때 stdin에 `cancel` 한 줄을 쓰고 `QProcess::terminate()`를
+호출한다. 유예 시간(기본 3초) 안에 끝나지 않으면 `QProcess::kill()`한다. Windows에서
+`terminate()`는 콘솔 프로세스에 전달되지 않으므로(`WM_CLOSE`만 보냄) stdin 요청이
+정리 기회를 주는 경로다. POSIX의 SIGTERM도 같은 취소로 처리한다.
+
+- 스크립트로 실행된 Bridge(`run_as_script()`)는 stdin을 감시하다가 `cancel` 줄을 받으면
+  주 스레드에 `KeyboardInterrupt`를 보낸다. 주 스레드는 staging을 정리하고 `error`
+  (`Transcription was cancelled.`)와 종료 코드 130으로 끝난다.
+- 네이티브 추론처럼 2초(`CANCEL_UNWIND_SECONDS`) 안에 Python으로 돌아오지 않으면 감시
+  스레드가 staging을 직접 지우고 종료 이벤트 없이 종료 코드 130으로 끝낸다. 사용자
+  취소이므로 종료 이벤트 누락이 허용된다.
+- stdin 종료(EOF)나 다른 줄은 취소가 아니다. stdin을 닫은 채 실행해도 된다.
+- Qt는 취소를 요청한 뒤의 stdout 이벤트를 무시하고, 프로세스가 멈춘 뒤 이벤트·종료
+  코드와 관계없이 취소로 처리한다. 프로토콜 오류로 실행을 중단할 때도 같은
+  cancel 요청→terminate→유예 후 kill 순서로 프로세스를 멈춘다.
+
+## 실패 분류
+
+Qt는 `error.message`를 그대로 보여 주지 않고 아래 접두어로 분류한 사용자 안내와
+"상세 로그" 안내만 표시한다. 메시지 원문과 stderr(traceback, 진단 JSON)는 로그에만
+남는다. 접두어는 이 표가 계약이며 바꿀 때 Qt `BackendFailure.h`와 함께 바꾼다.
+
+| 분류 | `error.message` 접두어 |
+|---|---|
+| 동기화 실패 | `Time alignment is unresolved for`, `Multi-input time alignment failed` |
+| 디코드 실패 | `Multi-input audio could not be prepared.`, `Multi-input audio decoding failed`, `Audio decoding failed` |
+| 변환 실패(다중 전처리) | `Multi-input speech detection failed`, `Channel quality analysis failed`, `Channel selection failed`, `Merged audio could not be created`, `Merged audio could not be decoded`, `Merged audio does not match the reference recording timeline`, `Multi-input pre-processing failed` |
+| 모델 오류 | `Model directory not found`, `Whisper model could not be loaded`, `Whisper generation configuration failed`, `Initial prompt validation failed` |
+| 결과 저장 실패 | `Result files could not be saved` |
+
+그 밖의 메시지(`Transcription failed`, 장치, 화자 분리, Python 모듈, 입력 파일 없음
+등)는 기존 단일 모드의 키워드 분류를 따른다.
 
 ### 다중 입력 음질 분석 단발 명령
 

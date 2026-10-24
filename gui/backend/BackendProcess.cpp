@@ -19,6 +19,9 @@ QString quotedCommandArgument(const QString &argument)
     return QStringLiteral("\"") + escaped + QStringLiteral("\"");
 }
 
+// engine/backend_protocol.md, "취소": the bridge cleans up and exits on this line.
+constexpr char cancelRequest[] = "cancel\n";
+
 QString commandForLog(const QString &program, const QStringList &arguments)
 {
     QStringList parts;
@@ -36,7 +39,7 @@ BackendProcess::BackendProcess(QObject *parent)
     : QObject(parent)
 {
     m_process.setProcessChannelMode(QProcess::SeparateChannels);
-    m_cancellationTimer.setSingleShot(true);
+    m_stopTimer.setSingleShot(true);
 
     connect(&m_process, &QProcess::started, this, &BackendProcess::started);
     connect(&m_process, &QProcess::readyReadStandardOutput,
@@ -48,13 +51,13 @@ BackendProcess::BackendProcess(QObject *parent)
     connect(&m_process,
             qOverload<int, QProcess::ExitStatus>(&QProcess::finished),
             this, &BackendProcess::processFinished);
-    connect(&m_cancellationTimer, &QTimer::timeout,
-            this, &BackendProcess::escalateCancellation);
+    connect(&m_stopTimer, &QTimer::timeout,
+            this, &BackendProcess::escalateStop);
 }
 
 BackendProcess::~BackendProcess()
 {
-    m_cancellationTimer.stop();
+    m_stopTimer.stop();
     // Destruction cannot rely on a later event-loop iteration.  Disconnecting
     // first prevents terminal signals from reaching a partially destroyed owner.
     m_process.disconnect(this);
@@ -155,8 +158,7 @@ void BackendProcess::cancel()
         return;
     }
 
-    m_cancellationTimer.start(m_cancellationGracePeriodMilliseconds);
-    m_process.terminate();
+    requestStop();
 }
 
 void BackendProcess::setCancellationGracePeriod(int milliseconds)
@@ -191,7 +193,7 @@ QByteArray BackendProcess::standardErrorOutput() const
 
 void BackendProcess::resetRunState()
 {
-    m_cancellationTimer.stop();
+    m_stopTimer.stop();
     m_stdoutBuffer.clear();
     m_standardError.clear();
     m_streamValidator = BackendProtocol::EventStreamValidator();
@@ -300,6 +302,7 @@ void BackendProcess::dispatchEvent(const BackendEvent &event)
 
 void BackendProcess::processFinished(int exitCode, QProcess::ExitStatus exitStatus)
 {
+    m_stopTimer.stop();
     readStandardOutput();
     readStandardError();
 
@@ -364,9 +367,23 @@ void BackendProcess::processError(QProcess::ProcessError error)
     failRun(message, error != QProcess::Crashed);
 }
 
-void BackendProcess::escalateCancellation()
+void BackendProcess::requestStop()
 {
-    if (m_cancellationRequested && !m_terminalSignalEmitted && isRunning()) {
+    if (!isRunning() || m_stopTimer.isActive()) {
+        return;
+    }
+
+    // QProcess::terminate() only posts WM_CLOSE on Windows, which a console
+    // Python process never receives, so the bridge is first asked on stdin to
+    // remove its staged files and exit.  terminate() still stops it on POSIX.
+    m_process.write(cancelRequest);
+    m_process.terminate();
+    m_stopTimer.start(m_cancellationGracePeriodMilliseconds);
+}
+
+void BackendProcess::escalateStop()
+{
+    if (isRunning()) {
         m_process.kill();
     }
 }
@@ -377,7 +394,7 @@ void BackendProcess::finishCancellation()
         return;
     }
 
-    m_cancellationTimer.stop();
+    m_stopTimer.stop();
     m_stdoutBuffer.clear();
     m_terminalSignalEmitted = true;
     emit cancelled();
@@ -393,7 +410,9 @@ void BackendProcess::failRun(const QString &message, bool terminateProcess)
     m_terminalSignalEmitted = true;
     emit errorOccurred(message);
 
-    if (terminateProcess && isRunning()) {
-        m_process.terminate();
+    // A backend that broke the protocol may still be running and writing
+    // result files; stop it like a cancellation so that stopped() follows.
+    if (terminateProcess) {
+        requestStop();
     }
 }

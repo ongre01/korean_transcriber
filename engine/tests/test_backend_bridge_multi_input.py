@@ -159,6 +159,14 @@ class BackendBridgeMultiInputTests(unittest.TestCase):
         self.assertEqual(paths, [str(path.resolve()) for path in self.input_paths])
         self.assertEqual(output_dir, self.input_paths[0].resolve().parent)
         del options["on_stage"]
+        # The pre-processing files wait in the job's staging directory, which
+        # the failed job removed again.
+        staging = options.pop("staging")
+        self.assertIsInstance(staging, backend_bridge.ResultStaging)
+        self.assertEqual(staging.output_directory, output_dir)
+        self.assertFalse(
+            [path for path in output_dir.iterdir() if path.name.endswith(".partial")]
+        )
         self.assertEqual(
             options,
             {
