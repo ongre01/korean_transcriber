@@ -7,6 +7,10 @@ recorded silence.  Offset and clock-drift estimation are delegated to
 The final stage renders a channel plan into ``merged_16k_mono.wav`` on the
 reference timeline and stores traceable alignment and selection diagnostics
 without ever writing to a source file.
+
+:func:`plan_multi_audio_selection` and :func:`run_multi_audio_preprocessing`
+chain those stages for one job, so the GUI's review and the transcription run
+derive their channel plan from the same code path.
 """
 
 from __future__ import annotations
@@ -21,7 +25,7 @@ import os
 from pathlib import Path
 import shutil
 import tempfile
-from typing import TYPE_CHECKING, Iterable, Iterator, Mapping, Sequence
+from typing import TYPE_CHECKING, Callable, Iterable, Iterator, Mapping, Sequence
 import wave
 
 import numpy as np
@@ -34,6 +38,7 @@ from .align import (
 )
 
 if TYPE_CHECKING:  # ``select`` imports this module through ``quality``.
+    from .quality import ChannelQualityReport
     from .select import ChannelSelectionReport, ChannelSelectionSegment
 
 try:  # The engine is imported both as a source directory and as a package.
@@ -65,6 +70,17 @@ MERGED_AUDIO_FILE_NAME = "merged_16k_mono.wav"
 ALIGNMENT_FILE_NAME = "alignment.json"
 CHANNEL_SELECTION_FILE_NAME = "channel_selection.json"
 DIAGNOSTICS_VERSION = 1
+
+# Pre-processing stages in execution order.  The names are the bridge
+# protocol's state values, so the bridge reports them unchanged.
+PREPROCESSING_STAGES = (
+    "decoding_audio",
+    "aligning_audio",
+    "detecting_speech",
+    "assessing_channels",
+    "selecting_channels",
+    "rendering_merged_audio",
+)
 
 # Result folders are often shared, while source names and folders frequently
 # contain participant names.  Diagnostics therefore omit source locations
@@ -299,6 +315,34 @@ class _InputPreparationFailure(RuntimeError):
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
         self.code = code
+
+
+class UnresolvedAlignmentError(ValueError):
+    """Some inputs have neither an automatic alignment nor a manual offset.
+
+    ``alignment`` is the report after manual offsets were applied; its
+    ``failures`` are the inputs that still block automatic integration.
+    """
+
+    def __init__(self, alignment: MultiAudioAlignment) -> None:
+        super().__init__("multi-audio alignment is unresolved")
+        self.alignment = alignment
+
+
+class SelectionOverrideError(ValueError):
+    """A manual channel override ends after the decoded reference timeline.
+
+    The manifest validator cannot know the reference length, so this bound is
+    only checked once the reference input has been decoded.
+    """
+
+    def __init__(self, override_index: int, timeline_sample_count: int) -> None:
+        super().__init__(
+            f"selection.overrides[{override_index}] ends after the reference "
+            f"timeline ({timeline_sample_count} samples)."
+        )
+        self.override_index = override_index
+        self.timeline_sample_count = timeline_sample_count
 
 
 def is_supported_audio_path(path: str | Path) -> bool:
@@ -1807,3 +1851,172 @@ def write_multi_audio_outputs(
         selection_file=final_paths[CHANNEL_SELECTION_FILE_NAME],
         merged_audio=merged,
     )
+
+
+@dataclass(frozen=True)
+class MultiAudioSelectionPlan:
+    """Every stage result of one job, from decoding up to the channel plan.
+
+    ``selection`` includes the manual overrides and ``automatic_selection``
+    is the plan without them.  ``aligned_signals`` are the inputs warped onto
+    the reference timeline; rendering reuses them instead of warping again.
+    """
+
+    prepared: PreparedMultiAudio
+    alignment: MultiAudioAlignment
+    aligned_signals: tuple[AnalysisSignal, ...]
+    quality: ChannelQualityReport
+    automatic_selection: ChannelSelectionReport
+    selection: ChannelSelectionReport
+
+    @property
+    def timeline_sample_count(self) -> int:
+        return self.selection.timeline_sample_count
+
+
+@dataclass(frozen=True)
+class MultiAudioPreprocessingResult:
+    """A reviewed channel plan and the published merged WAV and diagnostics."""
+
+    plan: MultiAudioSelectionPlan
+    outputs: MultiAudioOutputs
+
+
+def _report_stage(on_stage: Callable[[str], None] | None, stage: str) -> None:
+    if on_stage is not None:
+        on_stage(stage)
+
+
+def plan_multi_audio_selection(
+    input_paths: Iterable[str | Path],
+    *,
+    reference_index: int = 0,
+    manual_offsets_ms: Mapping[int, int] | None = None,
+    window_seconds: float,
+    hop_seconds: float,
+    overrides: Sequence[Mapping[str, int]] = (),
+    on_stage: Callable[[str], None] | None = None,
+) -> MultiAudioSelectionPlan:
+    """Decode, align, analyze and select channels for one multi-input job.
+
+    Manual offsets replace their inputs' automatic alignment, and manual
+    overrides (``start_sample``/``end_sample``/``input_index`` mappings on
+    the reference timeline) are applied after the automatic channel plan.
+    ``on_stage`` receives each :data:`PREPROCESSING_STAGES` name, except
+    ``rendering_merged_audio``, right before that stage starts.
+
+    Raises :class:`MultiAudioPreparationError` with every file failure,
+    :class:`UnresolvedAlignmentError` when an input is still unaligned after
+    the manual offsets, and :class:`SelectionOverrideError` for an override
+    that ends after the reference recording.  Unaligned inputs are never
+    silently dropped from the job.
+    """
+
+    from .quality import (
+        SpeechAnalysisConfig,
+        analyze_aligned_speech,
+        score_aligned_quality,
+    )
+    from .select import ChannelSelectionOverride, select_channels
+
+    speech_config = SpeechAnalysisConfig(
+        window_seconds=window_seconds,
+        hop_seconds=hop_seconds,
+    )
+
+    _report_stage(on_stage, "decoding_audio")
+    prepared = prepare_multi_audio_inputs(input_paths)
+    # Overrides only need the reference length, so a bad one is rejected
+    # before the comparatively slow alignment and analysis stages run.
+    timeline_sample_count = _timeline_sample_count(prepared, reference_index)
+    manual_overrides: list[ChannelSelectionOverride] = []
+    for index, item in enumerate(overrides):
+        if item["end_sample"] > timeline_sample_count:
+            raise SelectionOverrideError(index, timeline_sample_count)
+        manual_overrides.append(
+            ChannelSelectionOverride(
+                item["start_sample"],
+                item["end_sample"],
+                item["input_index"],
+            )
+        )
+
+    _report_stage(on_stage, "aligning_audio")
+    alignment = apply_manual_alignment_offsets(
+        align_prepared_inputs(prepared, reference_index=reference_index),
+        manual_offsets_ms or {},
+    )
+    if alignment.failures:
+        raise UnresolvedAlignmentError(alignment)
+    aligned_signals = warp_prepared_inputs(prepared, alignment)
+
+    _report_stage(on_stage, "detecting_speech")
+    speech_report = analyze_aligned_speech(
+        aligned_signals,
+        reference_index=alignment.reference_index,
+        config=speech_config,
+    )
+
+    _report_stage(on_stage, "assessing_channels")
+    quality = score_aligned_quality(aligned_signals, speech_report)
+
+    _report_stage(on_stage, "selecting_channels")
+    automatic_selection = select_channels(quality)
+    return MultiAudioSelectionPlan(
+        prepared=prepared,
+        alignment=alignment,
+        aligned_signals=aligned_signals,
+        quality=quality,
+        automatic_selection=automatic_selection,
+        selection=(
+            select_channels(quality, overrides=tuple(manual_overrides))
+            if manual_overrides
+            else automatic_selection
+        ),
+    )
+
+
+def run_multi_audio_preprocessing(
+    input_paths: Iterable[str | Path],
+    output_directory: str | Path,
+    *,
+    reference_index: int = 0,
+    manual_offsets_ms: Mapping[int, int] | None = None,
+    window_seconds: float,
+    hop_seconds: float,
+    overrides: Sequence[Mapping[str, int]] = (),
+    input_labels: Sequence[str] | None = None,
+    source_path_policy: str = DEFAULT_SOURCE_PATH_POLICY,
+    merged_audio_config: MergedAudioConfig | None = None,
+    on_stage: Callable[[str], None] | None = None,
+) -> MultiAudioPreprocessingResult:
+    """Run every pre-processing stage and publish the transcription input.
+
+    The result's ``merged_16k_mono.wav`` covers exactly the reference
+    recording from its first sample, so timestamps measured on it are
+    reference-timeline timestamps.  ``on_stage`` receives every
+    :data:`PREPROCESSING_STAGES` name in order; the errors are those of
+    :func:`plan_multi_audio_selection`.
+    """
+
+    plan = plan_multi_audio_selection(
+        input_paths,
+        reference_index=reference_index,
+        manual_offsets_ms=manual_offsets_ms,
+        window_seconds=window_seconds,
+        hop_seconds=hop_seconds,
+        overrides=overrides,
+        on_stage=on_stage,
+    )
+    _report_stage(on_stage, "rendering_merged_audio")
+    outputs = write_multi_audio_outputs(
+        output_directory,
+        plan.prepared,
+        plan.alignment,
+        plan.selection,
+        aligned_signals=plan.aligned_signals,
+        config=merged_audio_config,
+        input_labels=input_labels,
+        source_path_policy=source_path_policy,
+    )
+    return MultiAudioPreprocessingResult(plan=plan, outputs=outputs)

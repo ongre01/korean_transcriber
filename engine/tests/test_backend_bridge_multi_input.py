@@ -6,6 +6,7 @@ import math
 from pathlib import Path
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 
@@ -112,30 +113,65 @@ class BackendBridgeMultiInputTests(unittest.TestCase):
             {0: 0, 1: -125},
         )
 
-    def test_valid_manifest_runtime_fails_cleanly_until_pipeline_is_connected(self) -> None:
-        manifest_path = self.write_manifest(self.valid_manifest())
-        output = StringIO()
-        diagnostic = StringIO()
+    def test_valid_manifest_settings_reach_the_multi_input_pipeline(self) -> None:
+        payload = self.valid_manifest()
+        payload["selection"]["overrides"] = [
+            {"start_sample": 0, "end_sample": 16_000, "input_index": 1},
+        ]
+        args = self.parse_manifest(payload)
+        calls = []
 
-        with mock.patch.object(
-            backend_bridge.importlib,
-            "import_module",
-            side_effect=AssertionError("single-input engine must not be imported"),
-        ):
-            result = backend_bridge.main(
-                [
-                    "--multi-input-manifest", str(manifest_path),
-                    "--model-dir", str(self.model_dir),
-                ],
-                stdout=output,
-                stderr=diagnostic,
+        def run_multi_audio_preprocessing(paths, output_dir, **options):
+            calls.append((paths, output_dir, options))
+            options["on_stage"]("decoding_audio")
+            raise RuntimeError("stopped by the test")
+
+        multimic = SimpleNamespace(
+            run_multi_audio_preprocessing=run_multi_audio_preprocessing,
+            MultiAudioPreparationError=type("PreparationError", (Exception,), {}),
+            UnresolvedAlignmentError=type("AlignmentError", (Exception,), {}),
+            SelectionOverrideError=type("OverrideError", (Exception,), {}),
+        )
+        engine = SimpleNamespace(
+            read_optional_text=lambda _path: "",
+            available_devices=lambda: ["CPU"],
+            decode_audio_16k_mono=mock.Mock(
+                side_effect=AssertionError("no input may be transcribed on its own")
+            ),
+        )
+        output = StringIO()
+
+        with self.assertRaises(backend_bridge.BridgeFailure) as raised:
+            backend_bridge.run_bridge(
+                args,
+                engine,
+                backend_bridge.EventWriter(output),
+                multimic_module=multimic,
             )
 
-        self.assertEqual(result, 1, diagnostic.getvalue())
-        events = validate_stream(output.getvalue().splitlines(), result)
-        self.assertEqual(len(events), 1)
-        self.assertIsInstance(events[0], ErrorEvent)
-        self.assertIn("not available", events[0].message)
+        self.assertEqual(
+            str(raised.exception),
+            "Multi-input audio decoding failed: stopped by the test",
+        )
+        engine.decode_audio_16k_mono.assert_not_called()
+        self.assertEqual(len(calls), 1)
+        paths, output_dir, options = calls[0]
+        self.assertEqual(paths, [str(path.resolve()) for path in self.input_paths])
+        self.assertEqual(output_dir, self.input_paths[0].resolve().parent)
+        del options["on_stage"]
+        self.assertEqual(
+            options,
+            {
+                "reference_index": 0,
+                "manual_offsets_ms": {0: 0, 1: -125},
+                "window_seconds": 3.0,
+                "hop_seconds": 1.0,
+                "overrides": [
+                    {"start_sample": 0, "end_sample": 16_000, "input_index": 1},
+                ],
+                "input_labels": ["테이블 중앙", "발표자 근처"],
+            },
+        )
 
     def test_manifest_accepts_more_than_recommended_input_count(self) -> None:
         payload = self.valid_manifest()

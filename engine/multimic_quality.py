@@ -7,8 +7,9 @@ command runs the already implemented stages in a cancellable ``QProcess``:
 preparation, alignment with the user's reviewed manual offsets, speech and
 quality analysis, and channel selection including the manifest's manual
 overrides.  It never renders audio and never writes to a source file.
-:func:`plan_channel_selection` exposes the same orchestration so a later
-rendering/transcription stage uses the plan the user reviewed.
+:func:`plan_channel_selection` delegates to
+``multimic.plan_multi_audio_selection``, the orchestration the transcription
+bridge also uses, so the rendered audio follows the plan the user reviewed.
 
 stdout is reserved for exactly one strict JSON object.  Diagnostic output and
 tracebacks are written to stderr.  Inputs that are still unaligned after the
@@ -434,56 +435,32 @@ def plan_channel_selection(
         raw_overrides,
     ) = _manifest_settings(manifest)
 
-    prepared = engine.prepare_multi_audio_inputs(paths)
-    alignment = engine.apply_manual_alignment_offsets(
-        engine.align_prepared_inputs(
-            prepared,
+    # The transcription bridge plans through the same pipeline function, so
+    # the merged audio it renders is the plan reviewed here.
+    try:
+        plan = engine.plan_multi_audio_selection(
+            paths,
             reference_index=reference_index,
-        ),
-        manual_offsets,
-    )
-    if alignment.failures:
-        raise UnresolvedAlignmentError(alignment)
-
-    quality = engine.analyze_prepared_quality(
-        prepared,
-        alignment,
-        speech_config=engine.SpeechAnalysisConfig(
+            manual_offsets_ms=manual_offsets,
             window_seconds=window_seconds,
             hop_seconds=hop_seconds,
-        ),
-    )
-    overrides = []
-    for index, item in enumerate(raw_overrides):
-        if item["end_sample"] > quality.timeline_sample_count:
-            raise QualityContractError(
-                "invalid_override",
-                f"selection.overrides[{index}] ends after the reference timeline "
-                f"({quality.timeline_sample_count} samples).",
-            )
-        overrides.append(
-            engine.ChannelSelectionOverride(
-                item["start_sample"],
-                item["end_sample"],
-                item["input_index"],
-            )
+            overrides=raw_overrides,
         )
+    except engine.UnresolvedAlignmentError as exc:
+        raise UnresolvedAlignmentError(exc.alignment) from exc
+    except engine.SelectionOverrideError as exc:
+        raise QualityContractError("invalid_override", str(exc)) from exc
 
-    automatic_selection = engine.select_channels(quality)
     return ChannelSelectionPlan(
         sources=tuple(sources),
         manual_offsets=dict(manual_offsets),
         window_seconds=window_seconds,
         hop_seconds=hop_seconds,
-        prepared=prepared,
-        alignment=alignment,
-        quality=quality,
-        automatic_selection=automatic_selection,
-        selection=(
-            engine.select_channels(quality, overrides=tuple(overrides))
-            if overrides
-            else automatic_selection
-        ),
+        prepared=plan.prepared,
+        alignment=plan.alignment,
+        quality=plan.quality,
+        automatic_selection=plan.automatic_selection,
+        selection=plan.selection,
     )
 
 

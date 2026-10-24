@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 from contextlib import redirect_stdout
+from dataclasses import dataclass
 import gc
 import importlib
 import json
@@ -42,6 +43,16 @@ MULTI_INPUT_ALIGNMENT_MODE = "auto"
 MULTI_INPUT_SELECTION_MODE = "automatic"
 MIN_SIGNED_64_BIT_INTEGER = -(2 ** 63)
 MAX_SIGNED_64_BIT_INTEGER = 2 ** 63 - 1
+# User-facing prefixes for unexpected failures, keyed by the multi-input
+# pre-processing stage that was running.
+MULTI_INPUT_STAGE_FAILURES = {
+    "decoding_audio": "Multi-input audio decoding failed",
+    "aligning_audio": "Multi-input time alignment failed",
+    "detecting_speech": "Multi-input speech detection failed",
+    "assessing_channels": "Channel quality analysis failed",
+    "selecting_channels": "Channel selection failed",
+    "rendering_merged_audio": "Merged audio could not be created",
+}
 
 
 class BridgeArgumentError(ValueError):
@@ -49,9 +60,22 @@ class BridgeArgumentError(ValueError):
 
 
 class BridgeFailure(RuntimeError):
-    def __init__(self, message: str, exit_code: int = 1):
+    """A failure reported to the user as ``message``.
+
+    ``diagnostic`` holds structured detail that only goes to stderr, next to
+    the traceback, so the ``error`` event stays short.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        exit_code: int = 1,
+        *,
+        diagnostic: str | None = None,
+    ):
         super().__init__(message)
         self.exit_code = exit_code
+        self.diagnostic = diagnostic
 
 
 class BridgeArgumentParser(argparse.ArgumentParser):
@@ -815,28 +839,25 @@ def _load_diarize_function() -> Callable:
     return importlib.import_module("diarization").diarize_audio
 
 
-def run_bridge(
+@dataclass(frozen=True)
+class _TranscriptionContext:
+    """Settings both input modes resolve before any audio is processed."""
+
+    model_dir: Path
+    output_dir: Path
+    hotwords: str
+    initial_prompt: str
+    device: str
+    npu_context_tokens: bool
+
+
+def _prepare_transcription(
     args: argparse.Namespace,
     engine,
     writer: EventWriter,
     *,
-    diarize_function: Callable | None = None,
-) -> int:
-    if getattr(args, "multi_input_manifest", None) is not None:
-        # The manifest contract is intentionally established before the
-        # alignment/selection pipeline is connected. Never misrepresent a
-        # validated multi-input job by transcribing only its reference file.
-        raise BridgeFailure(
-            "Multi-input manifest processing is not available in this bridge yet."
-        )
-
-    writer.state("preparing")
-    writer.progress(None)
-
-    input_path = Path(args.input).expanduser().resolve()
-    if not input_path.is_file():
-        raise BridgeFailure(f"Input file not found: {input_path}", exit_code=2)
-
+    default_output_dir: Path,
+) -> _TranscriptionContext:
     model_dir = Path(args.model_dir).expanduser().resolve()
     if not model_dir.is_dir():
         raise BridgeFailure(f"Model directory not found: {model_dir}", exit_code=3)
@@ -844,7 +865,7 @@ def run_bridge(
     output_dir = (
         Path(args.output_dir).expanduser().resolve()
         if args.output_dir
-        else input_path.parent
+        else default_output_dir
     )
 
     hotwords = _call(
@@ -877,13 +898,36 @@ def run_bridge(
             f"{context_source}를 적용하기 위해 NPU 단어 타임스탬프 모드를 사용합니다. "
             "최초 모델 준비 시간이 길어질 수 있습니다."
         )
-
-    writer.state("decoding_audio")
-    writer.progress(None)
-    audio = _call(
-        "Audio decoding failed",
-        lambda: engine.decode_audio_16k_mono(input_path),
+    return _TranscriptionContext(
+        model_dir=model_dir,
+        output_dir=output_dir,
+        hotwords=hotwords,
+        initial_prompt=initial_prompt,
+        device=device,
+        npu_context_tokens=npu_context_tokens,
     )
+
+
+def _transcribe_and_save(
+    args: argparse.Namespace,
+    engine,
+    writer: EventWriter,
+    context: _TranscriptionContext,
+    audio,
+    result_input_path: Path,
+    *,
+    diarize_function: Callable | None = None,
+    artifacts: dict[str, str] | None = None,
+) -> int:
+    """Run the Whisper, diarization and saving stages shared by both modes.
+
+    ``audio`` is 16 kHz mono and starts at the time origin of the result, so
+    every segment, TXT and SRT timestamp is measured on that timeline.
+    ``result_input_path`` names the TXT/SRT files exactly as the existing
+    engine names them for a user-selected file.  ``artifacts`` are the extra
+    multi-input files reported with ``completed``.
+    """
+
     duration = len(audio) / engine.TARGET_SAMPLE_RATE
 
     speech_regions: list[SpeechRegion] | None = None
@@ -917,15 +961,15 @@ def run_bridge(
         pipe = _call(
             "Whisper model could not be loaded",
             lambda: engine.load_whisper_pipeline(
-                model_dir,
-                device,
+                context.model_dir,
+                context.device,
                 args.model_label,
-                word_timestamps=npu_context_tokens,
+                word_timestamps=context.npu_context_tokens,
             ),
         )
         initial_prompt_plan = _call(
             "Initial prompt validation failed",
-            lambda: engine.prepare_initial_prompt(pipe, initial_prompt),
+            lambda: engine.prepare_initial_prompt(pipe, context.initial_prompt),
         )
         if initial_prompt_plan.warning:
             writer.warning(initial_prompt_plan.warning)
@@ -935,9 +979,9 @@ def run_bridge(
                 pipe,
                 args.language,
                 args.beams,
-                hotwords,
+                context.hotwords,
                 initial_prompt=initial_prompt_plan.value,
-                word_timestamps=npu_context_tokens,
+                word_timestamps=context.npu_context_tokens,
             ),
         )
 
@@ -1045,14 +1089,14 @@ def run_bridge(
     writer.progress(None)
 
     def save_result():
-        output_dir.mkdir(parents=True, exist_ok=True)
+        context.output_dir.mkdir(parents=True, exist_ok=True)
         paths = engine.save_outputs(
-            input_path,
+            result_input_path,
             segments,
             duration,
             args.output_suffix,
             diarized=args.diarization,
-            output_dir=output_dir,
+            output_dir=context.output_dir,
         )
         txt_path, srt_path = (Path(path).resolve() for path in paths)
         if not txt_path.is_file() or not srt_path.is_file():
@@ -1064,9 +1108,251 @@ def run_bridge(
         writer.progress(100, duration, duration)
     else:
         writer.progress(100)
-    writer.completed(txt_path, srt_path)
+    writer.completed(txt_path, srt_path, **(artifacts or {}))
     return 0
 
+
+def _run_single_input(
+    args: argparse.Namespace,
+    engine,
+    writer: EventWriter,
+    *,
+    diarize_function: Callable | None = None,
+) -> int:
+    writer.state("preparing")
+    writer.progress(None)
+
+    input_path = Path(args.input).expanduser().resolve()
+    if not input_path.is_file():
+        raise BridgeFailure(f"Input file not found: {input_path}", exit_code=2)
+
+    context = _prepare_transcription(
+        args,
+        engine,
+        writer,
+        default_output_dir=input_path.parent,
+    )
+
+    writer.state("decoding_audio")
+    writer.progress(None)
+    audio = _call(
+        "Audio decoding failed",
+        lambda: engine.decode_audio_16k_mono(input_path),
+    )
+    return _transcribe_and_save(
+        args,
+        engine,
+        writer,
+        context,
+        audio,
+        input_path,
+        diarize_function=diarize_function,
+    )
+
+
+def _input_label(labels: list[str], input_index: int | None) -> str | None:
+    if input_index is None or not 0 <= input_index < len(labels):
+        return None
+    return labels[input_index]
+
+
+def _preparation_failure(exc, labels: list[str]) -> BridgeFailure:
+    details = []
+    for failure in exc.failures:
+        label = _input_label(labels, failure.input_index)
+        details.append(f"{label}: {failure.message}" if label else failure.message)
+    message = "Multi-input audio could not be prepared."
+    if details:
+        message += " " + " ".join(details)
+    return BridgeFailure(
+        message,
+        diagnostic=(
+            "Multi-input preparation diagnostics:\n"
+            + json.dumps(exc.to_dict(), ensure_ascii=False, indent=2)
+        ),
+    )
+
+
+def _unresolved_alignment_failure(alignment, labels: list[str]) -> BridgeFailure:
+    unresolved = sorted(alignment.failures, key=lambda item: item.input_index)
+    details = []
+    for item in unresolved:
+        label = _input_label(labels, item.input_index) or f"input {item.input_index}"
+        reason = item.warning_reason or item.failure_reason
+        details.append(f"{label} ({reason})" if reason else label)
+    return BridgeFailure(
+        "Time alignment is unresolved for "
+        + "; ".join(details)
+        + ". Review the alignment and enter a manual offset for these inputs "
+        "before transcribing.",
+        diagnostic=(
+            "Unresolved multi-input alignment:\n"
+            + json.dumps(
+                [item.to_dict() for item in unresolved],
+                ensure_ascii=False,
+                indent=2,
+            )
+        ),
+    )
+
+
+def _run_multi_audio_preprocessing(
+    multimic,
+    manifest: dict[str, object],
+    output_dir: Path,
+    writer: EventWriter,
+):
+    """Report each pre-processing stage and map its failures for the user.
+
+    Expected outcomes (unreadable inputs, unresolved alignment, an override
+    beyond the reference recording) become concise ``error`` messages with
+    the structured detail kept for stderr; anything else is reported with the
+    stage it interrupted.
+    """
+
+    inputs = manifest["inputs"]
+    labels = [item["label"] for item in inputs]
+    alignment = manifest["alignment"]
+    selection = manifest["selection"]
+    current_stage: str | None = None
+
+    def report_stage(stage: str) -> None:
+        nonlocal current_stage
+        current_stage = stage
+        writer.state(stage)
+        writer.progress(None)
+
+    try:
+        return multimic.run_multi_audio_preprocessing(
+            [item["path"] for item in inputs],
+            output_dir,
+            reference_index=manifest["reference_index"],
+            manual_offsets_ms=alignment["manual_offsets_ms"],
+            window_seconds=selection["window_seconds"],
+            hop_seconds=selection["hop_seconds"],
+            overrides=selection.get("overrides", []),
+            input_labels=labels,
+            on_stage=report_stage,
+        )
+    except multimic.MultiAudioPreparationError as exc:
+        raise _preparation_failure(exc, labels) from exc
+    except multimic.UnresolvedAlignmentError as exc:
+        raise _unresolved_alignment_failure(exc.alignment, labels) from exc
+    except multimic.SelectionOverrideError as exc:
+        raise BridgeFailure(
+            f"Invalid bridge arguments: multi-input manifest {exc}",
+            exit_code=2,
+        ) from exc
+    except (BridgeFailure, ModuleNotFoundError):
+        raise
+    except Exception as exc:
+        prefix = MULTI_INPUT_STAGE_FAILURES.get(
+            current_stage,
+            "Multi-input pre-processing failed",
+        )
+        raise BridgeFailure(_failure_message(prefix, exc)) from exc
+
+
+def _warn_about_channel_plan(writer: EventWriter, preprocessing) -> None:
+    selection_warnings = preprocessing.plan.selection.warnings
+    if selection_warnings:
+        codes = ", ".join(sorted({item.code for item in selection_warnings}))
+        writer.warning(
+            f"채널 선택 경고 {len(selection_warnings)}건({codes})이 있습니다. "
+            "해당 구간은 전사 품질이 낮을 수 있으며 상세 내용은 "
+            f"{Path(preprocessing.outputs.selection_file).name}에 기록했습니다."
+        )
+    merged_audio = preprocessing.outputs.merged_audio
+    if merged_audio.padding_sample_count > 0:
+        seconds = merged_audio.padding_sample_count / merged_audio.sample_rate
+        writer.warning(
+            f"선택된 입력에 녹음이 없는 {seconds:.1f}초를 무음으로 채워 "
+            "기준 녹음의 시간축을 유지했습니다."
+        )
+
+
+def _run_multi_input(
+    args: argparse.Namespace,
+    engine,
+    writer: EventWriter,
+    *,
+    diarize_function: Callable | None = None,
+    multimic_module=None,
+) -> int:
+    writer.state("preparing")
+    writer.progress(None)
+
+    manifest = args.multi_input_manifest_data
+    reference_path = Path(manifest["inputs"][manifest["reference_index"]]["path"])
+    # Model, device and prompt problems are reported before the comparatively
+    # long alignment and analysis stages run.
+    context = _prepare_transcription(
+        args,
+        engine,
+        writer,
+        default_output_dir=reference_path.parent,
+    )
+
+    multimic = multimic_module or importlib.import_module("multimic")
+    preprocessing = _run_multi_audio_preprocessing(
+        multimic,
+        manifest,
+        context.output_dir,
+        writer,
+    )
+    _warn_about_channel_plan(writer, preprocessing)
+
+    # The merged WAV is transcribed exactly like a user-selected file.  It
+    # starts at the reference recording's first sample, so Whisper and
+    # diarization timestamps are reference-timeline timestamps.
+    outputs = preprocessing.outputs
+    merged_audio_file = Path(outputs.merged_audio_file)
+    audio = _call(
+        "Merged audio could not be decoded",
+        lambda: engine.decode_audio_16k_mono(merged_audio_file),
+    )
+    if len(audio) != outputs.merged_audio.sample_count:
+        raise BridgeFailure(
+            "Merged audio does not match the reference recording timeline: "
+            f"expected {outputs.merged_audio.sample_count} samples, "
+            f"decoded {len(audio)}."
+        )
+    return _transcribe_and_save(
+        args,
+        engine,
+        writer,
+        context,
+        audio,
+        merged_audio_file,
+        diarize_function=diarize_function,
+        artifacts=outputs.to_dict(),
+    )
+
+
+def run_bridge(
+    args: argparse.Namespace,
+    engine,
+    writer: EventWriter,
+    *,
+    diarize_function: Callable | None = None,
+    multimic_module=None,
+) -> int:
+    """Run one job; both input modes end with the same ``completed`` contract."""
+
+    if getattr(args, "multi_input_manifest", None) is not None:
+        return _run_multi_input(
+            args,
+            engine,
+            writer,
+            diarize_function=diarize_function,
+            multimic_module=multimic_module,
+        )
+    return _run_single_input(
+        args,
+        engine,
+        writer,
+        diarize_function=diarize_function,
+    )
 
 def _write_diagnostic(diagnostic: TextIO, exc: BaseException) -> None:
     traceback.print_exception(type(exc), exc, exc.__traceback__, file=diagnostic)
@@ -1113,10 +1399,7 @@ def main(
 
     try:
         with redirect_stdout(diagnostic):
-            if (
-                engine_module is None
-                and getattr(args, "multi_input_manifest", None) is None
-            ):
+            if engine_module is None:
                 engine_module = importlib.import_module("transcribe_npu")
             exit_code = run_bridge(
                 args,
@@ -1130,6 +1413,8 @@ def main(
         return exit_code
     except BridgeFailure as exc:
         exit_code = _report_failure(writer, str(exc), exc.exit_code)
+        if exc.diagnostic:
+            diagnostic.write(exc.diagnostic.rstrip("\n") + "\n")
         _write_diagnostic(diagnostic, exc)
         return exit_code
     except ModuleNotFoundError as exc:

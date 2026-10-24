@@ -51,8 +51,8 @@ JSON의 `number`는 유한한 값이어야 하며 초 단위 시간은 0 이상�
 | `preparing` | 공통 | 인자·경로·장치 확인 |
 | `decoding_audio` | 공통 | 입력 디코딩(다중 모드는 모든 입력의 분석용 디코딩) |
 | `aligning_audio` | 다중 | 기준 입력 대비 오프셋·드리프트 추정과 수동 오프셋 적용 |
-| `detecting_speech` | 공통 | 무음 구간 감지(단일 모드는 `--skip-silence`일 때만) |
-| `assessing_channels` | 다중 | 입력별 발화·음질 분석 |
+| `detecting_speech` | 공통 | 발화/무음 구간 감지(다중 모드는 정렬된 모든 입력의 VAD, 단일 입력과 다중 모드의 통합 WAV는 `--skip-silence`일 때만) |
+| `assessing_channels` | 다중 | VAD 결과를 이용한 입력별 음질 점수 산정 |
 | `selecting_channels` | 다중 | 구간별 채널 선택과 수동 override 적용 |
 | `rendering_merged_audio` | 다중 | 통합 16 kHz mono WAV와 `alignment.json`/`channel_selection.json` 생성 |
 | `loading_model` | 공통 | Whisper 모델 로딩 |
@@ -61,9 +61,12 @@ JSON의 `number`는 유한한 값이어야 하며 초 단위 시간은 0 이상�
 | `saving_result` | 공통 | TXT/SRT 저장 |
 
 표의 순서는 권장 진행 순서이며 수신기는 상태 순서를 검증하지 않는다. 다중 전용
-상태 4개는 단일 입력 실행에서 보내지 않는다. 다중 모드는 `rendering_merged_audio`
-뒤 통합 WAV를 단일 입력처럼 `loading_model`, `transcribing`, `diarization`,
-`saving_result`로 처리한다.
+상태 4개는 단일 입력 실행에서 보내지 않는다. 다중 모드는 `preparing`,
+`decoding_audio`, `aligning_audio`, `detecting_speech`, `assessing_channels`,
+`selecting_channels`, `rendering_merged_audio` 순서로 전처리한 뒤 통합 WAV를 단일
+입력처럼 `detecting_speech`(`--skip-silence`일 때만), `loading_model`,
+`transcribing`, `diarization`(`--diarization`일 때만), `saving_result`로 처리한다.
+따라서 다중 모드에서 `--skip-silence`를 쓰면 `detecting_speech`가 두 번 올 수 있다.
 
 ### `progress`
 
@@ -116,6 +119,10 @@ wire의 화자 번호는 **1부터 시작하는 양의 정수**다. 기존 Pytho
 Bridge는 경로를 `Path.resolve()`한 절대 경로로 직렬화한다. Qt는 프로세스 working
 directory가 아닌 이 절대 경로를 그대로 해석한다. `--output-dir`이 없으면 입력
 파일의 부모 폴더, 있으면 해당 폴더에 `<입력 stem><output suffix>.txt/.srt`를 만든다.
+다중 입력 모드에서 전사되는 입력은 통합 WAV이므로 결과 이름은
+`merged_16k_mono<output suffix>.txt/.srt`이고, `--output-dir`이 없으면 기준 입력의
+부모 폴더에 통합 WAV·진단 파일과 함께 만든다. 세그먼트, TXT, SRT의 시간은 모두 기준
+입력 시간축의 초다.
 
 다중 입력 모드의 `completed`는 위 두 필드를 그대로 유지하고 다음 세 필드를
 **모두 함께** 추가한다. 세 필드는 비어 있지 않은 절대 경로 `string`이며 `null`은
@@ -168,7 +175,7 @@ directory가 아닌 이 절대 경로를 그대로 해석한다. `--output-dir`�
 | `--device AUTO\|NPU\|CPU\|GPU` | `AUTO` | `AUTO`는 가용 장치에서 NPU, GPU, CPU 순으로 하나를 선택한 뒤 기존 엔진에 concrete device를 전달한다. 명시 장치는 사용할 수 없으면 오류다. |
 | `--diarization` | off | 기존 엔진의 `--diarize`에 대응한다. |
 | `--num-speakers auto\|2\|3\|4\|5` | `auto` | `auto -> -1`, 숫자는 같은 정수로 기존 `num_speakers`에 전달한다. diarization이 꺼져 있으면 무시한다. |
-| `--output-dir PATH` | 입력 부모 폴더 | 결과 폴더. |
+| `--output-dir PATH` | 입력 부모 폴더(다중 모드는 기준 입력의 부모 폴더) | 결과 폴더. 다중 모드는 통합 WAV와 진단 JSON도 이 폴더에 만든다. |
 | `--output-suffix TEXT` | 빈 문자열 | 입력 stem 뒤에 붙는다. |
 | `--model-dir PATH` | 필수 | 기존 Whisper OpenVINO 모델 폴더. |
 | `--model-label TEXT` | 빈 문자열 | 로그/캐시 구분용 모델 레이블. |
@@ -237,10 +244,37 @@ directory가 아닌 이 절대 경로를 그대로 해석한다. `--output-dir`�
 - JSON의 `NaN`, `Infinity`, `-Infinity`, 잘못된 필드 타입, 없는 입력 파일은
   사용자용 인자 오류로 거부한다.
 
-이 단계의 계약은 매니페스트 전달과 검증을 정의한다. 정렬, 채널 선택, 통합 WAV
-생성과 Whisper 연결은 다중 입력 전처리 실행 경로에서 이 검증 결과를 소비한다.
-그 실행 경로가 연결되기 전에는 정상 매니페스트도 단일 입력으로 대체 실행하지
-않으며, Bridge는 `error` 이벤트와 종료 코드 1로 기능 미연결을 명시한다.
+### 다중 입력 실행 경로
+
+Bridge는 검증된 매니페스트를 `multimic.run_multi_audio_preprocessing()`에 넘겨
+디코딩 → 정렬(수동 오프셋 적용) → VAD → 음질 분석 → 채널 선택(수동 override
+적용) → 통합 WAV·진단 JSON 생성 순서로 처리하고, 각 단계 시작 시 해당 `state`와
+`progress.value=null`을 보낸다. 채널 선택 계획은 아래 음질 분석 단발 명령과 같은
+`multimic.plan_multi_audio_selection()`으로 만들므로, 같은 매니페스트로 GUI가 검토한
+계획과 전사에 쓰이는 계획이 같다. 모델 폴더·장치·hotwords/초기 프롬프트 확인은 긴
+전처리 전에 `preparing`에서 끝낸다.
+
+통합 WAV(`merged_16k_mono.wav`)는 기준 입력의 첫 샘플부터 기준 입력과 같은 길이로
+만들어진다. Bridge는 이를 기존 엔진의 `decode_audio_16k_mono()`로 다시 읽어 단일
+입력과 같은 Whisper·화자 분리·저장 단계에 넘기며, 디코딩된 길이가 기준 시간축과
+다르면 오류로 중단한다. 화자 분리 ON/OFF, `--skip-silence`, hotwords와 초기
+프롬프트 정책은 단일 입력과 같다. 어떤 입력도 단독으로 전사하지 않는다.
+
+채널 선택 경고가 있거나 선택된 입력에 녹음이 없는 구간을 무음으로 채운 경우
+`warning`으로 알리고 상세 내용은 `channel_selection.json`에 남긴다. 실패는 다음과
+같이 사용자용 `error` 메시지와 stderr 진단으로 나뉜다. 원본 입력 파일은 읽기만
+한다.
+
+| 실패 | `error` 메시지 | 종료 코드 | stderr |
+|---|---|---|---|
+| 입력 디코딩·검증 실패 | `Multi-input audio could not be prepared.` 뒤에 입력 레이블별 사유 | 1 | 입력별 실패 JSON(`errors[]`)과 traceback |
+| 수동 오프셋 없이 자동 정렬 실패 | `Time alignment is unresolved for <레이블> (<사유>)...` | 1 | 미해결 입력의 정렬 진단 JSON과 traceback |
+| 기준 녹음 길이를 넘는 `selection.overrides` | `Invalid bridge arguments: multi-input manifest selection.overrides[i] ends after the reference timeline (...)` | 2 | traceback |
+| 그 밖의 단계 오류 | 실행 중이던 단계의 접두어(예: `Channel selection failed: ...`) | 1 | traceback |
+
+`rendering_merged_audio` 전에 실패하면 결과 파일을 만들지 않는다. 통합 WAV와 진단
+JSON은 세 파일이 모두 완성된 뒤에만 최종 이름으로 게시되며, 그 뒤 Whisper·화자
+분리·저장 단계에서 실패해도 이미 게시된 세 파일은 남는다.
 
 ### 다중 입력 음질 분석 단발 명령
 
