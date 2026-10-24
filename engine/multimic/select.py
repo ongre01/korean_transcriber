@@ -41,6 +41,43 @@ _REASON_PRIORITY = {
     "best_quality": 9,
 }
 
+# Human-readable meaning of each reason code, stored with the selection
+# history so ``channel_selection.json`` can be reviewed without this source.
+SELECTION_REASON_DESCRIPTIONS = {
+    "manual_override": "The user selected this input for the interval.",
+    "single_input_speech": (
+        "Speech was detected on this input only, so it is selected even "
+        "against the stability guards."
+    ),
+    "speech_preservation": (
+        "Speech was detected on inputs other than the previous one; switching "
+        "preserves it."
+    ),
+    "current_input_unavailable": (
+        "The previously selected input has no recording in this interval."
+    ),
+    "current_input_unscoreable": (
+        "The previously selected input has no usable quality score in this "
+        "interval."
+    ),
+    "fallback_most_valid": (
+        "No input has a usable quality score; the input with the most "
+        "recorded audio is kept."
+    ),
+    "better_quality": (
+        "Another input scored higher than the hysteresis margin after the "
+        "minimum hold elapsed."
+    ),
+    "hysteresis_hold": (
+        "Another input scored only marginally higher; the previous input is "
+        "kept to avoid needless switching."
+    ),
+    "minimum_hold": (
+        "The previous input is kept until the minimum hold time has elapsed."
+    ),
+    "best_quality": "This input has the highest quality score.",
+}
+
 
 def _finite_number(name: str, value: object) -> float:
     if isinstance(value, bool) or not isinstance(value, Real):
@@ -356,6 +393,10 @@ class ChannelSelectionReport:
         return self.segments
 
     @property
+    def input_count(self) -> int:
+        return len(self.quality_report.speech_report.inputs)
+
+    @property
     def switch_count(self) -> int:
         return sum(
             previous.selected_input_index != current.selected_input_index
@@ -363,6 +404,11 @@ class ChannelSelectionReport:
         )
 
     def to_dict(self) -> dict[str, object]:
+        used_reasons = _unique_reasons(
+            reason
+            for segment in self.segments
+            for reason in segment.reason_codes
+        )
         return {
             "version": 1,
             "sample_rate": int(self.sample_rate),
@@ -379,6 +425,10 @@ class ChannelSelectionReport:
             "warnings": [
                 warning.to_dict(self.sample_rate) for warning in self.warnings
             ],
+            "reason_descriptions": {
+                reason: SELECTION_REASON_DESCRIPTIONS.get(reason, reason)
+                for reason in used_reasons
+            },
             "quality_analysis": self.quality_report.to_dict(),
         }
 
@@ -1572,6 +1622,7 @@ select_optimal_channels = select_channels
 
 
 __all__ = [
+    "SELECTION_REASON_DESCRIPTIONS",
     "ChannelSelectionConfig",
     "ChannelSelectionOverride",
     "ChannelSelectionReport",

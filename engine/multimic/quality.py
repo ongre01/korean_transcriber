@@ -28,7 +28,7 @@ from .align import MultiAudioAlignment
 from .pipeline import (
     AnalysisSignal,
     PreparedMultiAudio,
-    warp_signal_to_reference_timeline,
+    warp_prepared_inputs,
 )
 
 try:  # Support both ``engine.multimic`` and the application's top-level layout.
@@ -2248,74 +2248,6 @@ def analyze_aligned_speech(
     )
 
 
-def _aligned_prepared_signals(
-    prepared: PreparedMultiAudio,
-    alignment: MultiAudioAlignment,
-) -> tuple[AnalysisSignal, ...]:
-    """Validate and warp prepared inputs onto the alignment reference axis.
-
-    Failed or manual-review alignment results are rejected by the existing
-    renderer.  They are never silently excluded from automatic integration.
-    """
-
-    if not isinstance(prepared, PreparedMultiAudio):
-        raise TypeError("prepared must be a PreparedMultiAudio")
-    if not isinstance(alignment, MultiAudioAlignment):
-        raise TypeError("alignment must be a MultiAudioAlignment")
-    if len(prepared.inputs) < 2:
-        raise ValueError("at least two prepared inputs are required")
-    if (
-        alignment.reference_index < 0
-        or alignment.reference_index >= len(prepared.inputs)
-    ):
-        raise ValueError("alignment reference_index is outside the input range")
-    if alignment.sample_rate != prepared.analysis_sample_rate:
-        raise ValueError("alignment and prepared sample rates must match")
-    if len(alignment.inputs) != len(prepared.inputs):
-        raise ValueError("alignment must contain one result for every prepared input")
-    input_indices = tuple(result.input_index for result in alignment.inputs)
-    if sorted(input_indices) != list(range(len(prepared.inputs))):
-        raise ValueError("alignment input indexes must cover every prepared input once")
-    if any(
-        result.reference_index != alignment.reference_index
-        for result in alignment.inputs
-    ):
-        raise ValueError(
-            "every alignment result must use the report reference_index"
-        )
-    if any(
-        item.sample_rate != prepared.analysis_sample_rate
-        for item in prepared.inputs
-    ):
-        raise ValueError(
-            "every prepared input must use the prepared analysis sample rate"
-        )
-
-    reference_result = alignment.result_for_input(alignment.reference_index)
-    if (
-        not reference_result.success
-        or reference_result.offset_samples != 0
-        or reference_result.time_scale != 1.0
-        or reference_result.correction_applied
-    ):
-        raise ValueError(
-            "the reference input alignment must be an unchanged identity transform"
-        )
-
-    timeline_sample_count = prepared.inputs[
-        alignment.reference_index
-    ].samples.size
-    aligned_signals = tuple(
-        warp_signal_to_reference_timeline(
-            item.analysis,
-            alignment.result_for_input(input_index),
-            timeline_sample_count,
-        )
-        for input_index, item in enumerate(prepared.inputs)
-    )
-    return aligned_signals
-
-
 def analyze_prepared_speech(
     prepared: PreparedMultiAudio,
     alignment: MultiAudioAlignment,
@@ -2324,7 +2256,7 @@ def analyze_prepared_speech(
 ) -> SpeechActivityReport:
     """Warp prepared inputs and analyze them on the reference axis."""
 
-    aligned_signals = _aligned_prepared_signals(prepared, alignment)
+    aligned_signals = warp_prepared_inputs(prepared, alignment)
     return analyze_aligned_speech(
         aligned_signals,
         reference_index=alignment.reference_index,
@@ -2341,7 +2273,7 @@ def analyze_prepared_quality(
 ) -> ChannelQualityReport:
     """Warp prepared inputs and calculate per-window channel quality."""
 
-    aligned_signals = _aligned_prepared_signals(prepared, alignment)
+    aligned_signals = warp_prepared_inputs(prepared, alignment)
     return analyze_aligned_quality(
         aligned_signals,
         reference_index=alignment.reference_index,
