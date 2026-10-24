@@ -11,7 +11,7 @@ without ever writing to a source file.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from hashlib import sha256
 import json
 import math
@@ -21,7 +21,7 @@ import os
 from pathlib import Path
 import shutil
 import tempfile
-from typing import TYPE_CHECKING, Iterable, Iterator, Sequence
+from typing import TYPE_CHECKING, Iterable, Iterator, Mapping, Sequence
 import wave
 
 import numpy as np
@@ -867,6 +867,76 @@ def align_prepared_inputs(
         reference_index=reference_index,
         config=config,
     )
+
+
+def apply_manual_alignment_offsets(
+    alignment: MultiAudioAlignment,
+    manual_offsets_ms: Mapping[int, int],
+) -> MultiAudioAlignment:
+    """Apply offsets the user entered after reviewing an automatic alignment.
+
+    A manual offset is an explicit decision (MM-DEV-006), so the input is
+    placed with that offset only, without clock-drift correction, whatever
+    its automatic status was.  The automatic evidence (confidence, windows)
+    is kept for diagnostics.  The reference input stays the identity
+    transform and therefore only accepts zero.  Inputs without a manual
+    offset keep their automatic result unchanged, including failures, so a
+    caller can still refuse unresolved inputs through ``failures``.
+    """
+
+    if not isinstance(alignment, MultiAudioAlignment):
+        raise TypeError("alignment must be a MultiAudioAlignment")
+    if not isinstance(manual_offsets_ms, Mapping):
+        raise TypeError("manual_offsets_ms must be a mapping")
+    input_indices = {item.input_index for item in alignment.inputs}
+    offsets: dict[int, int] = {}
+    for raw_index, raw_offset in manual_offsets_ms.items():
+        if isinstance(raw_index, bool) or isinstance(raw_offset, bool):
+            raise ValueError(
+                "manual offsets must map integer input indexes to integer milliseconds"
+            )
+        try:
+            input_index = operator.index(raw_index)
+            offset_ms = operator.index(raw_offset)
+        except TypeError as exc:
+            raise ValueError(
+                "manual offsets must map integer input indexes to integer milliseconds"
+            ) from exc
+        if input_index not in input_indices:
+            raise ValueError(
+                f"manual offset input index {input_index} is outside the input range"
+            )
+        if input_index == alignment.reference_index and offset_ms != 0:
+            raise ValueError("the reference input manual offset must be 0")
+        offsets[input_index] = offset_ms
+
+    results: list[InputAlignment] = []
+    for item in alignment.inputs:
+        offset_ms = offsets.get(item.input_index)
+        if offset_ms is None or item.input_index == alignment.reference_index:
+            results.append(item)
+            continue
+        # Exact integer rounding keeps very large offsets deterministic.
+        scaled, remainder = divmod(offset_ms * alignment.sample_rate, 1000)
+        offset_samples = scaled + (1 if remainder * 2 >= 1000 else 0)
+        results.append(
+            replace(
+                item,
+                offset_samples=offset_samples,
+                offset_ms=float(offset_samples * 1000.0 / alignment.sample_rate),
+                method="manual_offset",
+                failure=None,
+                time_scale=1.0,
+                post_correction_error_ms=None,
+                max_post_correction_error_ms=None,
+                correction_method="manual_offset",
+                correction_applied=False,
+                requires_manual_review=False,
+                warning=None,
+                drift_anchors=(),
+            )
+        )
+    return replace(alignment, inputs=tuple(results))
 
 
 def _finite_setting(name: str, value: object) -> float:

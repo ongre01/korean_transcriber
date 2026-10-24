@@ -7,6 +7,7 @@
 #include "backend/TranscriptSegment.h"
 #include "input/AudioFileInfo.h"
 #include "input/MultiAudioInputModel.h"
+#include "input/MultiAudioSelectionModel.h"
 #include "logging/AppLogger.h"
 #include "settings/Settings.h"
 
@@ -47,8 +48,10 @@ public:
     QString currentInputFile() const;
     bool hasValidInput() const;
     bool hasResolvedMultiAudioAlignment(QString *reason = nullptr) const;
+    bool hasCurrentMultiAudioSelection() const;
     QVector<MultiAudioInput> multiAudioInputs() const;
     int multiAudioReferenceRow() const noexcept;
+    MultiAudioSelectionPlan multiAudioSelectionPlan() const;
     AudioRecorder *audioRecorder() const noexcept;
     AudioFileInfo *audioFileInfo() const noexcept;
     BackendProcess *backendProcess() const noexcept;
@@ -152,6 +155,9 @@ private:
     qint64 m_recordingDurationMilliseconds = 0;
     QVector<MultiAudioInput> m_multiAudioInputs;
     int m_multiAudioReferenceRow = -1;
+    // Reviewed channel plan including manual overrides; it is applied only
+    // while it still matches the inputs and alignment above.
+    MultiAudioSelectionPlan m_multiAudioSelectionPlan;
     bool m_inputInspectionPending = false;
     bool m_cancellationPending = false;
     bool m_closeRequested = false;

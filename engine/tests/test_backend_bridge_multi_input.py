@@ -466,6 +466,79 @@ class BackendBridgeMultiInputTests(unittest.TestCase):
             with self.subTest(name=name):
                 self.assert_manifest_error(invalid_payload)
 
+    def test_selection_overrides_are_optional_and_normalized_in_time_order(self) -> None:
+        args = self.parse_manifest(self.valid_manifest())
+        self.assertEqual(args.multi_input_manifest_data["selection"]["overrides"], [])
+
+        payload = self.valid_manifest()
+        payload["selection"]["overrides"] = [
+            {"input_index": 0, "start_sample": 48_000, "end_sample": 64_000},
+            {"start_sample": 0, "end_sample": 16_000, "input_index": 1},
+            {"start_sample": 16_000, "end_sample": 32_000, "input_index": 1},
+        ]
+
+        args = self.parse_manifest(payload)
+
+        self.assertEqual(
+            args.multi_input_manifest_data["selection"]["overrides"],
+            [
+                {"start_sample": 0, "end_sample": 16_000, "input_index": 1},
+                {"start_sample": 16_000, "end_sample": 32_000, "input_index": 1},
+                {"start_sample": 48_000, "end_sample": 64_000, "input_index": 0},
+            ],
+        )
+
+    def test_manifest_rejects_invalid_selection_overrides(self) -> None:
+        def with_overrides(overrides: object) -> dict[str, object]:
+            payload = self.valid_manifest()
+            payload["selection"]["overrides"] = overrides
+            return payload
+
+        valid = {"start_sample": 0, "end_sample": 16_000, "input_index": 1}
+        cases: list[tuple[str, object]] = [
+            ("overrides is not an array", with_overrides({"0": valid})),
+            ("override is not an object", with_overrides(["0:16000:1"])),
+            ("unknown override field", with_overrides([{**valid, "reason": "x"}])),
+            (
+                "end before start",
+                with_overrides([{**valid, "start_sample": 16_000, "end_sample": 0}]),
+            ),
+            ("empty interval", with_overrides([{**valid, "end_sample": 0}])),
+            ("input index outside inputs", with_overrides([{**valid, "input_index": 2}])),
+            ("negative input index", with_overrides([{**valid, "input_index": -1}])),
+            (
+                "overlapping overrides",
+                with_overrides(
+                    [
+                        valid,
+                        {"start_sample": 15_999, "end_sample": 20_000, "input_index": 0},
+                    ]
+                ),
+            ),
+        ]
+        for field in ("start_sample", "end_sample", "input_index"):
+            missing = dict(valid)
+            del missing[field]
+            cases.append((f"missing {field}", with_overrides([missing])))
+            for value in (True, 1.0, "1", None, math.inf):
+                cases.append(
+                    (
+                        f"invalid {field} {value!r}",
+                        with_overrides([{**valid, field: value}]),
+                    )
+                )
+        for field in ("start_sample", "end_sample"):
+            cases.append(
+                (f"negative {field}", with_overrides([{**valid, field: -1}]))
+            )
+            cases.append(
+                (f"oversized {field}", with_overrides([{**valid, field: 2**63}]))
+            )
+
+        for name, invalid_payload in cases:
+            with self.subTest(name=name):
+                self.assert_manifest_error(invalid_payload)
+
 
 if __name__ == "__main__":
     unittest.main()

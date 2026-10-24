@@ -656,6 +656,48 @@ bool MultiAudioInputModel::isAlignmentResolved(QString *reason) const
     return true;
 }
 
+QString MultiAudioInputModel::selectionAnalysisKey(
+    const QVector<MultiAudioInput> &inputs, int referenceRow)
+{
+    const QString timelineKey = selectionTimelineKey(inputs, referenceRow);
+    if (timelineKey.isEmpty()) {
+        return {};
+    }
+
+    QStringList parts{timelineKey};
+    for (const MultiAudioInput &input : inputs) {
+        if (!input.enabled) {
+            continue;
+        }
+        // Joined without QString::arg() so a '%' in a path cannot be
+        // mistaken for a placeholder.
+        parts.append(QStringList{
+            pathKey(input.path),
+            QString::number(input.durationMilliseconds),
+            QString::number(static_cast<int>(input.alignmentStatus)),
+            input.hasAlignmentOffset
+                ? QString::number(input.alignmentOffsetMilliseconds)
+                : QStringLiteral("-"),
+            input.alignmentOffsetIsManual ? QStringLiteral("manual")
+                                          : QStringLiteral("auto"),
+            input.hasDrift ? QString::number(input.driftPpm, 'g', 17)
+                           : QStringLiteral("-")}
+                         .join(QLatin1Char('|')));
+    }
+    return parts.join(QLatin1Char('\n'));
+}
+
+QString MultiAudioInputModel::selectionTimelineKey(
+    const QVector<MultiAudioInput> &inputs, int referenceRow)
+{
+    if (!isValidRow(inputs, referenceRow)) {
+        return {};
+    }
+    const MultiAudioInput &reference = inputs.at(referenceRow);
+    return pathKey(reference.path) + QLatin1Char('|')
+        + QString::number(reference.durationMilliseconds);
+}
+
 bool MultiAudioInputModel::setInspectionStarted(const QString &path)
 {
     const int row = rowForPath(path);

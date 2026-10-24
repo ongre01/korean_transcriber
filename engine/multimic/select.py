@@ -9,6 +9,7 @@ stage touching source files.
 
 from __future__ import annotations
 
+from bisect import bisect_left, bisect_right
 from dataclasses import dataclass
 import math
 from numbers import Real
@@ -1621,6 +1622,114 @@ select_channel_segments = select_channels
 select_optimal_channels = select_channels
 
 
+@dataclass(frozen=True)
+class SegmentInputEvidence:
+    """One input's quality evidence over one timeline interval."""
+
+    input_index: int
+    quality_score: float | None
+    valid_ratio: float
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "input_index": self.input_index,
+            "quality_score": self.quality_score,
+            "valid_ratio": float(self.valid_ratio),
+        }
+
+
+def interval_input_evidence(
+    quality_report: ChannelQualityReport,
+    intervals: Iterable[tuple[int, int]],
+) -> tuple[tuple[SegmentInputEvidence, ...], ...]:
+    """Return every input's score and recorded ratio for each interval.
+
+    Scores follow the rule used for a selection segment's own
+    ``quality_score``: each part between decision boundaries uses the latest
+    quality window starting at or before it and counts only where that input
+    recorded audio.  A reviewer can therefore compare the selected channel
+    with every alternative, including the one a manual override would use.
+    """
+
+    timeline, input_indices, windows = _validate_report(quality_report)
+    boundaries = _decision_boundaries(quality_report, windows)
+    window_starts = [window.start_sample for window in windows]
+    result: list[tuple[SegmentInputEvidence, ...]] = []
+    for raw_start, raw_end in intervals:
+        start_sample = _sample_index("interval start_sample", raw_start)
+        end_sample = _sample_index("interval end_sample", raw_end)
+        if (
+            start_sample < 0
+            or end_sample <= start_sample
+            or end_sample > timeline
+        ):
+            raise ValueError(
+                "evidence interval is outside the reference timeline"
+            )
+        sample_total = end_sample - start_sample
+        parts = (
+            start_sample,
+            *boundaries[
+                bisect_right(boundaries, start_sample):
+                bisect_left(boundaries, end_sample)
+            ],
+            end_sample,
+        )
+        weighted = dict.fromkeys(input_indices, 0.0)
+        scored = dict.fromkeys(input_indices, 0)
+        recorded = dict.fromkeys(input_indices, 0)
+        for part_start, part_end in zip(parts, parts[1:]):
+            sample_count = part_end - part_start
+            if sample_count <= 0:
+                continue
+            position = bisect_right(window_starts, part_start) - 1
+            window = (
+                windows[position]
+                if position >= 0
+                else (windows[0] if windows else None)
+            )
+            scores = _score_map(window)
+            valid_counts = _valid_counts(quality_report, part_start, part_end)
+            for index in input_indices:
+                valid = valid_counts.get(index, 0)
+                recorded[index] += valid
+                item = scores.get(index)
+                if valid > 0 and item is not None and item.score is not None:
+                    weighted[index] += float(item.score) * sample_count
+                    scored[index] += sample_count
+        result.append(
+            tuple(
+                SegmentInputEvidence(
+                    input_index=index,
+                    quality_score=(
+                        min(1.0, max(0.0, weighted[index] / scored[index]))
+                        if scored[index] > 0
+                        else None
+                    ),
+                    valid_ratio=min(1.0, recorded[index] / sample_total),
+                )
+                for index in input_indices
+            )
+        )
+    return tuple(result)
+
+
+def segment_input_evidence(
+    report: ChannelSelectionReport,
+) -> tuple[tuple[SegmentInputEvidence, ...], ...]:
+    """Return :func:`interval_input_evidence` for every selection segment."""
+
+    if not isinstance(report, ChannelSelectionReport):
+        raise TypeError("report must be a ChannelSelectionReport")
+    return interval_input_evidence(
+        report.quality_report,
+        (
+            (segment.start_sample, segment.end_sample)
+            for segment in report.segments
+        ),
+    )
+
+
 __all__ = [
     "SELECTION_REASON_DESCRIPTIONS",
     "ChannelSelectionConfig",
@@ -1629,6 +1738,9 @@ __all__ = [
     "ChannelSelectionSegment",
     "ChannelSelectionWarning",
     "ManualChannelOverride",
+    "SegmentInputEvidence",
+    "interval_input_evidence",
+    "segment_input_evidence",
     "select_channel_segments",
     "select_channels",
     "select_optimal_channels",

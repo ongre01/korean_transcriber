@@ -9,6 +9,7 @@
 #include <QDir>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QGroupBox>
 #include <QHeaderView>
 #include <QHBoxLayout>
 #include <QInputDialog>
@@ -23,6 +24,8 @@
 #include <QProgressBar>
 #include <QPushButton>
 #include <QSet>
+#include <QSignalBlocker>
+#include <QSplitter>
 #include <QStandardPaths>
 #include <QTableView>
 #include <QTemporaryFile>
@@ -90,20 +93,32 @@ QString resultDetail(const QJsonObject &object)
 MultiAudioInputDialog::MultiAudioInputDialog(QWidget *parent)
     : QDialog(parent)
     , m_model(new MultiAudioInputModel(this))
+    , m_selectionModel(new MultiAudioSelectionModel(this))
     , m_audioFileInfo(new AudioFileInfo(this))
 {
     const EnginePaths enginePaths = EnginePaths::discover();
     m_alignmentPythonProgram = m_audioFileInfo->pythonProgram();
     m_alignmentScriptPath = enginePaths.assetPath(
         QStringLiteral("multimic_alignment.py"));
+    m_qualityPythonProgram = m_alignmentPythonProgram;
+    m_qualityScriptPath = enginePaths.assetPath(
+        QStringLiteral("multimic_quality.py"));
 
     setObjectName(QStringLiteral("multiAudioInputDialog"));
     setWindowTitle(tr("다중 마이크 파일"));
     setModal(true);
-    resize(1180, 650);
-    setMinimumSize(900, 520);
+    resize(1180, 880);
+    setMinimumSize(900, 640);
 
-    auto *mainLayout = new QVBoxLayout(this);
+    auto *dialogLayout = new QVBoxLayout(this);
+    auto *splitter = new QSplitter(Qt::Vertical, this);
+    splitter->setObjectName(QStringLiteral("multiAudioSplitter"));
+    splitter->setChildrenCollapsible(false);
+    dialogLayout->addWidget(splitter, 1);
+
+    auto *inputPanel = new QWidget(splitter);
+    auto *mainLayout = new QVBoxLayout(inputPanel);
+    mainLayout->setContentsMargins(0, 0, 0, 0);
     auto *descriptionLabel = new QLabel(
         tr("같은 녹음을 담은 파일을 2개 이상 추가하세요. 파일 검사는 별도 프로세스에서 순차적으로 실행됩니다."),
         this);
@@ -201,12 +216,102 @@ MultiAudioInputDialog::MultiAudioInputDialog(QWidget *parent)
     recommendationLabel->setWordWrap(true);
     mainLayout->addWidget(recommendationLabel);
 
+    auto *qualityGroup = new QGroupBox(tr("음질 분석 · 채널 선택"), splitter);
+    qualityGroup->setObjectName(QStringLiteral("multiAudioQualityGroupBox"));
+    auto *qualityLayout = new QVBoxLayout(qualityGroup);
+    auto *qualityControlsLayout = new QHBoxLayout;
+    m_analyzeQualityButton = new QPushButton(tr("음질 분석"), this);
+    m_analyzeQualityButton->setObjectName(
+        QStringLiteral("multiAudioAnalyzeQualityButton"));
+    m_cancelQualityButton = new QPushButton(tr("분석 취소"), this);
+    m_cancelQualityButton->setObjectName(
+        QStringLiteral("multiAudioCancelQualityButton"));
+    m_qualityProgressBar = new QProgressBar(this);
+    m_qualityProgressBar->setObjectName(
+        QStringLiteral("multiAudioQualityProgressBar"));
+    m_qualityProgressBar->setRange(0, 0);
+    m_qualityProgressBar->setTextVisible(false);
+    m_qualityProgressBar->setVisible(false);
+    qualityControlsLayout->addWidget(m_analyzeQualityButton);
+    qualityControlsLayout->addWidget(m_cancelQualityButton);
+    qualityControlsLayout->addWidget(m_qualityProgressBar, 1);
+    qualityLayout->addLayout(qualityControlsLayout);
+
+    m_selectionTableView = new QTableView(this);
+    m_selectionTableView->setObjectName(
+        QStringLiteral("multiAudioSelectionTableView"));
+    m_selectionTableView->setModel(m_selectionModel);
+    m_selectionTableView->setSelectionBehavior(QAbstractItemView::SelectRows);
+    m_selectionTableView->setSelectionMode(QAbstractItemView::ExtendedSelection);
+    m_selectionTableView->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    m_selectionTableView->setAlternatingRowColors(true);
+    m_selectionTableView->setSortingEnabled(false);
+    m_selectionTableView->verticalHeader()->setVisible(false);
+    QHeaderView *selectionHeader = m_selectionTableView->horizontalHeader();
+    selectionHeader->setSectionResizeMode(QHeaderView::ResizeToContents);
+    selectionHeader->setSectionResizeMode(MultiAudioSelectionModel::ReasonColumn,
+                                          QHeaderView::Stretch);
+    qualityLayout->addWidget(m_selectionTableView, 1);
+
+    auto *overrideLayout = new QHBoxLayout;
+    overrideLayout->addWidget(new QLabel(tr("선택한 구간의 마이크"), this));
+    m_overrideComboBox = new QComboBox(this);
+    m_overrideComboBox->setObjectName(QStringLiteral("multiAudioOverrideComboBox"));
+    m_overrideComboBox->setMinimumContentsLength(16);
+    m_overrideComboBox->setSizeAdjustPolicy(
+        QComboBox::AdjustToMinimumContentsLengthWithIcon);
+    m_applyOverrideButton = new QPushButton(tr("강제 선택"), this);
+    m_applyOverrideButton->setObjectName(
+        QStringLiteral("multiAudioApplyOverrideButton"));
+    m_clearOverrideButton = new QPushButton(tr("자동으로 되돌리기"), this);
+    m_clearOverrideButton->setObjectName(
+        QStringLiteral("multiAudioClearOverrideButton"));
+    m_clearAllOverridesButton = new QPushButton(tr("수동 선택 모두 해제"), this);
+    m_clearAllOverridesButton->setObjectName(
+        QStringLiteral("multiAudioClearAllOverridesButton"));
+    // The application has no audio playback yet, so the preview stays a
+    // visible but conditional follow-up instead of a working control.
+    m_previewButton = new QPushButton(tr("통합 음성 미리 듣기 (후속 지원)"), this);
+    m_previewButton->setObjectName(QStringLiteral("multiAudioPreviewButton"));
+    m_previewButton->setEnabled(false);
+    m_previewButton->setToolTip(
+        tr("현재 앱에는 오디오 재생 기능이 없어 통합 음성 미리 듣기는 재생 기능을 지원할 때 제공하는 후속(조건부) 범위입니다."));
+    overrideLayout->addWidget(m_overrideComboBox);
+    overrideLayout->addWidget(m_applyOverrideButton);
+    overrideLayout->addWidget(m_clearOverrideButton);
+    overrideLayout->addWidget(m_clearAllOverridesButton);
+    overrideLayout->addStretch();
+    overrideLayout->addWidget(m_previewButton);
+    qualityLayout->addLayout(overrideLayout);
+
+    m_qualityMessageLabel = new QLabel(this);
+    m_qualityMessageLabel->setObjectName(
+        QStringLiteral("multiAudioQualityMessageLabel"));
+    m_qualityMessageLabel->setWordWrap(true);
+    qualityLayout->addWidget(m_qualityMessageLabel);
+
+    m_selectionSummaryLabel = new QLabel(this);
+    m_selectionSummaryLabel->setObjectName(
+        QStringLiteral("multiAudioSelectionSummaryLabel"));
+    m_selectionSummaryLabel->setWordWrap(true);
+    qualityLayout->addWidget(m_selectionSummaryLabel);
+
+    auto *selectionScopeLabel = new QLabel(
+        tr("구간별 자동 선택 근거(점수·사유)를 표로 확인하고, 필요한 구간만 다른 마이크로 강제 선택하세요. "
+           "노란 행이 수동 선택이며 통합 음성 합성과 전사에는 ‘최종 선택’이 사용됩니다. "
+           "파형·고급 타임라인 보기는 후속 버전에서 제공합니다."),
+        this);
+    selectionScopeLabel->setWordWrap(true);
+    qualityLayout->addWidget(selectionScopeLabel);
+    splitter->setStretchFactor(0, 1);
+    splitter->setStretchFactor(1, 1);
+
     m_buttonBox = new QDialogButtonBox(QDialogButtonBox::Ok
                                        | QDialogButtonBox::Cancel,
                                        this);
     m_buttonBox->button(QDialogButtonBox::Ok)->setText(tr("적용"));
     m_buttonBox->button(QDialogButtonBox::Cancel)->setText(tr("취소"));
-    mainLayout->addWidget(m_buttonBox);
+    dialogLayout->addWidget(m_buttonBox);
 
     connect(m_addButton, &QPushButton::clicked,
             this, &MultiAudioInputDialog::chooseFiles);
@@ -251,10 +356,40 @@ MultiAudioInputDialog::MultiAudioInputDialog(QWidget *parent)
     connect(m_tableView->selectionModel(), &QItemSelectionModel::selectionChanged,
             this, [this]() { updateActions(); });
 
+    connect(m_analyzeQualityButton, &QPushButton::clicked,
+            this, &MultiAudioInputDialog::startQualityAnalysis);
+    connect(m_cancelQualityButton, &QPushButton::clicked,
+            this, &MultiAudioInputDialog::cancelQualityAnalysis);
+    connect(m_applyOverrideButton, &QPushButton::clicked,
+            this, &MultiAudioInputDialog::applySelectedOverride);
+    connect(m_clearOverrideButton, &QPushButton::clicked,
+            this, &MultiAudioInputDialog::clearSelectedOverrides);
+    connect(m_clearAllOverridesButton, &QPushButton::clicked,
+            this, &MultiAudioInputDialog::clearAllOverrides);
+    connect(m_overrideComboBox, qOverload<int>(&QComboBox::currentIndexChanged),
+            this, [this](int) { updateActions(); });
+    connect(m_selectionTableView->selectionModel(),
+            &QItemSelectionModel::selectionChanged,
+            this, [this]() { updateActions(); });
+    connect(m_selectionModel, &MultiAudioSelectionModel::overridesChanged,
+            this, &MultiAudioInputDialog::updateActions);
+    // A selection result is only valid for the inputs and alignment it was
+    // computed from, so every input change re-evaluates it.
+    connect(m_model, &QAbstractItemModel::modelReset,
+            this, &MultiAudioInputDialog::refreshSelectionContext);
+    connect(m_model, &QAbstractItemModel::rowsInserted,
+            this, &MultiAudioInputDialog::refreshSelectionContext);
+    connect(m_model, &QAbstractItemModel::rowsRemoved,
+            this, &MultiAudioInputDialog::refreshSelectionContext);
+    connect(m_model, &QAbstractItemModel::dataChanged,
+            this, &MultiAudioInputDialog::refreshSelectionContext);
+    connect(m_model, &MultiAudioInputModel::referenceRowChanged,
+            this, &MultiAudioInputDialog::refreshSelectionContext);
+
     m_lastDirectory = QStandardPaths::writableLocation(
         QStandardPaths::DocumentsLocation);
     rebuildReferenceCombo();
-    updateActions();
+    refreshSelectionContext();
 }
 
 MultiAudioInputDialog::~MultiAudioInputDialog()
@@ -270,11 +405,42 @@ MultiAudioInputDialog::~MultiAudioInputDialog()
         delete m_alignmentManifestFile;
         m_alignmentManifestFile = nullptr;
     }
+    ++m_qualityGeneration;
+    if (m_qualityProcess
+        && m_qualityProcess->state() != QProcess::NotRunning) {
+        disconnect(m_qualityProcess, nullptr, this, nullptr);
+        m_qualityProcess->kill();
+        m_qualityProcess->waitForFinished(100);
+    }
+    if (m_qualityManifestFile) {
+        delete m_qualityManifestFile;
+        m_qualityManifestFile = nullptr;
+    }
 }
 
 MultiAudioInputModel *MultiAudioInputDialog::model() const noexcept
 {
     return m_model;
+}
+
+MultiAudioSelectionModel *MultiAudioInputDialog::selectionModel() const noexcept
+{
+    return m_selectionModel;
+}
+
+MultiAudioSelectionPlan MultiAudioInputDialog::selectionPlan() const
+{
+    return m_selectionModel->plan();
+}
+
+void MultiAudioInputDialog::setSelectionPlan(const MultiAudioSelectionPlan &plan)
+{
+    if (isQualityAnalysisRunning()) {
+        return;
+    }
+    m_selectionModel->setPlan(plan);
+    setQualityMessage(QString());
+    refreshSelectionContext();
 }
 
 QVector<MultiAudioInput> MultiAudioInputDialog::inputs() const
@@ -307,6 +473,7 @@ void MultiAudioInputDialog::setInputs(const QVector<MultiAudioInput> &inputs)
         }
         cleanupAlignmentRun(m_alignmentProcess);
     }
+    stopQualityProcess();
     m_audioFileInfo->cancel();
     m_currentInspection.clear();
     m_inspectionQueue.clear();
@@ -324,7 +491,7 @@ int MultiAudioInputDialog::referenceRow() const noexcept
 
 void MultiAudioInputDialog::setReferenceRow(int row)
 {
-    if (isAlignmentAnalysisRunning()) {
+    if (isAlignmentAnalysisRunning() || isQualityAnalysisRunning()) {
         return;
     }
     m_model->restoreReferenceRow(row);
@@ -349,11 +516,17 @@ void MultiAudioInputDialog::setAudioFileInfoConfiguration(
     m_audioFileInfo->setPythonProgram(pythonProgram);
     m_audioFileInfo->setProbeScript(probeScript);
     m_alignmentPythonProgram = pythonProgram.trimmed();
+    m_qualityPythonProgram = m_alignmentPythonProgram;
 
     const QString siblingAnalyzer = QFileInfo(probeScript).dir().filePath(
         QStringLiteral("multimic_alignment.py"));
     if (QFileInfo(siblingAnalyzer).isFile()) {
         m_alignmentScriptPath = QFileInfo(siblingAnalyzer).absoluteFilePath();
+    }
+    const QString siblingQualityAnalyzer = QFileInfo(probeScript).dir().filePath(
+        QStringLiteral("multimic_quality.py"));
+    if (QFileInfo(siblingQualityAnalyzer).isFile()) {
+        m_qualityScriptPath = QFileInfo(siblingQualityAnalyzer).absoluteFilePath();
     }
 }
 
@@ -364,14 +537,26 @@ void MultiAudioInputDialog::setAlignmentAnalyzerConfiguration(
     m_alignmentScriptPath = scriptPath.trimmed();
 }
 
+void MultiAudioInputDialog::setQualityAnalyzerConfiguration(
+    const QString &pythonProgram, const QString &scriptPath)
+{
+    m_qualityPythonProgram = pythonProgram.trimmed();
+    m_qualityScriptPath = scriptPath.trimmed();
+}
+
 bool MultiAudioInputDialog::isAlignmentAnalysisRunning() const
 {
     return m_alignmentProcess != nullptr;
 }
 
+bool MultiAudioInputDialog::isQualityAnalysisRunning() const
+{
+    return m_qualityProcess != nullptr;
+}
+
 int MultiAudioInputDialog::addFiles(const QStringList &filePaths)
 {
-    if (isAlignmentAnalysisRunning()) {
+    if (isAlignmentAnalysisRunning() || isQualityAnalysisRunning()) {
         return 0;
     }
     int added = 0;
@@ -404,6 +589,10 @@ void MultiAudioInputDialog::accept()
                             true);
         return;
     }
+    if (isQualityAnalysisRunning()) {
+        setQualityMessage(tr("음질 분석을 취소하거나 완료한 뒤 적용하세요."), true);
+        return;
+    }
 
     QString reason;
     if (!m_model->isConfigurationValid(&reason)) {
@@ -418,12 +607,15 @@ void MultiAudioInputDialog::reject()
     if (isAlignmentAnalysisRunning()) {
         cancelAlignmentAnalysis();
     }
+    if (isQualityAnalysisRunning()) {
+        cancelQualityAnalysis();
+    }
     QDialog::reject();
 }
 
 void MultiAudioInputDialog::chooseFiles()
 {
-    if (isAlignmentAnalysisRunning()) {
+    if (isAlignmentAnalysisRunning() || isQualityAnalysisRunning()) {
         return;
     }
     const QStringList selectedFiles = QFileDialog::getOpenFileNames(
@@ -446,7 +638,7 @@ void MultiAudioInputDialog::chooseFiles()
 
 void MultiAudioInputDialog::removeSelectedFiles()
 {
-    if (isAlignmentAnalysisRunning()) {
+    if (isAlignmentAnalysisRunning() || isQualityAnalysisRunning()) {
         return;
     }
     const QModelIndexList selectedRows =
@@ -488,7 +680,7 @@ void MultiAudioInputDialog::removeSelectedFiles()
 
 void MultiAudioInputDialog::startAlignmentAnalysis()
 {
-    if (isAlignmentAnalysisRunning()) {
+    if (isAlignmentAnalysisRunning() || isQualityAnalysisRunning()) {
         return;
     }
 
@@ -652,7 +844,7 @@ void MultiAudioInputDialog::cancelAlignmentAnalysis()
 
 void MultiAudioInputDialog::editManualOffset()
 {
-    if (isAlignmentAnalysisRunning()) {
+    if (isAlignmentAnalysisRunning() || isQualityAnalysisRunning()) {
         return;
     }
     const int row = selectedInputRow();
@@ -1095,6 +1287,450 @@ int MultiAudioInputDialog::selectedInputRow() const
     return rows.size() == 1 ? rows.constFirst().row() : -1;
 }
 
+QVector<int> MultiAudioInputDialog::selectedSegmentRows() const
+{
+    QVector<int> rows;
+    if (!m_selectionTableView->selectionModel()) {
+        return rows;
+    }
+    for (const QModelIndex &index :
+         m_selectionTableView->selectionModel()->selectedRows()) {
+        rows.append(index.row());
+    }
+    std::sort(rows.begin(), rows.end());
+    return rows;
+}
+
+void MultiAudioInputDialog::startQualityAnalysis()
+{
+    if (isAlignmentAnalysisRunning() || isQualityAnalysisRunning()) {
+        return;
+    }
+
+    if (!m_currentInspection.isEmpty() || m_audioFileInfo->isInspecting()
+        || !m_inspectionQueue.isEmpty()) {
+        setQualityMessage(tr("모든 파일 검사가 완료된 뒤 음질 분석을 실행하세요."),
+                          true);
+        return;
+    }
+
+    QString reason;
+    if (!m_model->isAlignmentResolved(&reason)) {
+        setQualityMessage(reason, true);
+        return;
+    }
+    if (m_qualityPythonProgram.isEmpty()) {
+        setQualityMessage(tr("Python 실행 경로가 설정되지 않았습니다."), true);
+        return;
+    }
+
+    const QFileInfo analyzerFile(m_qualityScriptPath);
+    if (!analyzerFile.isFile()) {
+        setQualityMessage(tr("음질 분석 도구를 찾을 수 없습니다."), true);
+        return;
+    }
+
+    const QVector<MultiAudioInput> inputs = m_model->inputs();
+    const int referenceRow = m_model->referenceRow();
+    // The previous plan's manual selections are sent along, so the engine
+    // reports the final channel plan the user is about to approve.
+    const MultiAudioManifestRequest request = buildMultiAudioManifest(
+        inputs, referenceRow, m_selectionModel->plan());
+    if (request.rows.size() < 2 || request.referenceIndex < 0) {
+        setQualityMessage(tr("사용할 파일과 기준 파일을 다시 확인하세요."), true);
+        return;
+    }
+
+    auto *manifestFile = new QTemporaryFile(
+        QDir(QDir::tempPath()).filePath(
+            QStringLiteral("korean_transcriber_quality_XXXXXX.json")),
+        this);
+    manifestFile->setAutoRemove(true);
+    const QByteArray manifestData = QJsonDocument(request.manifest).toJson(
+        QJsonDocument::Compact);
+    if (!manifestFile->open()
+        || manifestFile->write(manifestData) != manifestData.size()
+        || !manifestFile->flush()) {
+        setQualityMessage(tr("음질 분석 요청 파일을 만들 수 없습니다."), true);
+        delete manifestFile;
+        return;
+    }
+    manifestFile->close();
+
+    const quint64 generation = ++m_qualityGeneration;
+    auto *process = new QProcess(this);
+    process->setProcessChannelMode(QProcess::SeparateChannels);
+    process->setProgram(m_qualityPythonProgram);
+    process->setArguments({analyzerFile.absoluteFilePath(),
+                           QStringLiteral("--multi-input-manifest"),
+                           manifestFile->fileName()});
+    process->setWorkingDirectory(analyzerFile.absolutePath());
+
+    m_qualityProcess = process;
+    m_qualityManifestFile = manifestFile;
+    m_qualityManifestInputs.clear();
+    for (int row : request.rows) {
+        m_qualityManifestInputs.append(inputs.at(row));
+    }
+    m_qualityReferenceInputIndex = request.referenceIndex;
+    m_qualityAnalysisKey =
+        MultiAudioInputModel::selectionAnalysisKey(inputs, referenceRow);
+    m_qualityTimelineKey =
+        MultiAudioInputModel::selectionTimelineKey(inputs, referenceRow);
+    m_qualityDroppedOverrideCount = request.droppedOverrideCount;
+    m_qualityStandardOutput.clear();
+    m_qualityStandardError.clear();
+    m_qualityCancellationPending = false;
+
+    connect(process, &QProcess::readyReadStandardOutput, this,
+            [this, process, generation]() {
+        if (process == m_qualityProcess && generation == m_qualityGeneration) {
+            m_qualityStandardOutput.append(process->readAllStandardOutput());
+        }
+    });
+    connect(process, &QProcess::readyReadStandardError, this,
+            [this, process, generation]() {
+        if (process == m_qualityProcess && generation == m_qualityGeneration) {
+            m_qualityStandardError.append(process->readAllStandardError());
+        }
+    });
+    connect(process, &QProcess::errorOccurred, this,
+            [this, process, generation](QProcess::ProcessError error) {
+        if (error == QProcess::FailedToStart) {
+            qualityProcessFailedToStart(process, generation);
+        }
+    });
+    connect(process,
+            qOverload<int, QProcess::ExitStatus>(&QProcess::finished),
+            this,
+            [this, process, generation](int exitCode,
+                                        QProcess::ExitStatus exitStatus) {
+        finishQualityAnalysis(process, generation, exitCode,
+                              static_cast<int>(exitStatus));
+    });
+
+    setQualityMessage(
+        request.overrideCount > 0
+            ? tr("수동 선택 %1개를 포함해 구간별 음질을 분석하는 중입니다. 필요하면 ‘분석 취소’를 누르세요.")
+                  .arg(request.overrideCount)
+            : tr("구간별 음질을 분석하는 중입니다. 필요하면 ‘분석 취소’를 누르세요."));
+    updateActions();
+    process->start();
+}
+
+void MultiAudioInputDialog::cancelQualityAnalysis()
+{
+    if (!isQualityAnalysisRunning() || m_qualityCancellationPending) {
+        return;
+    }
+
+    m_qualityCancellationPending = true;
+    const quint64 generation = m_qualityGeneration;
+    QProcess *process = m_qualityProcess;
+    setQualityMessage(tr("음질 분석을 취소하는 중입니다..."));
+    updateActions();
+    process->terminate();
+    QTimer::singleShot(3000, process, [this, process, generation]() {
+        if (process == m_qualityProcess
+            && generation == m_qualityGeneration
+            && process->state() != QProcess::NotRunning) {
+            process->kill();
+        }
+    });
+}
+
+void MultiAudioInputDialog::finishQualityAnalysis(QProcess *process,
+                                                  quint64 generation,
+                                                  int exitCode,
+                                                  int exitStatus)
+{
+    if (process != m_qualityProcess || generation != m_qualityGeneration) {
+        process->deleteLater();
+        return;
+    }
+
+    m_qualityStandardOutput.append(process->readAllStandardOutput());
+    m_qualityStandardError.append(process->readAllStandardError());
+
+    if (m_qualityCancellationPending) {
+        cleanupQualityRun(process);
+        setQualityMessage(tr("음질 분석을 취소했습니다. 이전 분석 결과와 수동 선택을 유지합니다."));
+        updateActions();
+        return;
+    }
+
+    QJsonParseError parseError;
+    const QJsonDocument document = QJsonDocument::fromJson(
+        m_qualityStandardOutput.trimmed(), &parseError);
+    const bool normalExit =
+        exitStatus == static_cast<int>(QProcess::NormalExit);
+    if (parseError.error != QJsonParseError::NoError || !document.isObject()) {
+        cleanupQualityRun(process);
+        setQualityMessage(
+            normalExit && exitCode == 0
+                ? tr("음질 분석 응답을 해석할 수 없습니다.")
+                : tr("음질 분석 프로세스가 비정상 종료되었습니다."),
+            true);
+        updateActions();
+        return;
+    }
+
+    const QJsonObject payload = document.object();
+    const QJsonValue okValue = payload.value(QStringLiteral("ok"));
+    if (!okValue.isBool() || !okValue.toBool() || !normalExit || exitCode != 0) {
+        const QString message = qualityFailureMessage(payload);
+        cleanupQualityRun(process);
+        setQualityMessage(message, true);
+        updateActions();
+        return;
+    }
+
+    // The inputs are locked while the analysis runs; still, a result is never
+    // applied to a configuration it was not computed for.
+    if (MultiAudioInputModel::selectionAnalysisKey(m_model->inputs(),
+                                                   m_model->referenceRow())
+        != m_qualityAnalysisKey) {
+        cleanupQualityRun(process);
+        setQualityMessage(tr("분석 중 입력 구성이 바뀌어 음질 분석 결과를 적용하지 않았습니다."),
+                          true);
+        updateActions();
+        return;
+    }
+
+    MultiAudioSelectionPlan plan;
+    QString error;
+    if (!parseMultiAudioQualityResponse(payload, m_qualityManifestInputs,
+                                        m_qualityReferenceInputIndex,
+                                        &plan, &error)) {
+        cleanupQualityRun(process);
+        setQualityMessage(tr("음질 분석 결과를 적용할 수 없습니다: %1").arg(error),
+                          true);
+        updateActions();
+        return;
+    }
+    plan.analysisKey = m_qualityAnalysisKey;
+    plan.timelineKey = m_qualityTimelineKey;
+    const int droppedOverrideCount = m_qualityDroppedOverrideCount;
+    cleanupQualityRun(process);
+
+    m_selectionModel->setPlan(plan);
+    refreshSelectionContext();
+    QString message = tr("음질 분석 완료: 구간 %1개 · 수동 선택 %2개 · 경고 %3건")
+                          .arg(plan.segments.size())
+                          .arg(plan.manualSegmentCount())
+                          .arg(plan.warnings.size());
+    if (droppedOverrideCount > 0) {
+        message += tr(" · 입력 또는 기준 파일이 바뀌어 이전 수동 선택 %1개를 해제했습니다.")
+                       .arg(droppedOverrideCount);
+    }
+    setQualityMessage(message, droppedOverrideCount > 0);
+    updateActions();
+}
+
+QString MultiAudioInputDialog::qualityFailureMessage(
+    const QJsonObject &payload) const
+{
+    const QString kind = payload.value(QStringLiteral("kind")).toString();
+    QStringList details;
+    for (const QJsonValue &value : payload.value(QStringLiteral("errors")).toArray()) {
+        const QJsonObject error = value.toObject();
+        QString detail = error.value(QStringLiteral("message")).toString().trimmed();
+        const QString code = error.value(QStringLiteral("code")).toString().trimmed();
+        if (detail.isEmpty()) {
+            detail = code;
+        } else if (!code.isEmpty()) {
+            detail = QStringLiteral("[%1] %2").arg(code, detail);
+        }
+        int inputIndex = -1;
+        if (jsonInteger(error.value(QStringLiteral("input_index")), 0,
+                        static_cast<int>(m_qualityManifestInputs.size()) - 1,
+                        &inputIndex)) {
+            detail = tr("%1: %2").arg(
+                m_qualityManifestInputs.at(inputIndex).alias, detail);
+        }
+        if (!detail.isEmpty()) {
+            details.append(detail);
+        }
+    }
+
+    if (kind == QStringLiteral("preparation") && !details.isEmpty()) {
+        return tr("음질 분석 준비에 실패한 파일: %1")
+            .arg(details.join(QStringLiteral(" · ")));
+    }
+    if (kind == QStringLiteral("alignment") && !details.isEmpty()) {
+        return tr("시간 정렬이 해결되지 않은 파일이 있습니다: %1. 시간 정렬 분석을 다시 실행하거나 수동 오프셋을 지정하세요.")
+            .arg(details.join(QStringLiteral(" · ")));
+    }
+    if (kind == QStringLiteral("contract")
+        && payload.value(QStringLiteral("code")).toString()
+            == QStringLiteral("invalid_override")) {
+        return tr("수동 채널 선택이 기준 녹음 길이를 벗어났습니다. ‘수동 선택 모두 해제’ 후 다시 분석하세요.");
+    }
+    QString message = payload.value(QStringLiteral("message")).toString().trimmed();
+    if (message.isEmpty()) {
+        message = tr("음질 분석을 완료할 수 없습니다. 입력 파일과 Python 환경을 확인하세요.");
+    }
+    return message;
+}
+
+void MultiAudioInputDialog::qualityProcessFailedToStart(QProcess *process,
+                                                         quint64 generation)
+{
+    if (process != m_qualityProcess || generation != m_qualityGeneration) {
+        return;
+    }
+    cleanupQualityRun(process);
+    setQualityMessage(tr("Python 음질 분석 프로세스를 시작할 수 없습니다."), true);
+    updateActions();
+}
+
+void MultiAudioInputDialog::cleanupQualityRun(QProcess *process)
+{
+    if (process == m_qualityProcess) {
+        m_qualityProcess = nullptr;
+    }
+    if (process) {
+        process->deleteLater();
+    }
+    if (m_qualityManifestFile) {
+        m_qualityManifestFile->deleteLater();
+        m_qualityManifestFile = nullptr;
+    }
+    m_qualityStandardOutput.clear();
+    m_qualityStandardError.clear();
+    m_qualityManifestInputs.clear();
+    m_qualityReferenceInputIndex = -1;
+    m_qualityAnalysisKey.clear();
+    m_qualityTimelineKey.clear();
+    m_qualityDroppedOverrideCount = 0;
+    m_qualityCancellationPending = false;
+}
+
+void MultiAudioInputDialog::stopQualityProcess()
+{
+    ++m_qualityGeneration;
+    if (!m_qualityProcess) {
+        return;
+    }
+    disconnect(m_qualityProcess, nullptr, this, nullptr);
+    if (m_qualityProcess->state() != QProcess::NotRunning) {
+        m_qualityProcess->kill();
+        m_qualityProcess->waitForFinished(100);
+    }
+    cleanupQualityRun(m_qualityProcess);
+}
+
+void MultiAudioInputDialog::setQualityMessage(const QString &message, bool error)
+{
+    m_qualityMessageLabel->setText(message);
+    m_qualityMessageLabel->setStyleSheet(
+        error ? QStringLiteral("color: #b00020;") : QString());
+}
+
+void MultiAudioInputDialog::applySelectedOverride()
+{
+    if (isAlignmentAnalysisRunning() || isQualityAnalysisRunning()) {
+        return;
+    }
+    const QVector<int> rows = selectedSegmentRows();
+    const QString path = m_overrideComboBox->currentData().toString();
+    if (rows.isEmpty() || path.isEmpty()) {
+        return;
+    }
+    const int changed = m_selectionModel->setOverride(rows, path);
+    setQualityMessage(
+        changed > 0
+            ? tr("구간 %1개의 최종 선택을 ‘%2’ 마이크로 지정했습니다. 자동 선택과 같은 구간은 자동으로 유지되며, 통합 음성 합성과 전사에 최종 선택이 적용됩니다.")
+                  .arg(changed)
+                  .arg(m_selectionModel->aliasForPath(path))
+            : tr("바뀐 구간이 없습니다."));
+}
+
+void MultiAudioInputDialog::clearSelectedOverrides()
+{
+    if (isAlignmentAnalysisRunning() || isQualityAnalysisRunning()) {
+        return;
+    }
+    const int changed = m_selectionModel->clearOverrides(selectedSegmentRows());
+    if (changed > 0) {
+        setQualityMessage(tr("구간 %1개를 자동 선택으로 되돌렸습니다.").arg(changed));
+    }
+}
+
+void MultiAudioInputDialog::clearAllOverrides()
+{
+    if (isAlignmentAnalysisRunning() || isQualityAnalysisRunning()) {
+        return;
+    }
+    const int changed = m_selectionModel->clearAllOverrides();
+    if (changed > 0) {
+        setQualityMessage(tr("수동 선택 %1개를 모두 해제했습니다.").arg(changed));
+    }
+}
+
+void MultiAudioInputDialog::refreshSelectionContext()
+{
+    m_selectionModel->setInputContext(m_model->inputs(), m_model->referenceRow());
+    rebuildOverrideCombo();
+    updateActions();
+}
+
+void MultiAudioInputDialog::rebuildOverrideCombo()
+{
+    const QString previousPath = m_overrideComboBox->currentData().toString();
+    const QSignalBlocker blocker(m_overrideComboBox);
+    m_overrideComboBox->clear();
+    for (const QString &path : m_selectionModel->plan().inputPaths) {
+        m_overrideComboBox->addItem(m_selectionModel->aliasForPath(path), path);
+    }
+    int index = previousPath.isEmpty() ? -1
+                                       : m_overrideComboBox->findData(previousPath);
+    if (index < 0 && m_overrideComboBox->count() > 0) {
+        index = 0;
+    }
+    m_overrideComboBox->setCurrentIndex(index);
+}
+
+void MultiAudioInputDialog::updateSelectionSummary()
+{
+    const MultiAudioSelectionPlan plan = m_selectionModel->plan();
+    if (plan.isEmpty()) {
+        m_selectionSummaryLabel->setText(
+            isQualityAnalysisRunning()
+                ? tr("음질 분석 중")
+                : tr("음질 분석 결과가 없습니다. 시간 정렬을 마친 뒤 ‘음질 분석’을 실행하세요."));
+        m_selectionSummaryLabel->setToolTip(QString());
+        m_selectionSummaryLabel->setStyleSheet(QString());
+        return;
+    }
+
+    const int segmentCount = plan.segments.size();
+    const int manualCount = plan.manualSegmentCount();
+    QStringList messages;
+    messages.append(tr("구간 %1개 · 자동 %2 · 수동 %3 · 최종 전환 %4회")
+                        .arg(segmentCount)
+                        .arg(segmentCount - manualCount)
+                        .arg(manualCount)
+                        .arg(plan.switchCount()));
+    const int incompleteCount = plan.incompleteFinalSegmentCount();
+    if (incompleteCount > 0) {
+        messages.append(tr("최종 선택 마이크의 녹음이 비는 구간 %1개(해당 부분은 무음으로 합성)")
+                            .arg(incompleteCount));
+    }
+    if (!plan.warnings.isEmpty()) {
+        messages.append(tr("분석 경고 %1건").arg(plan.warnings.size()));
+    }
+    const bool current =
+        plan.isCurrentFor(m_model->inputs(), m_model->referenceRow());
+    if (!current) {
+        messages.append(tr("입력·기준 파일·시간 정렬이 바뀌어 결과가 최신이 아닙니다. 음질 분석을 다시 실행하세요."));
+    }
+    m_selectionSummaryLabel->setText(messages.join(QStringLiteral(" · ")));
+    m_selectionSummaryLabel->setToolTip(plan.warnings.join(QLatin1Char('\n')));
+    m_selectionSummaryLabel->setStyleSheet(
+        current ? QString() : QStringLiteral("color: #b00020;"));
+}
+
 void MultiAudioInputDialog::inspectionSucceeded(const AudioFileMetadata &metadata)
 {
     const int currentRow = m_model->rowForPath(m_currentInspection);
@@ -1149,27 +1785,59 @@ void MultiAudioInputDialog::rebuildReferenceCombo()
 void MultiAudioInputDialog::updateActions()
 {
     const bool analysisRunning = isAlignmentAnalysisRunning();
+    const bool qualityRunning = isQualityAnalysisRunning();
+    const bool busy = analysisRunning || qualityRunning;
     const bool inspectionRunning = !m_currentInspection.isEmpty()
         || m_audioFileInfo->isInspecting() || !m_inspectionQueue.isEmpty();
     const bool hasSelection = m_tableView->selectionModel()
         && m_tableView->selectionModel()->hasSelection();
-    m_tableView->setEnabled(!analysisRunning);
-    m_addButton->setEnabled(!analysisRunning);
-    m_removeButton->setEnabled(hasSelection && !analysisRunning);
+    m_tableView->setEnabled(!busy);
+    m_addButton->setEnabled(!busy);
+    m_removeButton->setEnabled(hasSelection && !busy);
     m_referenceComboBox->setEnabled(
-        m_referenceComboBox->count() > 0 && !analysisRunning);
+        m_referenceComboBox->count() > 0 && !busy);
 
     QString reason;
     const bool valid = m_model->isConfigurationValid(&reason);
     m_analyzeAlignmentButton->setEnabled(
-        valid && !inspectionRunning && !analysisRunning);
+        valid && !inspectionRunning && !busy);
     m_cancelAlignmentButton->setEnabled(
         analysisRunning && !m_alignmentCancellationPending);
     m_alignmentProgressBar->setVisible(analysisRunning);
 
+    QString alignmentReason;
+    const bool alignmentResolved = m_model->isAlignmentResolved(&alignmentReason);
+    m_analyzeQualityButton->setEnabled(
+        alignmentResolved && !inspectionRunning && !busy);
+    m_analyzeQualityButton->setToolTip(
+        alignmentResolved
+            ? tr("사용할 파일을 구간별로 비교해 전사에 쓸 마이크를 선택합니다.")
+            : alignmentReason);
+    m_cancelQualityButton->setEnabled(
+        qualityRunning && !m_qualityCancellationPending);
+    m_qualityProgressBar->setVisible(qualityRunning);
+
+    const MultiAudioSelectionPlan plan = m_selectionModel->plan();
+    const bool planCurrent =
+        plan.isCurrentFor(m_model->inputs(), m_model->referenceRow());
+    const QVector<int> segmentRows = selectedSegmentRows();
+    const bool manualSegmentSelected = std::any_of(
+        segmentRows.cbegin(), segmentRows.cend(), [this](int row) {
+            return m_selectionModel->segmentAt(row).isManual();
+        });
+    m_selectionTableView->setEnabled(!busy);
+    m_overrideComboBox->setEnabled(
+        planCurrent && !busy && m_overrideComboBox->count() > 0);
+    m_applyOverrideButton->setEnabled(
+        planCurrent && !busy && !segmentRows.isEmpty()
+        && m_overrideComboBox->currentIndex() >= 0);
+    m_clearOverrideButton->setEnabled(!busy && manualSegmentSelected);
+    m_clearAllOverridesButton->setEnabled(
+        !busy && plan.manualSegmentCount() > 0);
+
     bool canEditManualOffset = false;
     const int selectedRow = selectedInputRow();
-    if (!analysisRunning && selectedRow >= 0
+    if (!busy && selectedRow >= 0
         && selectedRow != m_model->referenceRow()) {
         const MultiAudioInput input = m_model->inputAt(selectedRow);
         canEditManualOffset = input.enabled
@@ -1183,9 +1851,9 @@ void MultiAudioInputDialog::updateActions()
                     == MultiAudioInput::AlignmentStatus::Manual);
     }
     m_manualOffsetButton->setEnabled(canEditManualOffset);
-    m_buttonBox->button(QDialogButtonBox::Ok)->setEnabled(
-        valid && !analysisRunning);
+    m_buttonBox->button(QDialogButtonBox::Ok)->setEnabled(valid && !busy);
     updateSummary();
+    updateSelectionSummary();
 }
 
 void MultiAudioInputDialog::enqueuePendingInspections()

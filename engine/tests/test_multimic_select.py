@@ -29,6 +29,8 @@ from multimic.pipeline import AnalysisSignal
 from multimic.select import (
     ChannelSelectionConfig,
     ChannelSelectionOverride,
+    interval_input_evidence,
+    segment_input_evidence,
     select_channels,
 )
 from vad import SpeechRegion, merge_speech_regions
@@ -931,7 +933,104 @@ class ChannelSelectionTests(unittest.TestCase):
 
         self.assertEqual(selected.segments, ())
         self.assertEqual(selected.switch_count, 0)
+        self.assertEqual(segment_input_evidence(selected), ())
         json.dumps(selected.to_dict(), allow_nan=False)
+
+    def test_segment_input_evidence_explains_every_channel(self) -> None:
+        report = make_report(
+            3_000,
+            [
+                (0, 1_000, (0.9, 0.4)),
+                (1_000, 2_000, (0.2, 0.8)),
+                (2_000, 3_000, (0.7, None)),
+            ],
+            valid_regions=(
+                (SpeechRegion(0, 3_000),),
+                (SpeechRegion(0, 1_500),),
+            ),
+        )
+        selected = select_channels(
+            report,
+            config=ChannelSelectionConfig(
+                minimum_hold_seconds=0.0,
+                boundary_search_seconds=0.0,
+            ),
+        )
+
+        evidence = segment_input_evidence(selected)
+
+        self.assertIs(multimic.segment_input_evidence, segment_input_evidence)
+        self.assertEqual(len(evidence), len(selected.segments))
+        for segment, inputs in zip(selected.segments, evidence):
+            self.assertEqual([item.input_index for item in inputs], [0, 1])
+            chosen = inputs[segment.selected_input_index]
+            self.assertAlmostEqual(chosen.quality_score, segment.quality_score)
+            json.dumps([item.to_dict() for item in inputs], allow_nan=False)
+
+        tail = next(
+            inputs
+            for segment, inputs in zip(selected.segments, evidence)
+            if segment.start_sample <= 1_500 < segment.end_sample
+        )
+        tail_segment = next(
+            segment
+            for segment in selected.segments
+            if segment.start_sample <= 1_500 < segment.end_sample
+        )
+        self.assertEqual(
+            (tail_segment.start_sample, tail_segment.end_sample),
+            (1_500, 3_000),
+        )
+        # Parts use the window starting at or before them: 0.2 then 0.7.
+        self.assertAlmostEqual(
+            tail[0].quality_score,
+            (0.2 * 500 + 0.7 * 1_000) / 1_500,
+        )
+        self.assertEqual(tail[0].valid_ratio, 1.0)
+        # Input 1 recorded nothing here, so it has no score at all.
+        self.assertIsNone(tail[1].quality_score)
+        self.assertEqual(tail[1].valid_ratio, 0.0)
+
+    def test_segment_input_evidence_covers_partially_recorded_override(self) -> None:
+        report = make_report(
+            2_000,
+            [(0, 1_000, (0.9, 0.4)), (1_000, 2_000, (0.8, 0.6))],
+            valid_regions=(
+                (SpeechRegion(0, 2_000),),
+                (SpeechRegion(500, 2_000),),
+            ),
+        )
+        selected = select_channels(
+            report,
+            overrides=(ChannelSelectionOverride(0, 1_000, 1),),
+        )
+
+        evidence = segment_input_evidence(selected)
+
+        manual_position = next(
+            position
+            for position, segment in enumerate(selected.segments)
+            if segment.manual_override
+        )
+        manual = evidence[manual_position]
+        self.assertEqual(manual[1].valid_ratio, 0.5)
+        self.assertAlmostEqual(manual[1].quality_score, 0.4)
+        self.assertEqual(manual[0].valid_ratio, 1.0)
+        self.assertAlmostEqual(manual[0].quality_score, 0.9)
+        with self.assertRaises(TypeError):
+            segment_input_evidence(report)
+
+        # Any interval can be explained, e.g. a review row inside a segment.
+        (row,) = interval_input_evidence(report, [(500, 1_500)])
+        self.assertAlmostEqual(
+            row[1].quality_score,
+            (0.4 * 500 + 0.6 * 500) / 1_000,
+        )
+        self.assertEqual(row[1].valid_ratio, 1.0)
+        for interval in ((0, 0), (1_000, 900), (-1, 10), (0, 2_001)):
+            with self.subTest(interval=interval):
+                with self.assertRaises(ValueError):
+                    interval_input_evidence(report, [interval])
 
 
 if __name__ == "__main__":

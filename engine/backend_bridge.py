@@ -194,6 +194,80 @@ def _manifest_milliseconds(value: object, location: str) -> int:
     return value
 
 
+def _manifest_sample_index(value: object, location: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise BridgeArgumentError(
+            f"multi-input manifest {location} must be an integer sample index"
+        )
+    if not 0 <= value <= MAX_SIGNED_64_BIT_INTEGER:
+        raise BridgeArgumentError(
+            f"multi-input manifest {location} must be between 0 and the signed 64-bit maximum"
+        )
+    return value
+
+
+def _manifest_selection_overrides(
+    value: object,
+    *,
+    input_count: int,
+) -> list[dict[str, int]]:
+    """Validate user channel overrides on the 16 kHz reference timeline.
+
+    Whether an override ends inside the reference recording is only known
+    after decoding, so that bound is checked by the analysis stage.
+    """
+
+    if not isinstance(value, list):
+        raise BridgeArgumentError(
+            "multi-input manifest selection.overrides must be a JSON array"
+        )
+    overrides: list[dict[str, int]] = []
+    for index, raw_override in enumerate(value):
+        location = f"selection.overrides[{index}]"
+        item = _manifest_object(raw_override, location)
+        _reject_unknown_manifest_fields(
+            item,
+            {"start_sample", "end_sample", "input_index"},
+            location,
+        )
+        start_sample = _manifest_sample_index(
+            _manifest_field(item, "start_sample", location),
+            f"{location}.start_sample",
+        )
+        end_sample = _manifest_sample_index(
+            _manifest_field(item, "end_sample", location),
+            f"{location}.end_sample",
+        )
+        if end_sample <= start_sample:
+            raise BridgeArgumentError(
+                f"multi-input manifest {location}.end_sample must be greater than start_sample"
+            )
+        input_index = _manifest_field(item, "input_index", location)
+        if (
+            isinstance(input_index, bool)
+            or not isinstance(input_index, int)
+            or not 0 <= input_index < input_count
+        ):
+            raise BridgeArgumentError(
+                f"multi-input manifest {location}.input_index must identify an input file"
+            )
+        overrides.append(
+            {
+                "start_sample": start_sample,
+                "end_sample": end_sample,
+                "input_index": input_index,
+            }
+        )
+
+    overrides.sort(key=lambda item: (item["start_sample"], item["end_sample"]))
+    for previous, current in zip(overrides, overrides[1:]):
+        if current["start_sample"] < previous["end_sample"]:
+            raise BridgeArgumentError(
+                "multi-input manifest selection.overrides must not overlap"
+            )
+    return overrides
+
+
 def _resolve_manifest_input_path(
     value: object,
     *,
@@ -354,7 +428,7 @@ def validate_multi_input_manifest(
     )
     _reject_unknown_manifest_fields(
         selection,
-        {"mode", "window_seconds", "hop_seconds"},
+        {"mode", "window_seconds", "hop_seconds", "overrides"},
         "selection",
     )
     selection_mode = _manifest_string(
@@ -382,6 +456,10 @@ def validate_multi_input_manifest(
             "multi-input manifest selection.hop_seconds must be greater than 0 "
             "and no greater than selection.window_seconds"
         )
+    overrides = _manifest_selection_overrides(
+        selection.get("overrides", []),
+        input_count=len(normalized_inputs),
+    )
 
     return {
         "version": version,
@@ -395,6 +473,7 @@ def validate_multi_input_manifest(
             "mode": selection_mode,
             "window_seconds": window_seconds,
             "hop_seconds": hop_seconds,
+            "overrides": overrides,
         },
     }
 

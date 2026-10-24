@@ -159,12 +159,22 @@ directory가 아닌 이 절대 경로를 그대로 해석한다. `--output-dir`�
 - `alignment.mode`는 버전 1에서 `auto`다. `manual_offsets_ms`는 입력 인덱스의
   정규 십진 문자열(`"0"`, `"1"`, ...)을 키로 하고 signed 64-bit 정수
   밀리초를 값으로 갖는 객체다. 수동 오프셋은 음수일 수 있지만 키는 반드시 현재
-  입력 범위 안에 있어야 한다.
+  입력 범위 안에 있어야 한다. 양수는 기준 파일보다 늦게 시작한 녹음이다.
+  수동 오프셋이 있는 입력은 자동 추정 상태와 관계없이 그 오프셋만으로(드리프트
+  보정 없이) 기준 시간축에 배치되며, 기준 입력의 수동 오프셋은 0만 허용한다.
 - `selection.mode`는 버전 1에서 `automatic`이다. `window_seconds`와
   `hop_seconds`는 유한한 양수이며 `hop_seconds <= window_seconds`여야 한다.
-- 예시에 표시된 최상위 및 하위 필드는 모두 필수다. 버전 1에서 정의하지 않은
-  추가 필드와 같은 JSON 객체 안의 중복 필드 이름은 사용자 설정 오타나 모호한
-  해석을 막기 위해 거부한다.
+- `selection.overrides`는 선택 필드이며 생략하면 빈 배열이다. 각 항목
+  `{"start_sample": 0, "end_sample": 48000, "input_index": 1}`은 기준 시간축의
+  16 kHz 분석 샘플 구간 `[start_sample, end_sample)`에서 사용자가 강제로 고른
+  입력을 뜻한다. 샘플 인덱스는 0 이상 정수이고 `end_sample > start_sample`,
+  `input_index`는 `inputs` 범위 안이어야 하며 구간끼리 겹칠 수 없다. 기준
+  녹음 길이를 넘는 구간은 디코딩 뒤 분석 단계에서 계약 오류로 거부한다. 자동
+  채널 선택 계획을 만든 뒤 이 구간에만 사용자의 선택을 적용하므로 수동 선택이
+  다른 구간의 자동 선택을 바꾸지 않는다.
+- `selection.overrides`를 제외하고 예시에 표시된 최상위 및 하위 필드는 모두
+  필수다. 버전 1에서 정의하지 않은 추가 필드와 같은 JSON 객체 안의 중복 필드
+  이름은 사용자 설정 오타나 모호한 해석을 막기 위해 거부한다.
 - JSON의 `NaN`, `Infinity`, `-Infinity`, 잘못된 필드 타입, 없는 입력 파일은
   사용자용 인자 오류로 거부한다.
 
@@ -172,6 +182,34 @@ directory가 아닌 이 절대 경로를 그대로 해석한다. `--output-dir`�
 생성과 Whisper 연결은 다중 입력 전처리 실행 경로에서 이 검증 결과를 소비한다.
 그 실행 경로가 연결되기 전에는 정상 매니페스트도 단일 입력으로 대체 실행하지
 않으며, Bridge는 `error` 이벤트와 종료 코드 1로 기능 미연결을 명시한다.
+
+### 다중 입력 음질 분석 단발 명령
+
+`python multimic_quality.py --multi-input-manifest JSON_PATH`는 위 매니페스트를
+같은 검증기로 읽어 준비, 자동 정렬과 수동 오프셋 적용, 발화·음질 분석, 수동
+override를 포함한 채널 선택까지만 실행한다. 오디오 합성이나 원본 쓰기는 하지
+않는다. JSON Lines 이벤트 대신 stdout에 strict JSON 객체 하나만 쓰고, 진단과
+traceback은 stderr로 보낸다. Qt는 `QProcess`로 실행하며 취소는 프로세스 종료다.
+
+성공(종료 코드 0) 응답의 주요 필드는 다음과 같다.
+
+| 필드 | 내용 |
+|---|---|
+| `version`, `ok` | `1`, `true` |
+| `sources[]` | `input_index`, `path`, `label` |
+| `alignment.inputs[]` | `input_index`, `source`(`reference`/`automatic`/`manual`), `status`, `offset_ms`, `time_scale`, `drift_ppm`, `confidence` — 실제 적용된 정렬 |
+| `quality.inputs[]` | 입력별 전체 품질 요약(`quality_score`, `score_coverage_ratio` 등) |
+| `selection` | `sample_rate`, `timeline_sample_count`, `review_row_seconds`, `switch_count`, `manual_override_count`, `segments[]`, `rows[]`, `warnings[]`, `reason_descriptions` |
+| `selection.segments[]` | 기준 시간축을 빈틈없이 나눈 최종 채널 선택 구간(`channel_selection.json`의 구간과 같은 형식). `start_sample`, `end_sample`, `start`, `end`, `selected_input_index`, `automatic_input_index`, `selection_source`(`automatic`/`manual_override`), `quality_score`, `confidence`, `reason`, `reason_codes` |
+| `selection.rows[]` | 검토용 행. 한 마이크가 계속 우세하면 최종 구간이 녹음 대부분을 덮을 수 있으므로, 각 최종 구간을 기준 시간축의 고정 격자(`review_row_seconds`, 5초)에서 나눈다. 구간 시작·끝에서 1초 미만인 조각은 만들지 않으며, 격자가 고정되어 재분석 뒤에도 행 경계가 유지된다. `start_sample`, `end_sample`, `start`, `end`, `segment_index`, `selected_input_index`, `automatic_input_index`, `selection_source`, 자동 선택 근거 `automatic`(`input_index`, 이 행의 `quality_score`, 자동 구간 전체의 `confidence`·`reason`·`reason_codes`, 그 자동 구간의 `segment_start_sample`·`segment_end_sample`), 입력별 근거 `inputs[]`(`input_index`, 이 행의 `quality_score`, `valid_ratio`) |
+
+GUI의 수동 채널 선택은 행 단위로 `selection.overrides`에 담아 보낸다.
+
+실패 응답은 `ok:false`와 `kind`, `code`, `message`, `errors[]`, `warnings[]`를
+가진다. `kind`는 `preparation`(입력별 디코딩 실패, 종료 코드 1), `alignment`
+(`alignment_unresolved`: 자동 정렬에 실패했고 수동 오프셋도 없는 입력 목록,
+종료 코드 1), `contract`(인자·매니페스트·기준 시간축을 벗어난 override, 종료
+코드 2), `dependency`(1), `cancelled`(130), `unexpected`(1) 중 하나다.
 
 Bridge 자체의 인자 오류는 `error` 이벤트 후 종료 코드 2, 입력 오류는 2, 모델
 경로 오류는 3, 실행 중 오류는 1을 사용한다. 사용자 취소로 정상적인 이벤트를

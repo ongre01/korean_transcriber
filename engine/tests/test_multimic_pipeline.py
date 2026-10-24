@@ -12,15 +12,24 @@ ENGINE_DIR = Path(__file__).resolve().parents[1]
 if str(ENGINE_DIR) not in sys.path:
     sys.path.insert(0, str(ENGINE_DIR))
 
+import multimic
+from multimic.align import (
+    AlignmentFailure,
+    AlignmentWarning,
+    InputAlignment,
+    MultiAudioAlignment,
+)
 from multimic.pipeline import (
     ANALYSIS_SAMPLE_RATE,
     AnalysisSignal,
     MultiAudioPreparationError,
     SUPPORTED_AUDIO_EXTENSIONS,
+    apply_manual_alignment_offsets,
     build_validity_mask,
     fingerprint_file,
     place_signal_on_timeline,
     prepare_multi_audio_inputs,
+    warp_signal_to_reference_timeline,
 )
 from test_audio_metadata import write_wave_file
 
@@ -238,6 +247,170 @@ class ValidityMaskTests(unittest.TestCase):
 
         np.testing.assert_array_equal(placed.samples, [2.0, 3.0, 4.0])
         np.testing.assert_array_equal(placed.valid_mask, [False, True, True])
+
+
+def alignment_result(
+    input_index: int,
+    *,
+    offset_samples: int | None,
+    failure: AlignmentFailure | None = None,
+    requires_manual_review: bool = False,
+    confidence: float = 0.9,
+) -> InputAlignment:
+    return InputAlignment(
+        input_index=input_index,
+        reference_index=0,
+        offset_samples=offset_samples,
+        offset_ms=(
+            None if offset_samples is None else offset_samples / 16.0
+        ),
+        confidence=confidence,
+        method="reference" if input_index == 0 else "normalized_cross_correlation",
+        failure=failure,
+        selected_window_count=4,
+        accepted_window_count=3,
+        consistent_window_count=3,
+        offset_dispersion_ms=1.5,
+        time_scale=None if offset_samples is None else 1.0,
+        drift_ppm=12.5 if input_index else 0.0,
+        correction_method=(
+            "manual_review" if requires_manual_review else "offset_only"
+        ),
+        requires_manual_review=requires_manual_review,
+        warning=(
+            AlignmentWarning("manual_review_required", "review")
+            if requires_manual_review
+            else None
+        ),
+    )
+
+
+def reviewed_alignment() -> MultiAudioAlignment:
+    return MultiAudioAlignment(
+        reference_index=0,
+        sample_rate=ANALYSIS_SAMPLE_RATE,
+        inputs=(
+            alignment_result(0, offset_samples=0, confidence=1.0),
+            alignment_result(
+                1,
+                offset_samples=None,
+                failure=AlignmentFailure("insufficient_shared_audio", "no event"),
+                confidence=0.12,
+            ),
+            alignment_result(
+                2,
+                offset_samples=None,
+                failure=AlignmentFailure("unstable_drift", "review"),
+                requires_manual_review=True,
+            ),
+            alignment_result(3, offset_samples=-4_000),
+        ),
+        reference_windows=((0, 12_000),),
+    )
+
+
+class ManualAlignmentOffsetTests(unittest.TestCase):
+    def test_package_exports_manual_offset_api(self) -> None:
+        self.assertIs(
+            multimic.apply_manual_alignment_offsets,
+            apply_manual_alignment_offsets,
+        )
+
+    def test_manual_offsets_resolve_failed_and_review_inputs_only(self) -> None:
+        alignment = reviewed_alignment()
+
+        resolved = apply_manual_alignment_offsets(
+            alignment,
+            {0: 0, 1: 500, 2: -125},
+        )
+
+        self.assertTrue(resolved.success)
+        self.assertIs(resolved.inputs[0], alignment.inputs[0])
+        self.assertIs(resolved.inputs[3], alignment.inputs[3])
+        for index, offset_ms in ((1, 500), (2, -125)):
+            item = resolved.result_for_input(index)
+            self.assertEqual(item.status, "aligned")
+            self.assertEqual(item.offset_samples, offset_ms * 16)
+            self.assertEqual(item.offset_ms, float(offset_ms))
+            self.assertEqual(item.time_scale, 1.0)
+            self.assertFalse(item.correction_applied)
+            self.assertEqual(item.correction_method, "manual_offset")
+            self.assertEqual(item.method, "manual_offset")
+            self.assertIsNone(item.failure)
+            self.assertIsNone(item.warning)
+        # Automatic evidence is retained for diagnostics.
+        self.assertEqual(resolved.result_for_input(1).confidence, 0.12)
+
+        # A manual offset is consumed by the existing renderer.
+        signal = AnalysisSignal(
+            samples=np.ones(100, dtype=np.float32),
+            valid_mask=np.ones(100, dtype=np.bool_),
+        )
+        placed = warp_signal_to_reference_timeline(
+            signal,
+            apply_manual_alignment_offsets(alignment, {1: 2}).result_for_input(1),
+            timeline_sample_count=100,
+        )
+        self.assertEqual(int(np.flatnonzero(placed.valid_mask)[0]), 32)
+
+    def test_inputs_without_manual_offsets_keep_their_failures(self) -> None:
+        resolved = apply_manual_alignment_offsets(reviewed_alignment(), {1: 0})
+
+        self.assertFalse(resolved.success)
+        self.assertEqual(
+            [item.input_index for item in resolved.failures],
+            [2],
+        )
+        self.assertEqual(resolved.result_for_input(1).offset_samples, 0)
+
+    def test_invalid_manual_offsets_are_rejected(self) -> None:
+        alignment = reviewed_alignment()
+        for offsets in (
+            {0: 10},
+            {4: 0},
+            {-1: 0},
+            {1: True},
+            {True: 0},
+            {1: 1.5},
+            {"1": 0},
+        ):
+            with self.subTest(offsets=offsets):
+                with self.assertRaises(ValueError):
+                    apply_manual_alignment_offsets(alignment, offsets)
+        with self.assertRaises(TypeError):
+            apply_manual_alignment_offsets(alignment, [(1, 0)])
+        with self.assertRaises(TypeError):
+            apply_manual_alignment_offsets(object(), {})
+
+    def test_large_offsets_round_exactly(self) -> None:
+        alignment = MultiAudioAlignment(
+            reference_index=0,
+            sample_rate=44_100,
+            inputs=(
+                alignment_result(0, offset_samples=0),
+                alignment_result(
+                    1,
+                    offset_samples=None,
+                    failure=AlignmentFailure("failed", "x"),
+                ),
+            ),
+            reference_windows=(),
+        )
+        for offset_ms, expected in (
+            (1, 44),
+            (3, 132),
+            (-1, -44),
+            (2**62, (2**62 * 44_100 + 500) // 1_000),
+        ):
+            with self.subTest(offset_ms=offset_ms):
+                resolved = apply_manual_alignment_offsets(
+                    alignment,
+                    {1: offset_ms},
+                )
+                self.assertEqual(
+                    resolved.result_for_input(1).offset_samples,
+                    expected,
+                )
 
 
 if __name__ == "__main__":

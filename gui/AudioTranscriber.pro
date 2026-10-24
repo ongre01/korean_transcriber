@@ -30,6 +30,7 @@ SOURCES += \
     input/AudioFileInfo.cpp \
     input/MultiAudioInputDialog.cpp \
     input/MultiAudioInputModel.cpp \
+    input/MultiAudioSelectionModel.cpp \
     logging/AppLogger.cpp \
     logging/LogDialog.cpp \
     settings/Settings.cpp \
@@ -47,6 +48,7 @@ HEADERS += \
     input/AudioFileInfo.h \
     input/MultiAudioInputDialog.h \
     input/MultiAudioInputModel.h \
+    input/MultiAudioSelectionModel.h \
     logging/AppLogger.h \
     logging/LogDialog.h \
     settings/Settings.h \

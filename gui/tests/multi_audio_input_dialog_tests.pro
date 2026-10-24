@@ -10,9 +10,11 @@ SOURCES += \
     tst_multiaudioinputdialog.cpp \
     ../input/AudioFileInfo.cpp \
     ../input/MultiAudioInputDialog.cpp \
-    ../input/MultiAudioInputModel.cpp
+    ../input/MultiAudioInputModel.cpp \
+    ../input/MultiAudioSelectionModel.cpp
 
 HEADERS += \
     ../input/AudioFileInfo.h \
     ../input/MultiAudioInputDialog.h \
-    ../input/MultiAudioInputModel.h
+    ../input/MultiAudioInputModel.h \
+    ../input/MultiAudioSelectionModel.h

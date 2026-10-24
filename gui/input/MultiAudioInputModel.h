@@ -123,6 +123,14 @@ public:
     bool isConfigurationValid(QString *reason = nullptr) const;
     bool isAlignmentResolved(QString *reason = nullptr) const;
 
+    // A channel-selection result stays valid only while the used inputs, the
+    // reference and their reviewed alignment are unchanged. The timeline key
+    // identifies just the reference recording that defines the time axis.
+    static QString selectionAnalysisKey(const QVector<MultiAudioInput> &inputs,
+                                        int referenceRow);
+    static QString selectionTimelineKey(const QVector<MultiAudioInput> &inputs,
+                                        int referenceRow);
+
     bool setInspectionStarted(const QString &path);
     bool setInspectionSucceeded(const QString &path,
                                 qint64 durationMilliseconds);

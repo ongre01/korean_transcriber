@@ -505,6 +505,13 @@ bool MainWindow::hasReadyInputForCurrentMode() const
         : hasValidInput() && !m_inputInspectionPending;
 }
 
+bool MainWindow::hasCurrentMultiAudioSelection() const
+{
+    return hasResolvedMultiAudioAlignment()
+        && m_multiAudioSelectionPlan.isCurrentFor(m_multiAudioInputs,
+                                                  m_multiAudioReferenceRow);
+}
+
 QVector<MultiAudioInput> MainWindow::multiAudioInputs() const
 {
     return m_multiAudioInputs;
@@ -513,6 +520,11 @@ QVector<MultiAudioInput> MainWindow::multiAudioInputs() const
 int MainWindow::multiAudioReferenceRow() const noexcept
 {
     return m_multiAudioReferenceRow;
+}
+
+MultiAudioSelectionPlan MainWindow::multiAudioSelectionPlan() const
+{
+    return m_multiAudioSelectionPlan;
 }
 
 AudioRecorder *MainWindow::audioRecorder() const noexcept
@@ -750,6 +762,9 @@ void MainWindow::handleMultiAudioInput()
     dialog.setAlignmentAnalyzerConfiguration(
         m_settings.pythonPath,
         enginePaths.assetPath(QStringLiteral("multimic_alignment.py")));
+    dialog.setQualityAnalyzerConfiguration(
+        m_settings.pythonPath,
+        enginePaths.assetPath(QStringLiteral("multimic_quality.py")));
     QString initialDirectory = m_settings.lastInputDirectory;
     if (initialDirectory.isEmpty() || !QFileInfo(initialDirectory).isDir()) {
         initialDirectory = QDir::homePath();
@@ -757,6 +772,7 @@ void MainWindow::handleMultiAudioInput()
     dialog.setInitialDirectory(initialDirectory);
     dialog.setInputs(m_multiAudioInputs);
     dialog.setReferenceRow(m_multiAudioReferenceRow);
+    dialog.setSelectionPlan(m_multiAudioSelectionPlan);
 
     if (dialog.exec() != QDialog::Accepted) {
         return;
@@ -764,6 +780,7 @@ void MainWindow::handleMultiAudioInput()
 
     m_multiAudioInputs = dialog.inputs();
     m_multiAudioReferenceRow = dialog.referenceRow();
+    m_multiAudioSelectionPlan = dialog.selectionPlan();
     if (QFileInfo(dialog.lastDirectory()).isDir()) {
         m_settings.lastInputDirectory = dialog.lastDirectory();
         saveSettings();
@@ -805,6 +822,30 @@ void MainWindow::handleMultiAudioInput()
                 .arg(enabledInputCount)
                 .arg(m_multiAudioReferenceRow)
                 .arg(inputDetails.join(QStringLiteral("\n"))));
+    if (!m_multiAudioSelectionPlan.isEmpty()) {
+        const MultiAudioSelectionPlan &plan = m_multiAudioSelectionPlan;
+        QStringList overrideDetails;
+        for (const MultiAudioSelectionSegment &segment : plan.segments) {
+            if (!segment.isManual()) {
+                continue;
+            }
+            overrideDetails.append(
+                tr("%1-%2: automatic %3 -> manual %4")
+                    .arg(MultiAudioSelectionModel::formatPosition(
+                             segment.startSample, plan.sampleRate),
+                         MultiAudioSelectionModel::formatPosition(
+                             segment.endSample, plan.sampleRate),
+                         QFileInfo(segment.automaticInputPath).fileName(),
+                         QFileInfo(segment.overrideInputPath).fileName()));
+        }
+        logInfo(tr("Multi Audio Channel Selection"),
+                tr("Current: %1; Segments: %2; Manual: %3; Switches: %4\n%5")
+                    .arg(hasCurrentMultiAudioSelection() ? tr("yes") : tr("no"))
+                    .arg(plan.segments.size())
+                    .arg(plan.manualSegmentCount())
+                    .arg(plan.switchCount())
+                    .arg(overrideDetails.join(QStringLiteral("\n"))));
+    }
     setInputMode(InputMode::MultiAudioFiles);
 }
 
@@ -1399,14 +1440,40 @@ void MainWindow::updateInputFileUi()
         QString alignmentReason;
         const bool alignmentResolved =
             hasResolvedMultiAudioAlignment(&alignmentReason);
+        QString selectionStatus;
+        QString selectionToolTip;
+        if (!alignmentResolved) {
+            selectionStatus = tr("정렬 후 실행");
+        } else if (hasCurrentMultiAudioSelection()) {
+            const int manualCount = m_multiAudioSelectionPlan.manualSegmentCount();
+            selectionStatus = manualCount > 0
+                ? tr("완료(수동 %1구간)").arg(manualCount)
+                : tr("완료(자동)");
+            selectionToolTip =
+                tr("통합 음성 합성과 전사에는 음질 분석의 최종 선택(수동 선택 %1구간 포함)이 적용됩니다.")
+                    .arg(manualCount);
+        } else if (m_multiAudioSelectionPlan.isEmpty()) {
+            selectionStatus = tr("필요");
+            selectionToolTip =
+                tr("다중 파일 설정에서 음질 분석을 실행해 구간별 채널 선택을 확인하세요.");
+        } else {
+            selectionStatus = tr("재실행 필요");
+            selectionToolTip =
+                tr("입력·기준 파일·시간 정렬이 바뀌어 이전 음질 분석 결과가 최신이 아닙니다.");
+        }
         ui->fileNameValueLabel->setText(
-            tr("전체 %1개 · 사용 %2개 · 시간 정렬 %3")
+            tr("전체 %1개 · 사용 %2개 · 시간 정렬 %3 · 음질 분석 %4")
                 .arg(m_multiAudioInputs.size())
                 .arg(enabledCount)
-                .arg(alignmentResolved ? tr("완료") : tr("미해결")));
-        ui->fileNameValueLabel->setToolTip(
+                .arg(alignmentResolved ? tr("완료") : tr("미해결"),
+                     selectionStatus));
+        QStringList toolTips{
             alignmentResolved ? tr("사용할 모든 파일의 시간 정렬이 해결되었습니다.")
-                              : alignmentReason);
+                              : alignmentReason};
+        if (!selectionToolTip.isEmpty()) {
+            toolTips.append(selectionToolTip);
+        }
+        ui->fileNameValueLabel->setToolTip(toolTips.join(QLatin1Char('\n')));
         ui->fileSizeValueLabel->setText(formattedFileSize(totalSize));
 
         if (m_multiAudioReferenceRow >= 0
@@ -1890,9 +1957,16 @@ void MainWindow::updateUiForState()
     QString transcribeToolTip;
     if (multiInputAwaitingBackend) {
         QString alignmentReason;
-        transcribeToolTip = hasResolvedMultiAudioAlignment(&alignmentReason)
-            ? tr("시간 정렬은 완료되었습니다. 다중 마이크 파일 전사 연동은 후속 개발 단계에서 제공됩니다.")
-            : alignmentReason;
+        if (!hasResolvedMultiAudioAlignment(&alignmentReason)) {
+            transcribeToolTip = alignmentReason;
+        } else if (hasCurrentMultiAudioSelection()) {
+            transcribeToolTip =
+                tr("시간 정렬과 채널 선택(수동 %1구간 포함)이 준비되었습니다. 다중 마이크 파일 전사 연동은 후속 개발 단계에서 제공됩니다.")
+                    .arg(m_multiAudioSelectionPlan.manualSegmentCount());
+        } else {
+            transcribeToolTip =
+                tr("시간 정렬은 완료되었습니다. 다중 파일 설정에서 음질 분석으로 채널 선택을 확인하세요. 다중 마이크 파일 전사 연동은 후속 개발 단계에서 제공됩니다.");
+        }
     }
     ui->transcribeButton->setToolTip(transcribeToolTip);
     ui->cancelButton->setEnabled(policy.canCancel && !m_cancellationPending);
