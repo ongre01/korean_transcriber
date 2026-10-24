@@ -16,6 +16,8 @@ import sys
 import traceback
 from typing import TYPE_CHECKING, Callable, TextIO
 
+from backend_protocol import EventStreamValidator, parse_event_line
+
 if TYPE_CHECKING:
     from vad import SpeechRegion
 
@@ -68,8 +70,20 @@ class BridgeArgumentParser(argparse.ArgumentParser):
 
 
 class EventWriter:
+    """Write protocol events after checking them against the wire contract.
+
+    Every line is parsed with the same validator the tests and Qt mirror use
+    before it is written, so a malformed event or any event after the single
+    terminal ``completed``/``error`` raises here instead of reaching stdout.
+    """
+
     def __init__(self, stream: TextIO):
         self._stream = stream
+        self._validator = EventStreamValidator()
+
+    @property
+    def terminal(self) -> str | None:
+        return self._validator.terminal
 
     def emit(self, event_type: str, **fields) -> None:
         payload = {"type": event_type, **fields}
@@ -79,6 +93,7 @@ class EventWriter:
             allow_nan=False,
             separators=(",", ":"),
         )
+        self._validator.accept(parse_event_line(line.encode("utf-8")))
         self._stream.write(line + "\n")
         self._stream.flush()
 
@@ -87,6 +102,29 @@ class EventWriter:
 
     def warning(self, message: str) -> None:
         self.emit("warning", message=message)
+
+    def completed(
+        self,
+        text_file: str | Path,
+        srt_file: str | Path,
+        *,
+        merged_audio_file: str | Path | None = None,
+        alignment_file: str | Path | None = None,
+        selection_file: str | Path | None = None,
+    ) -> None:
+        fields = {"text_file": str(text_file), "srt_file": str(srt_file)}
+        artifacts = {
+            "merged_audio_file": merged_audio_file,
+            "alignment_file": alignment_file,
+            "selection_file": selection_file,
+        }
+        fields.update(
+            (name, str(path)) for name, path in artifacts.items() if path is not None
+        )
+        self.emit("completed", **fields)
+
+    def error(self, message: str) -> None:
+        self.emit("error", message=message if message.strip() else "Backend processing failed.")
 
     def progress(
         self,
@@ -1026,17 +1064,31 @@ def run_bridge(
         writer.progress(100, duration, duration)
     else:
         writer.progress(100)
-    writer.emit(
-        "completed",
-        text_file=str(txt_path),
-        srt_file=str(srt_path),
-    )
+    writer.completed(txt_path, srt_path)
     return 0
 
 
 def _write_diagnostic(diagnostic: TextIO, exc: BaseException) -> None:
     traceback.print_exception(type(exc), exc, exc.__traceback__, file=diagnostic)
     diagnostic.flush()
+
+
+def _finish_stream(writer: EventWriter, exit_code: int) -> int:
+    """Return an exit code that agrees with the run's single terminal event."""
+
+    if writer.terminal is None:
+        writer.error("Backend finished without reporting a result.")
+    if writer.terminal == "completed":
+        return 0
+    return exit_code if exit_code != 0 else 1
+
+
+def _report_failure(writer: EventWriter, message: str, exit_code: int) -> int:
+    # A failure after the terminal event must not append a second one: the
+    # first terminal event already told Qt how this run ended.
+    if writer.terminal is None:
+        writer.error(message)
+    return _finish_stream(writer, exit_code)
 
 
 def main(
@@ -1054,7 +1106,7 @@ def main(
     try:
         args = parse_arguments(argv)
     except BridgeArgumentError as exc:
-        writer.emit("error", message=f"Invalid bridge arguments: {exc}")
+        writer.error(f"Invalid bridge arguments: {exc}")
         diagnostic.write(f"Argument error: {exc}\n")
         diagnostic.flush()
         return 2
@@ -1066,38 +1118,44 @@ def main(
                 and getattr(args, "multi_input_manifest", None) is None
             ):
                 engine_module = importlib.import_module("transcribe_npu")
-            return run_bridge(
+            exit_code = run_bridge(
                 args,
                 engine_module,
                 writer,
                 diarize_function=diarize_function,
             )
     except KeyboardInterrupt as exc:
-        writer.emit("error", message="Transcription was cancelled.")
+        exit_code = _report_failure(writer, "Transcription was cancelled.", 130)
         _write_diagnostic(diagnostic, exc)
-        return 130
+        return exit_code
     except BridgeFailure as exc:
-        writer.emit("error", message=str(exc))
+        exit_code = _report_failure(writer, str(exc), exc.exit_code)
         _write_diagnostic(diagnostic, exc)
-        return exc.exit_code
+        return exit_code
     except ModuleNotFoundError as exc:
         name = exc.name or "unknown"
-        writer.emit(
-            "error",
-            message=(
+        exit_code = _report_failure(
+            writer,
+            (
                 f"Required Python module is not installed: {name}. "
                 f"Current interpreter: {sys.executable}. "
                 f"Run {APP_DIR / 'setup.bat'} to install the runtime packages, "
                 "then select the engine virtual environment in Settings: "
                 f"{APP_DIR / '.venv' / 'Scripts' / 'python.exe'}."
             ),
+            1,
         )
         _write_diagnostic(diagnostic, exc)
-        return 1
+        return exit_code
     except Exception as exc:
-        writer.emit("error", message=_failure_message("Backend processing failed", exc))
+        exit_code = _report_failure(
+            writer,
+            _failure_message("Backend processing failed", exc),
+            1,
+        )
         _write_diagnostic(diagnostic, exc)
-        return 1
+        return exit_code
+    return _finish_stream(writer, exit_code)
 
 
 def _configure_standard_streams() -> None:
@@ -1107,6 +1165,32 @@ def _configure_standard_streams() -> None:
             reconfigure(encoding="utf-8", errors="strict", newline="\n", write_through=True)
 
 
+def _isolate_protocol_stdout() -> TextIO:
+    """Reserve the process stdout for protocol events only.
+
+    ``redirect_stdout`` in ``main`` only redirects Python-level writes. Native
+    libraries (OpenVINO, FFmpeg) and child processes write to file descriptor 1
+    directly, so the protocol stream gets a private duplicate of that
+    descriptor and descriptor 1 is pointed at stderr for everything else.
+    """
+
+    try:
+        stdout_descriptor = sys.stdout.fileno()
+        stderr_descriptor = sys.stderr.fileno()
+    except (AttributeError, OSError, ValueError):
+        return sys.stdout
+    sys.stdout.flush()
+    protocol_descriptor = os.dup(stdout_descriptor)
+    os.dup2(stderr_descriptor, stdout_descriptor)
+    return open(
+        protocol_descriptor,
+        "w",
+        encoding="utf-8",
+        errors="strict",
+        newline="\n",
+    )
+
+
 if __name__ == "__main__":
     _configure_standard_streams()
-    raise SystemExit(main())
+    raise SystemExit(main(stdout=_isolate_protocol_stdout()))

@@ -1,0 +1,28 @@
+{"type":"state","value":"preparing"}
+{"type":"progress","value":null}
+{"type":"state","value":"decoding_audio"}
+{"type":"progress","value":null}
+{"type":"state","value":"aligning_audio"}
+{"type":"progress","value":null}
+{"type":"warning","message":"발표자 근처 입력의 정렬 신뢰도가 낮습니다."}
+{"type":"state","value":"detecting_speech"}
+{"type":"progress","value":null}
+{"type":"state","value":"assessing_channels"}
+{"type":"progress","value":null}
+{"type":"state","value":"selecting_channels"}
+{"type":"progress","value":null}
+{"type":"state","value":"rendering_merged_audio"}
+{"type":"progress","value":null}
+{"type":"state","value":"loading_model"}
+{"type":"progress","value":null}
+{"type":"state","value":"transcribing"}
+{"type":"progress","value":60,"processed_seconds":6.0,"total_seconds":10.0}
+{"type":"progress","value":99,"processed_seconds":10.0,"total_seconds":10.0}
+{"type":"state","value":"diarization"}
+{"type":"progress","value":null}
+{"type":"segment","start":0.0,"end":4.0,"speaker":1,"text":"다중 마이크 회의를 시작합니다."}
+{"type":"segment","start":4.0,"end":9.5,"speaker":2,"text":"발표자 마이크로 전환된 구간입니다."}
+{"type":"state","value":"saving_result"}
+{"type":"progress","value":null}
+{"type":"progress","value":100,"processed_seconds":10.0,"total_seconds":10.0}
+{"type":"completed","text_file":"C:/Results/회의 다중.txt","srt_file":"C:/Results/회의 다중.srt","merged_audio_file":"C:/Results/merged_16k_mono.wav","alignment_file":"C:/Results/alignment.json","selection_file":"C:/Results/channel_selection.json"}

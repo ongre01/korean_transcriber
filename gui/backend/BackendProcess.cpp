@@ -7,27 +7,6 @@
 
 namespace {
 
-QString stateName(BackendState state)
-{
-    switch (state) {
-    case BackendState::Preparing:
-        return QStringLiteral("preparing");
-    case BackendState::LoadingModel:
-        return QStringLiteral("loading_model");
-    case BackendState::DecodingAudio:
-        return QStringLiteral("decoding_audio");
-    case BackendState::DetectingSpeech:
-        return QStringLiteral("detecting_speech");
-    case BackendState::Transcribing:
-        return QStringLiteral("transcribing");
-    case BackendState::Diarization:
-        return QStringLiteral("diarization");
-    case BackendState::SavingResult:
-        return QStringLiteral("saving_result");
-    }
-    return {};
-}
-
 QString quotedCommandArgument(const QString &argument)
 {
     if (!argument.isEmpty()
@@ -290,7 +269,7 @@ void BackendProcess::dispatchEvent(const BackendEvent &event)
 {
     switch (event.type) {
     case BackendEventType::State:
-        emit stateChanged(stateName(event.state));
+        emit stateChanged(BackendProtocol::stateValue(event.state));
         break;
     case BackendEventType::Progress:
         emit progressChanged(event.progress.value_or(-1));

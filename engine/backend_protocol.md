@@ -20,6 +20,17 @@
   실패나 강제 종료처럼 이벤트를 쓸 수 없는 실패는 Qt 프로세스 계층이 별도로
   실패 처리한다.
 - 세그먼트가 0개인 성공도 허용한다. 이 경우 `segment` 없이 `completed`로 끝난다.
+- Bridge의 `EventWriter`는 각 이벤트를 쓰기 전에 `backend_protocol.py`의
+  `parse_event_line()`과 `EventStreamValidator`로 검증한다. 계약을 벗어난 이벤트나
+  종료 이벤트 뒤의 이벤트는 stdout에 쓰지 않고 예외가 되며, 아직 종료 이벤트가
+  없으면 `error` 하나로 보고된다. 종료 이벤트를 보낸 뒤 발생한 늦은 실패는 stderr
+  진단만 남기고 종료 코드를 이미 보낸 종료 이벤트에 맞춘다(`completed`면 0).
+  `run_bridge()`가 종료 이벤트 없이 반환하면 `error`를 보내고 0이 아닌 코드로
+  종료한다.
+- 스크립트로 실행될 때 Bridge는 시작 직후 원래 stdout 파일 디스크립터를 복제해
+  프로토콜 전용 스트림으로 쓰고, 디스크립터 1은 stderr로 돌린다. Python
+  `print()`뿐 아니라 네이티브 라이브러리(OpenVINO, FFmpeg 등)나 자식 프로세스가
+  디스크립터 1에 직접 쓰는 출력도 stdout에 섞이지 않는다.
 
 ## 이벤트
 
@@ -33,9 +44,26 @@ JSON의 `number`는 유한한 값이어야 하며 초 단위 시간은 0 이상�
 {"type":"state","value":"loading_model"}
 ```
 
-`value`는 `preparing`, `loading_model`, `decoding_audio`, `transcribing`,
-`diarization`, `saving_result` 중 하나다. 완료 상태는 별도의 `completed` 이벤트로
-표현한다.
+`value`는 아래 값 중 하나다. 완료 상태는 별도의 `completed` 이벤트로 표현한다.
+
+| `value` | 모드 | 의미 |
+|---|---|---|
+| `preparing` | 공통 | 인자·경로·장치 확인 |
+| `decoding_audio` | 공통 | 입력 디코딩(다중 모드는 모든 입력의 분석용 디코딩) |
+| `aligning_audio` | 다중 | 기준 입력 대비 오프셋·드리프트 추정과 수동 오프셋 적용 |
+| `detecting_speech` | 공통 | 무음 구간 감지(단일 모드는 `--skip-silence`일 때만) |
+| `assessing_channels` | 다중 | 입력별 발화·음질 분석 |
+| `selecting_channels` | 다중 | 구간별 채널 선택과 수동 override 적용 |
+| `rendering_merged_audio` | 다중 | 통합 16 kHz mono WAV와 `alignment.json`/`channel_selection.json` 생성 |
+| `loading_model` | 공통 | Whisper 모델 로딩 |
+| `transcribing` | 공통 | Whisper 전사 |
+| `diarization` | 공통 | 선택적 화자 분리 |
+| `saving_result` | 공통 | TXT/SRT 저장 |
+
+표의 순서는 권장 진행 순서이며 수신기는 상태 순서를 검증하지 않는다. 다중 전용
+상태 4개는 단일 입력 실행에서 보내지 않는다. 다중 모드는 `rendering_merged_audio`
+뒤 통합 WAV를 단일 입력처럼 `loading_model`, `transcribing`, `diarization`,
+`saving_result`로 처리한다.
 
 ### `progress`
 
@@ -53,6 +81,13 @@ indeterminate progress bar로 표시한다.
 ```json
 {"type":"progress","value":null}
 ```
+
+`value`는 실행 전체의 진행률이다. `null`은 모든 상태에서 허용한다. 다중 전처리
+상태(`aligning_audio`, `assessing_channels`, `selecting_channels`,
+`rendering_merged_audio`)는 단계별 소요 시간 예측이 불안정하므로 각 상태 직후
+`null`을 보내는 것을 기본으로 한다. 정수를 보낼 때 시간 필드는 기준 입력
+시간축의 초다. `100`은 `saving_result` 상태 뒤에만 보낼 수 있으며, 단계별 완료를
+`100`으로 표현하지 않는다.
 
 ### `segment`
 
@@ -81,6 +116,30 @@ wire의 화자 번호는 **1부터 시작하는 양의 정수**다. 기존 Pytho
 Bridge는 경로를 `Path.resolve()`한 절대 경로로 직렬화한다. Qt는 프로세스 working
 directory가 아닌 이 절대 경로를 그대로 해석한다. `--output-dir`이 없으면 입력
 파일의 부모 폴더, 있으면 해당 폴더에 `<입력 stem><output suffix>.txt/.srt`를 만든다.
+
+다중 입력 모드의 `completed`는 위 두 필드를 그대로 유지하고 다음 세 필드를
+**모두 함께** 추가한다. 세 필드는 비어 있지 않은 절대 경로 `string`이며 `null`은
+허용하지 않는다. 일부만 있으면 프로토콜 오류다. 단일 입력 모드는 세 필드를 보내지
+않으며, 세 필드가 없는 `completed`는 기존 단일 모드 결과로 해석한다.
+
+| 필드 | 파일 |
+|---|---|
+| `merged_audio_file` | 채널 선택 결과로 만든 `merged_16k_mono.wav` |
+| `alignment_file` | 입력별 offset/drift/confidence를 담은 `alignment.json` |
+| `selection_file` | 구간별 선택 입력·점수·사유를 담은 `channel_selection.json` |
+
+```json
+{"type":"completed","text_file":"C:/Results/meeting.txt","srt_file":"C:/Results/meeting.srt","merged_audio_file":"C:/Results/merged_16k_mono.wav","alignment_file":"C:/Results/alignment.json","selection_file":"C:/Results/channel_selection.json"}
+```
+
+### `warning`
+
+필수 필드는 `type: string`과 비어 있지 않은 `message: string`이다. 실행을 계속하는
+사용자용 경고이며 종료 이벤트가 아니다. 종료 이벤트 전 어느 시점에나 올 수 있다.
+
+```json
+{"type":"warning","message":"음성 구간이 감지되지 않아 Whisper 전사와 화자 분리를 건너뜁니다."}
+```
 
 ### `error`
 
@@ -215,5 +274,10 @@ Bridge 자체의 인자 오류는 `error` 이벤트 후 종료 코드 2, 입력 
 경로 오류는 3, 실행 중 오류는 1을 사용한다. 사용자 취소로 정상적인 이벤트를
 마칠 수 없을 때는 기존 관례대로 130을 허용한다.
 
-공용 fixture는 `tests/fixtures/backend_protocol/`에 있으며 Python과 Qt 계약 테스트가
-같은 파일을 읽는다.
+공용 fixture는 `engine/tests/fixtures/backend_protocol/`에 있으며 Python
+(`engine/tests/test_backend_protocol.py`)과 Qt(`gui/tests/tst_backend_protocol.cpp`)
+계약 테스트가 같은 파일을 읽는다. `success.jsonl`, `empty_segments.jsonl`,
+`multi_input_success.jsonl`은 종료 코드 0, `error.jsonl`, `multi_input_error.jsonl`은
+종료 코드 1로 스트림 검증을 통과해야 하며 `invalid_events.jsonl`의 각 줄은 두 파서
+모두에서 거부되어야 한다. Python 계약 테스트는 이 문서의 상태 표와 Qt
+`BackendEvent.h`의 상태·완료 필드 목록이 `backend_protocol.py`와 같은지도 검사한다.

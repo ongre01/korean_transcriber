@@ -22,9 +22,24 @@ class StateValue(str, Enum):
     LOADING_MODEL = "loading_model"
     DECODING_AUDIO = "decoding_audio"
     DETECTING_SPEECH = "detecting_speech"
+    # Multi-input pre-processing stages run before the merged WAV is handed to
+    # the unchanged Whisper/diarization stages.
+    ALIGNING_AUDIO = "aligning_audio"
+    ASSESSING_CHANNELS = "assessing_channels"
+    SELECTING_CHANNELS = "selecting_channels"
+    RENDERING_MERGED_AUDIO = "rendering_merged_audio"
     TRANSCRIBING = "transcribing"
     DIARIZATION = "diarization"
     SAVING_RESULT = "saving_result"
+
+
+# Multi-input completion artifacts. A completed event carries all of them or
+# none of them; single-input runs never send them.
+MULTI_INPUT_COMPLETED_FIELDS = (
+    "merged_audio_file",
+    "alignment_file",
+    "selection_file",
+)
 
 
 @dataclass(frozen=True)
@@ -51,6 +66,13 @@ class SegmentEvent:
 class CompletedEvent:
     text_file: str
     srt_file: str
+    merged_audio_file: str | None = None
+    alignment_file: str | None = None
+    selection_file: str | None = None
+
+    @property
+    def is_multi_input(self) -> bool:
+        return self.merged_audio_file is not None
 
 
 @dataclass(frozen=True)
@@ -184,9 +206,22 @@ def parse_event_line(line: str | bytes) -> BackendEvent:
         return SegmentEvent(start, end, speaker, text)
 
     if event_type == "completed":
+        text_file = _required_string(payload, "text_file", non_empty=True)
+        srt_file = _required_string(payload, "srt_file", non_empty=True)
+        present = [name for name in MULTI_INPUT_COMPLETED_FIELDS if name in payload]
+        if not present:
+            return CompletedEvent(text_file, srt_file)
+        if len(present) != len(MULTI_INPUT_COMPLETED_FIELDS):
+            raise ProtocolError(
+                "merged_audio_file, alignment_file and selection_file must appear together"
+            )
         return CompletedEvent(
-            _required_string(payload, "text_file", non_empty=True),
-            _required_string(payload, "srt_file", non_empty=True),
+            text_file,
+            srt_file,
+            *(
+                _required_string(payload, name, non_empty=True)
+                for name in MULTI_INPUT_COMPLETED_FIELDS
+            ),
         )
 
     if event_type == "error":
@@ -204,6 +239,12 @@ class EventStreamValidator:
     def __init__(self) -> None:
         self._terminal: str | None = None
         self._state: StateValue | None = None
+
+    @property
+    def terminal(self) -> str | None:
+        """``"completed"`` or ``"error"`` once a terminal event was accepted."""
+
+        return self._terminal
 
     def accept(self, event: BackendEvent) -> None:
         if self._terminal is not None:

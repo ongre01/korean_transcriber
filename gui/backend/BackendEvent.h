@@ -29,6 +29,11 @@ enum class BackendState
     LoadingModel,
     DecodingAudio,
     DetectingSpeech,
+    // Multi-input pre-processing stages.
+    AligningAudio,
+    AssessingChannels,
+    SelectingChannels,
+    RenderingMergedAudio,
     Transcribing,
     Diarization,
     SavingResult
@@ -44,8 +49,15 @@ struct BackendEvent
     TranscriptSegment segment;
     QString textFile;
     QString srtFile;
+    // Multi-input completion artifacts: all three are set together, or none
+    // for a single-input run.
+    QString mergedAudioFile;
+    QString alignmentFile;
+    QString selectionFile;
     QString errorMessage;
     QString warningMessage;
+
+    bool hasMultiInputResult() const { return !mergedAudioFile.isEmpty(); }
 };
 
 namespace BackendProtocol {
@@ -106,6 +118,14 @@ inline bool parseState(const QString &value, BackendState *state)
         *state = BackendState::DecodingAudio;
     } else if (value == QStringLiteral("detecting_speech")) {
         *state = BackendState::DetectingSpeech;
+    } else if (value == QStringLiteral("aligning_audio")) {
+        *state = BackendState::AligningAudio;
+    } else if (value == QStringLiteral("assessing_channels")) {
+        *state = BackendState::AssessingChannels;
+    } else if (value == QStringLiteral("selecting_channels")) {
+        *state = BackendState::SelectingChannels;
+    } else if (value == QStringLiteral("rendering_merged_audio")) {
+        *state = BackendState::RenderingMergedAudio;
     } else if (value == QStringLiteral("transcribing")) {
         *state = BackendState::Transcribing;
     } else if (value == QStringLiteral("diarization")) {
@@ -116,6 +136,57 @@ inline bool parseState(const QString &value, BackendState *state)
         return false;
     }
     return true;
+}
+
+inline QString stateValue(BackendState state)
+{
+    switch (state) {
+    case BackendState::Preparing:
+        return QStringLiteral("preparing");
+    case BackendState::LoadingModel:
+        return QStringLiteral("loading_model");
+    case BackendState::DecodingAudio:
+        return QStringLiteral("decoding_audio");
+    case BackendState::DetectingSpeech:
+        return QStringLiteral("detecting_speech");
+    case BackendState::AligningAudio:
+        return QStringLiteral("aligning_audio");
+    case BackendState::AssessingChannels:
+        return QStringLiteral("assessing_channels");
+    case BackendState::SelectingChannels:
+        return QStringLiteral("selecting_channels");
+    case BackendState::RenderingMergedAudio:
+        return QStringLiteral("rendering_merged_audio");
+    case BackendState::Transcribing:
+        return QStringLiteral("transcribing");
+    case BackendState::Diarization:
+        return QStringLiteral("diarization");
+    case BackendState::SavingResult:
+        return QStringLiteral("saving_result");
+    }
+    return {};
+}
+
+inline bool parseMultiInputArtifacts(const QJsonObject &object, BackendEvent *event,
+                                     QString *errorMessage)
+{
+    const bool hasMergedAudio = object.contains(QStringLiteral("merged_audio_file"));
+    const bool hasAlignment = object.contains(QStringLiteral("alignment_file"));
+    const bool hasSelection = object.contains(QStringLiteral("selection_file"));
+    if (!hasMergedAudio && !hasAlignment && !hasSelection) {
+        return true;
+    }
+    if (!hasMergedAudio || !hasAlignment || !hasSelection) {
+        return fail(errorMessage,
+                    QStringLiteral("merged_audio_file, alignment_file and selection_file "
+                                   "must appear together"));
+    }
+    return requiredString(object, QStringLiteral("merged_audio_file"),
+                          &event->mergedAudioFile, errorMessage, true)
+        && requiredString(object, QStringLiteral("alignment_file"),
+                          &event->alignmentFile, errorMessage, true)
+        && requiredString(object, QStringLiteral("selection_file"),
+                          &event->selectionFile, errorMessage, true);
 }
 
 inline bool isValidUtf8(const QByteArray &bytes)
@@ -277,7 +348,8 @@ inline bool parseEventLine(const QByteArray &line, BackendEvent *event,
         if (!requiredString(object, QStringLiteral("text_file"), &parsed.textFile,
                             errorMessage, true)
                 || !requiredString(object, QStringLiteral("srt_file"), &parsed.srtFile,
-                                   errorMessage, true)) {
+                                   errorMessage, true)
+                || !parseMultiInputArtifacts(object, &parsed, errorMessage)) {
             return false;
         }
         parsed.type = BackendEventType::Completed;

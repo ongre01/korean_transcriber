@@ -1,0 +1,17 @@
+{"type":"segment","end":1.0,"speaker":1,"text":"start 누락"}
+{"type":"segment","start":0.0,"end":1.0,"speaker":"1","text":"잘못된 화자 타입"}
+{"type":"progress","value":101}
+{"type":"progress","value":null,"processed_seconds":0.0,"total_seconds":1.0}
+{"type":"completed","text_file":"C:/Results/result.txt"}
+{"type":"error","message":42}
+Loading Whisper model...
+["type","state"]
+{"type":"state","value":"aligning"}
+{"type":"state","value":"Aligning_Audio"}
+{"type":"progress","value":42.5}
+{"type":"warning","message":"   "}
+{"type":"completed","text_file":"C:/Results/a.txt","srt_file":"C:/Results/a.srt","merged_audio_file":"C:/Results/merged_16k_mono.wav"}
+{"type":"completed","text_file":"C:/Results/a.txt","srt_file":"C:/Results/a.srt","merged_audio_file":"C:/Results/merged_16k_mono.wav","alignment_file":"C:/Results/alignment.json"}
+{"type":"completed","text_file":"C:/Results/a.txt","srt_file":"C:/Results/a.srt","merged_audio_file":null,"alignment_file":"C:/Results/alignment.json","selection_file":"C:/Results/channel_selection.json"}
+{"type":"completed","text_file":"C:/Results/a.txt","srt_file":"C:/Results/a.srt","merged_audio_file":"C:/Results/merged_16k_mono.wav","alignment_file":" ","selection_file":"C:/Results/channel_selection.json"}
+{"type":"completed","text_file":"C:/Results/a.txt","srt_file":"C:/Results/a.srt","merged_audio_file":"C:/Results/merged_16k_mono.wav","alignment_file":"C:/Results/alignment.json","selection_file":42}

@@ -1,0 +1,7 @@
+{"type":"state","value":"preparing"}
+{"type":"progress","value":null}
+{"type":"state","value":"decoding_audio"}
+{"type":"progress","value":null}
+{"type":"state","value":"aligning_audio"}
+{"type":"progress","value":null}
+{"type":"error","message":"Audio alignment failed for input 1; set a manual offset."}
