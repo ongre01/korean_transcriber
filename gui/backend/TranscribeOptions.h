@@ -33,6 +33,7 @@ inline QString backendDeviceArgument(BackendDevice device)
 struct TranscribeOptions
 {
     QString inputFile;
+    QString multiInputManifestFile;
     BackendDevice device = BackendDevice::Auto;
     bool diarizationEnabled = false;
     // No value means Auto. The GUI contract otherwise permits 2, 3, 4, or 5.
@@ -62,6 +63,11 @@ struct TranscribeOptions
     double minimumSpeechDuration = 0.3;
     double minimumSilenceDuration = 0.5;
 
+    bool isMultiInput() const
+    {
+        return !multiInputManifestFile.trimmed().isEmpty();
+    }
+
     bool isValid(QString *errorMessage = nullptr) const
     {
         const auto fail = [errorMessage](const QString &message) {
@@ -71,8 +77,11 @@ struct TranscribeOptions
             return false;
         };
 
-        if (inputFile.trimmed().isEmpty()) {
-            return fail(QStringLiteral("inputFile must not be empty"));
+        const bool hasInputFile = !inputFile.trimmed().isEmpty();
+        const bool hasMultiInputManifest = isMultiInput();
+        if (hasInputFile == hasMultiInputManifest) {
+            return fail(QStringLiteral(
+                "exactly one of inputFile or multiInputManifestFile must be set"));
         }
         if (modelDirectory.trimmed().isEmpty()) {
             return fail(QStringLiteral("modelDirectory must not be empty"));
@@ -123,7 +132,9 @@ struct TranscribeOptions
     QStringList toBridgeArguments() const
     {
         QStringList arguments {
-            QStringLiteral("--input"), inputFile,
+            isMultiInput() ? QStringLiteral("--multi-input-manifest")
+                           : QStringLiteral("--input"),
+            isMultiInput() ? multiInputManifestFile : inputFile,
             QStringLiteral("--device"), backendDeviceArgument(device),
             QStringLiteral("--model-dir"), modelDirectory,
             QStringLiteral("--beams"), QString::number(beams),

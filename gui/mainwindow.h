@@ -15,6 +15,8 @@
 #include <QString>
 #include <QVector>
 
+#include <memory>
+
 QT_BEGIN_NAMESPACE
 namespace Ui {
 class MainWindow;
@@ -24,6 +26,7 @@ QT_END_NAMESPACE
 class QCloseEvent;
 class QAction;
 class LogDialog;
+class MultiAudioManifestFile;
 class QTimer;
 
 enum class InputMode
@@ -123,6 +126,7 @@ private:
     bool hasValidMultiAudioInput() const;
     bool hasReadyInputForCurrentMode() const;
     bool hasAvailableResult() const;
+    bool hasAvailableResultFolder() const;
     void showResultError(const QString &message);
     void logInfo(const QString &event, const QString &detail = QString());
     void logError(const QString &event, const QString &detail = QString());
@@ -158,6 +162,9 @@ private:
     // Reviewed channel plan including manual overrides; it is applied only
     // while it still matches the inputs and alignment above.
     MultiAudioSelectionPlan m_multiAudioSelectionPlan;
+    // Keeps the generated JSON manifest alive until the backend process has
+    // fully stopped. QTemporaryFile removes it when this owner is reset.
+    std::unique_ptr<MultiAudioManifestFile> m_multiAudioManifestFile;
     bool m_inputInspectionPending = false;
     bool m_cancellationPending = false;
     bool m_closeRequested = false;
@@ -171,6 +178,11 @@ private:
     QString m_backendState;
     QString m_backendStderrTail;
     QString m_resultOutputFile;
+    QString m_resultSrtFile;
+    QString m_resultMergedAudioFile;
+    QString m_resultAlignmentFile;
+    QString m_resultSelectionFile;
+    QString m_resultFolder;
     double m_processedSeconds = -1.0;
     double m_totalSeconds = -1.0;
     QString m_stateMessage;

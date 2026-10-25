@@ -28,6 +28,7 @@ SOURCES += \
     audio/WavWriter.cpp \
     backend/BackendProcess.cpp \
     input/AudioFileInfo.cpp \
+    input/MultiAudioManifestFile.cpp \
     input/MultiAudioInputDialog.cpp \
     input/MultiAudioInputModel.cpp \
     input/MultiAudioSelectionModel.cpp \
@@ -47,6 +48,7 @@ HEADERS += \
     backend/TranscriptSegment.h \
     backend/TranscribeOptions.h \
     input/AudioFileInfo.h \
+    input/MultiAudioManifestFile.h \
     input/MultiAudioInputDialog.h \
     input/MultiAudioInputModel.h \
     input/MultiAudioSelectionModel.h \

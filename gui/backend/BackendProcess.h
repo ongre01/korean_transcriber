@@ -35,6 +35,9 @@ public:
     bool isRunning() const;
     QString textResultFile() const;
     QString srtResultFile() const;
+    QString mergedAudioResultFile() const;
+    QString alignmentResultFile() const;
+    QString selectionResultFile() const;
     QByteArray standardErrorOutput() const;
 
 signals:
@@ -83,12 +86,16 @@ private:
 
     QString m_textResultFile;
     QString m_srtResultFile;
+    QString m_mergedAudioResultFile;
+    QString m_alignmentResultFile;
+    QString m_selectionResultFile;
     QString m_backendError;
     bool m_receivedCompleted = false;
     bool m_receivedError = false;
     bool m_protocolFailed = false;
     bool m_terminalSignalEmitted = false;
     bool m_cancellationRequested = false;
+    bool m_multiInputRun = false;
     int m_cancellationGracePeriodMilliseconds = 3000;
 };
 

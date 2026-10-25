@@ -105,6 +105,10 @@ class BackendProcessTests : public QObject
 
 private slots:
     void initTestCase();
+    void optionsBuildMutuallyExclusiveInputArguments();
+    void multiInputArtifactsAreStoredAndClearedForNextRun();
+    void completionArtifactsMustMatchRunMode_data();
+    void completionArtifactsMustMatchRunMode();
     void cancelRequestLetsTheBackendCleanUp();
     void unresponsiveBackendIsKilledAfterGracePeriod();
     void lateCompletedAfterCancelIsIgnored();
@@ -123,6 +127,171 @@ private:
 void BackendProcessTests::initTestCase()
 {
     m_pythonProgram = findPythonProgram();
+}
+
+void BackendProcessTests::optionsBuildMutuallyExclusiveInputArguments()
+{
+    TranscribeOptions single;
+    single.inputFile = QStringLiteral("C:/녹음 파일/회의 one.wav");
+    single.modelDirectory = QStringLiteral("C:/모델 폴더/whisper");
+    single.outputDirectory = QStringLiteral("C:/결과 폴더");
+    single.device = BackendDevice::Npu;
+    single.beams = 3;
+    single.skipSilence = false;
+
+    QString errorMessage;
+    QVERIFY2(single.isValid(&errorMessage), qPrintable(errorMessage));
+    QVERIFY(!single.isMultiInput());
+    const QStringList singleArguments = single.toBridgeArguments();
+    QCOMPARE(singleArguments.value(0), QStringLiteral("--input"));
+    QCOMPARE(singleArguments.value(1), single.inputFile);
+    QVERIFY(!singleArguments.contains(QStringLiteral("--multi-input-manifest")));
+
+    TranscribeOptions multi = single;
+    multi.inputFile.clear();
+    multi.multiInputManifestFile = QStringLiteral("C:/작업 폴더/multi manifest.json");
+    QVERIFY2(multi.isValid(&errorMessage), qPrintable(errorMessage));
+    QVERIFY(multi.isMultiInput());
+    const QStringList multiArguments = multi.toBridgeArguments();
+    QCOMPARE(multiArguments.value(0), QStringLiteral("--multi-input-manifest"));
+    QCOMPARE(multiArguments.value(1), multi.multiInputManifestFile);
+    QVERIFY(!multiArguments.contains(QStringLiteral("--input")));
+    QCOMPARE(multiArguments.mid(2), singleArguments.mid(2));
+
+    TranscribeOptions missingInput = single;
+    missingInput.inputFile.clear();
+    QVERIFY(!missingInput.isValid(&errorMessage));
+    QCOMPARE(errorMessage,
+             QStringLiteral("exactly one of inputFile or multiInputManifestFile must be set"));
+
+    TranscribeOptions ambiguousInput = single;
+    ambiguousInput.multiInputManifestFile = QStringLiteral("C:/manifest.json");
+    QVERIFY(!ambiguousInput.isValid(&errorMessage));
+    QCOMPARE(errorMessage,
+             QStringLiteral("exactly one of inputFile or multiInputManifestFile must be set"));
+}
+
+void BackendProcessTests::multiInputArtifactsAreStoredAndClearedForNextRun()
+{
+    if (m_pythonProgram.isEmpty()) {
+        QSKIP("No Python executable was found via PYTHON or PATH (python).");
+    }
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString script = writeFakeBridge(directory, R"PY(
+if "--multi-input-manifest" in sys.argv:
+    emit({"type": "state", "value": "saving_result"})
+    emit({"type": "completed", "text_file": "C:/result.txt", "srt_file": "C:/result.srt",
+          "merged_audio_file": "C:/merged.wav", "alignment_file": "C:/alignment.json",
+          "selection_file": "C:/selection.json"})
+else:
+    emit({"type": "state", "value": "transcribing"})
+    if wait_for_cancel_request():
+        emit({"type": "error", "message": "Transcription was cancelled."})
+        sys.exit(130)
+)PY");
+    QVERIFY(!script.isEmpty());
+
+    BackendProcess backend;
+    backend.setPythonProgram(m_pythonProgram);
+    backend.setBridgeScript(script);
+    backend.setCancellationGracePeriod(20000);
+    QSignalSpy states(&backend, &BackendProcess::stateChanged);
+    QSignalSpy completed(&backend, &BackendProcess::completed);
+    QSignalSpy cancelled(&backend, &BackendProcess::cancelled);
+    QSignalSpy errors(&backend, &BackendProcess::errorOccurred);
+    QSignalSpy stopped(&backend, &BackendProcess::stopped);
+
+    TranscribeOptions multi = fakeOptions(directory);
+    multi.inputFile.clear();
+    multi.multiInputManifestFile = directory.filePath(QStringLiteral("manifest.json"));
+    backend.start(multi);
+    QTRY_COMPARE_WITH_TIMEOUT(stopped.count(), 1, 20000);
+
+    QCOMPARE(completed.count(), 1);
+    QCOMPARE(errors.count(), 0);
+    QCOMPARE(backend.textResultFile(), QStringLiteral("C:/result.txt"));
+    QCOMPARE(backend.srtResultFile(), QStringLiteral("C:/result.srt"));
+    QCOMPARE(backend.mergedAudioResultFile(), QStringLiteral("C:/merged.wav"));
+    QCOMPARE(backend.alignmentResultFile(), QStringLiteral("C:/alignment.json"));
+    QCOMPARE(backend.selectionResultFile(), QStringLiteral("C:/selection.json"));
+
+    backend.start(fakeOptions(directory));
+    QTRY_COMPARE_WITH_TIMEOUT(states.count(), 2, 20000);
+    QCOMPARE(states.constLast().at(0).toString(), QStringLiteral("transcribing"));
+    QVERIFY(backend.textResultFile().isEmpty());
+    QVERIFY(backend.srtResultFile().isEmpty());
+    QVERIFY(backend.mergedAudioResultFile().isEmpty());
+    QVERIFY(backend.alignmentResultFile().isEmpty());
+    QVERIFY(backend.selectionResultFile().isEmpty());
+
+    backend.cancel();
+    QTRY_COMPARE_WITH_TIMEOUT(stopped.count(), 2, 25000);
+    QCOMPARE(completed.count(), 1);
+    QCOMPARE(cancelled.count(), 1);
+    QCOMPARE(errors.count(), 0);
+}
+
+void BackendProcessTests::completionArtifactsMustMatchRunMode_data()
+{
+    QTest::addColumn<bool>("multiInput");
+    QTest::addColumn<QByteArray>("completedEvent");
+    QTest::addColumn<QString>("expectedError");
+
+    QTest::newRow("multi run without artifacts")
+        << true
+        << QByteArrayLiteral(
+               "{\"type\":\"completed\",\"text_file\":\"C:/r.txt\","
+               "\"srt_file\":\"C:/r.srt\"}")
+        << QStringLiteral(
+               "Backend protocol error: multi-input run completed without multi-input artifacts");
+    QTest::newRow("single run with multi artifacts")
+        << false
+        << QByteArrayLiteral(
+               "{\"type\":\"completed\",\"text_file\":\"C:/r.txt\","
+               "\"srt_file\":\"C:/r.srt\",\"merged_audio_file\":\"C:/merged.wav\","
+               "\"alignment_file\":\"C:/alignment.json\","
+               "\"selection_file\":\"C:/selection.json\"}")
+        << QStringLiteral(
+               "Backend protocol error: single-input run completed with multi-input artifacts");
+}
+
+void BackendProcessTests::completionArtifactsMustMatchRunMode()
+{
+    if (m_pythonProgram.isEmpty()) {
+        QSKIP("No Python executable was found via PYTHON or PATH (python).");
+    }
+    QFETCH(bool, multiInput);
+    QFETCH(QByteArray, completedEvent);
+    QFETCH(QString, expectedError);
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString script = writeFakeBridge(
+        directory,
+        QByteArrayLiteral("emit({\"type\": \"state\", \"value\": \"saving_result\"})\n")
+            + QByteArrayLiteral("emit(") + completedEvent + QByteArrayLiteral(")\n"));
+    QVERIFY(!script.isEmpty());
+
+    BackendProcess backend;
+    backend.setPythonProgram(m_pythonProgram);
+    backend.setBridgeScript(script);
+    QSignalSpy completed(&backend, &BackendProcess::completed);
+    QSignalSpy errors(&backend, &BackendProcess::errorOccurred);
+    QSignalSpy stopped(&backend, &BackendProcess::stopped);
+
+    TranscribeOptions options = fakeOptions(directory);
+    if (multiInput) {
+        options.inputFile.clear();
+        options.multiInputManifestFile = directory.filePath(QStringLiteral("manifest.json"));
+    }
+    backend.start(options);
+    QTRY_COMPARE_WITH_TIMEOUT(stopped.count(), 1, 20000);
+
+    QCOMPARE(completed.count(), 0);
+    QCOMPARE(errors.count(), 1);
+    QCOMPARE(errors.at(0).at(0).toString(), expectedError);
+    QVERIFY(backend.textResultFile().isEmpty());
+    QVERIFY(backend.mergedAudioResultFile().isEmpty());
 }
 
 void BackendProcessTests::cancelRequestLetsTheBackendCleanUp()

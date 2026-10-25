@@ -1,9 +1,11 @@
 #include "../input/MultiAudioSelectionModel.h"
+#include "../input/MultiAudioManifestFile.h"
 
 #include <QFile>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QJsonParseError>
 #include <QSignalSpy>
 #include <QTemporaryDir>
 #include <QtTest>
@@ -187,6 +189,7 @@ private slots:
     void rejectsMalformedOrInconsistentResponses();
     void overridesAreDistinguishableAndOnlyEditableWhileCurrent();
     void manifestCarriesReviewedOffsetsAndOverrides();
+    void manifestFilePersistsUntilItsOwnerIsDestroyed();
     void manifestDropsOverridesThatNoLongerFit();
     void analysisKeyTracksWhatTheAnalysisDependsOn();
     void formatsPositionsAndMissingAudio();
@@ -456,6 +459,29 @@ void MultiAudioSelectionModelTests::manifestCarriesReviewedOffsetsAndOverrides()
     QCOMPARE(override.value(QStringLiteral("end_sample")).toInteger(), qint64(40000));
     QCOMPARE(override.value(QStringLiteral("input_index")).toInt(), 2);
     QVERIFY(!QJsonDocument(manifest).toJson().isEmpty());
+}
+
+void MultiAudioSelectionModelTests::manifestFilePersistsUntilItsOwnerIsDestroyed()
+{
+    const QJsonObject manifest =
+        buildMultiAudioManifest(inputs(), 0, parsedPlan()).manifest;
+    QString path;
+    {
+        MultiAudioManifestFile file;
+        QString errorMessage;
+        QVERIFY2(file.write(manifest, &errorMessage), qPrintable(errorMessage));
+        path = file.fileName();
+        QVERIFY(QFileInfo::exists(path));
+
+        QFile saved(path);
+        QVERIFY(saved.open(QIODevice::ReadOnly));
+        QJsonParseError parseError;
+        const QJsonDocument document = QJsonDocument::fromJson(
+            saved.readAll(), &parseError);
+        QCOMPARE(parseError.error, QJsonParseError::NoError);
+        QCOMPARE(document.object(), manifest);
+    }
+    QVERIFY(!QFileInfo::exists(path));
 }
 
 void MultiAudioSelectionModelTests::manifestDropsOverridesThatNoLongerFit()

@@ -6,9 +6,11 @@ TARGET = multi_audio_selection_model_tests
 
 SOURCES += \
     tst_multiaudioselectionmodel.cpp \
+    ../input/MultiAudioManifestFile.cpp \
     ../input/MultiAudioInputModel.cpp \
     ../input/MultiAudioSelectionModel.cpp
 
 HEADERS += \
+    ../input/MultiAudioManifestFile.h \
     ../input/MultiAudioInputModel.h \
     ../input/MultiAudioSelectionModel.h

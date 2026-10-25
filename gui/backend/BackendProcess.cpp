@@ -114,6 +114,7 @@ void BackendProcess::start(const TranscribeOptions &options)
                 false);
         return;
     }
+    m_multiInputRun = options.isMultiInput();
     if (m_pythonProgram.trimmed().isEmpty()) {
         failRun(QStringLiteral("Python program must not be empty."), false);
         return;
@@ -186,6 +187,21 @@ QString BackendProcess::srtResultFile() const
     return m_srtResultFile;
 }
 
+QString BackendProcess::mergedAudioResultFile() const
+{
+    return m_mergedAudioResultFile;
+}
+
+QString BackendProcess::alignmentResultFile() const
+{
+    return m_alignmentResultFile;
+}
+
+QString BackendProcess::selectionResultFile() const
+{
+    return m_selectionResultFile;
+}
+
 QByteArray BackendProcess::standardErrorOutput() const
 {
     return m_standardError;
@@ -199,12 +215,16 @@ void BackendProcess::resetRunState()
     m_streamValidator = BackendProtocol::EventStreamValidator();
     m_textResultFile.clear();
     m_srtResultFile.clear();
+    m_mergedAudioResultFile.clear();
+    m_alignmentResultFile.clear();
+    m_selectionResultFile.clear();
     m_backendError.clear();
     m_receivedCompleted = false;
     m_receivedError = false;
     m_protocolFailed = false;
     m_terminalSignalEmitted = false;
     m_cancellationRequested = false;
+    m_multiInputRun = false;
 }
 
 void BackendProcess::readStandardOutput()
@@ -289,9 +309,19 @@ void BackendProcess::dispatchEvent(const BackendEvent &event)
         emit warningOccurred(event.warningMessage);
         break;
     case BackendEventType::Completed:
+        if (m_multiInputRun != event.hasMultiInputResult()) {
+            const QString detail = m_multiInputRun
+                ? QStringLiteral("multi-input run completed without multi-input artifacts")
+                : QStringLiteral("single-input run completed with multi-input artifacts");
+            failRun(QStringLiteral("Backend protocol error: %1").arg(detail));
+            break;
+        }
         m_receivedCompleted = true;
         m_textResultFile = event.textFile;
         m_srtResultFile = event.srtFile;
+        m_mergedAudioResultFile = event.mergedAudioFile;
+        m_alignmentResultFile = event.alignmentFile;
+        m_selectionResultFile = event.selectionFile;
         break;
     case BackendEventType::Error:
         m_receivedError = true;

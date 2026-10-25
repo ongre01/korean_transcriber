@@ -1,6 +1,7 @@
 #include "mainwindow.h"
 #include "app/EnginePaths.h"
 #include "backend/BackendFailure.h"
+#include "input/MultiAudioManifestFile.h"
 #include "input/MultiAudioInputDialog.h"
 #include "logging/LogDialog.h"
 #include "settings/SettingsDialog.h"
@@ -63,6 +64,18 @@ QString processingStateText(const QString &state)
     }
     if (state == QStringLiteral("detecting_speech")) {
         return MainWindow::tr("무음 구간 감지 중...");
+    }
+    if (state == QStringLiteral("aligning_audio")) {
+        return MainWindow::tr("오디오 시간 정렬 중...");
+    }
+    if (state == QStringLiteral("assessing_channels")) {
+        return MainWindow::tr("채널 음질 분석 중...");
+    }
+    if (state == QStringLiteral("selecting_channels")) {
+        return MainWindow::tr("최적 채널 선택 중...");
+    }
+    if (state == QStringLiteral("rendering_merged_audio")) {
+        return MainWindow::tr("통합 음성 생성 중...");
     }
     if (state == QStringLiteral("transcribing")) {
         return MainWindow::tr("전사 중...");
@@ -335,7 +348,8 @@ MainWindow::MainWindow(QWidget *parent)
                 logInfo(tr("Backend Warning"), message);
                 if (message.contains(QStringLiteral("핫워드"))) {
                     ui->hotwordsStatusLabel->setText(message);
-                } else {
+                }
+                if (message.contains(QStringLiteral("초기 프롬프트"))) {
                     ui->initialPromptStatusLabel->setText(message);
                 }
                 statusBar()->showMessage(message);
@@ -632,14 +646,66 @@ void MainWindow::setAppState(AppState state, const QString &message)
 void MainWindow::processingCompleted()
 {
     if (m_state == AppState::Processing && !m_cancellationPending) {
-        const QFileInfo resultFile(m_backendProcess->textResultFile());
-        m_resultOutputFile = resultFile.isFile()
-            ? resultFile.absoluteFilePath()
-            : QString();
-        logInfo(tr("Output File"),
-                tr("TXT: %1\nSRT: %2")
-                    .arg(QDir::toNativeSeparators(m_backendProcess->textResultFile()),
-                         QDir::toNativeSeparators(m_backendProcess->srtResultFile())));
+        const QStringList advertisedFiles {
+            m_backendProcess->textResultFile(),
+            m_backendProcess->srtResultFile(),
+            m_backendProcess->mergedAudioResultFile(),
+            m_backendProcess->alignmentResultFile(),
+            m_backendProcess->selectionResultFile()
+        };
+        QStringList missingFiles;
+        for (const QString &path : advertisedFiles) {
+            if (!path.isEmpty() && !QFileInfo(path).isFile()) {
+                missingFiles.append(QDir::toNativeSeparators(path));
+            }
+        }
+        if (!missingFiles.isEmpty()) {
+            logError(tr("Backend Result Missing"), missingFiles.join(QLatin1Char('\n')));
+            resetProcessingIndicators();
+            const QString message =
+                tr("전사는 완료되었지만 결과 파일을 찾을 수 없습니다.");
+            setAppState(AppState::Error, message);
+            showOperationError(tr("전사 결과 오류"), message);
+            return;
+        }
+
+        const auto absolutePath = [](const QString &path) {
+            return path.isEmpty() ? QString() : QFileInfo(path).absoluteFilePath();
+        };
+        m_resultOutputFile = absolutePath(advertisedFiles.at(0));
+        m_resultSrtFile = absolutePath(advertisedFiles.at(1));
+        m_resultMergedAudioFile = absolutePath(advertisedFiles.at(2));
+        m_resultAlignmentFile = absolutePath(advertisedFiles.at(3));
+        m_resultSelectionFile = absolutePath(advertisedFiles.at(4));
+
+        const QStringList resultFiles {
+            m_resultOutputFile,
+            m_resultSrtFile,
+            m_resultMergedAudioFile,
+            m_resultAlignmentFile,
+            m_resultSelectionFile
+        };
+        m_resultFolder.clear();
+        for (const QString &resultFile : resultFiles) {
+            if (!resultFile.isEmpty()) {
+                m_resultFolder = QFileInfo(resultFile).absolutePath();
+                break;
+            }
+        }
+
+        QStringList outputDetails {
+            tr("TXT: %1").arg(QDir::toNativeSeparators(m_resultOutputFile)),
+            tr("SRT: %1").arg(QDir::toNativeSeparators(m_resultSrtFile))
+        };
+        if (!m_resultMergedAudioFile.isEmpty()) {
+            outputDetails << tr("Merged WAV: %1")
+                                 .arg(QDir::toNativeSeparators(m_resultMergedAudioFile))
+                          << tr("Alignment: %1")
+                                 .arg(QDir::toNativeSeparators(m_resultAlignmentFile))
+                          << tr("Selection: %1")
+                                 .arg(QDir::toNativeSeparators(m_resultSelectionFile));
+        }
+        logInfo(tr("Output File"), outputDetails.join(QLatin1Char('\n')));
         updateResultOutputUi();
         setAppState(
             AppState::Completed,
@@ -658,6 +724,9 @@ void MainWindow::processingFailed(const QString &message)
         setAppState(AppState::Error, userMessage);
         showOperationError(tr("전사 오류"), userMessage);
     }
+    if (!m_backendProcess->isRunning()) {
+        m_multiAudioManifestFile.reset();
+    }
 }
 
 void MainWindow::processingCancelled()
@@ -669,6 +738,9 @@ void MainWindow::processingCancelled()
     if (m_state == AppState::Processing) {
         resetProcessingIndicators();
         setAppState(hasReadyInputForCurrentMode() ? AppState::InputReady : AppState::Idle);
+    }
+    if (!m_backendProcess->isRunning()) {
+        m_multiAudioManifestFile.reset();
     }
 
     if (closeRequested) {
@@ -852,18 +924,19 @@ void MainWindow::handleMultiAudioInput()
 
 void MainWindow::handleTranscriptionStart()
 {
-    if (m_inputMode == InputMode::MultiAudioFiles) {
+    const bool multiInput = m_inputMode == InputMode::MultiAudioFiles;
+    if (multiInput) {
         QString alignmentReason;
         if (!hasResolvedMultiAudioAlignment(&alignmentReason)) {
             statusBar()->showMessage(alignmentReason);
             return;
         }
-        statusBar()->showMessage(
-            tr("다중 마이크 파일 전사는 후속 처리 연동이 완료된 뒤 사용할 수 있습니다."));
-        return;
-    }
-
-    if (!m_currentInputFile.isEmpty() && !hasValidInput()) {
+        if (!hasCurrentMultiAudioSelection()) {
+            statusBar()->showMessage(
+                tr("다중 파일 설정에서 음질 분석을 실행하고 최종 채널 선택을 확인하세요."));
+            return;
+        }
+    } else if (!m_currentInputFile.isEmpty() && !hasValidInput()) {
         m_currentInputFile.clear();
         m_inputDurationMilliseconds = -1;
         updateInputFileUi();
@@ -874,7 +947,7 @@ void MainWindow::handleTranscriptionStart()
     }
 
     const AppActionPolicy policy = appActionPolicy(
-        m_state, hasValidInput() && !m_inputInspectionPending);
+        m_state, hasReadyInputForCurrentMode());
     if (!policy.canStartTranscription) {
         return;
     }
@@ -901,7 +974,33 @@ void MainWindow::handleTranscriptionStart()
     }
 
     TranscribeOptions options;
-    options.inputFile = m_currentInputFile;
+    std::unique_ptr<MultiAudioManifestFile> manifestFile;
+    if (multiInput) {
+        const MultiAudioManifestRequest manifestRequest = buildMultiAudioManifest(
+            m_multiAudioInputs, m_multiAudioReferenceRow, m_multiAudioSelectionPlan);
+        if (manifestRequest.referenceIndex < 0 || manifestRequest.rows.size() < 2
+            || manifestRequest.droppedOverrideCount != 0) {
+            const QString message = manifestRequest.droppedOverrideCount != 0
+                ? tr("수동 채널 선택이 현재 입력과 일치하지 않습니다. 음질 분석을 다시 실행하세요.")
+                : tr("다중 입력 매니페스트를 만들 수 없습니다. 입력과 기준 파일을 다시 확인하세요.");
+            statusBar()->showMessage(message);
+            return;
+        }
+
+        manifestFile = std::make_unique<MultiAudioManifestFile>();
+        QString manifestError;
+        if (!manifestFile->write(manifestRequest.manifest, &manifestError)) {
+            const QString message = tr("다중 입력 처리 요청 파일을 만들 수 없습니다: %1")
+                                        .arg(manifestError);
+            logError(tr("Multi Audio Manifest Error"), message);
+            QMessageBox::warning(this, tr("다중 입력 오류"), message);
+            statusBar()->showMessage(message);
+            return;
+        }
+        options.multiInputManifestFile = manifestFile->fileName();
+    } else {
+        options.inputFile = m_currentInputFile;
+    }
     options.device = backendDevice(ui->deviceComboBox->currentText());
     options.outputDirectory = m_settings.outputDirectory;
     options.modelDirectory = m_settings.whisperModelDirectory;
@@ -949,12 +1048,15 @@ void MainWindow::handleTranscriptionStart()
     m_cancellationPending = false;
     m_diarizationFallbackOccurred = false;
     m_backendStderrTail.clear();
+    m_multiAudioManifestFile = std::move(manifestFile);
     clearTranscript();
     resetProcessingIndicators();
     setAppState(AppState::Processing);
     logInfo(tr("Transcription Start"),
-            tr("Input: %1\nDevice: %2\nBeams: %3\nSkip silence: %4\nDiarization: %5")
-                .arg(QDir::toNativeSeparators(options.inputFile),
+            tr("Input mode: %1\nInput: %2\nDevice: %3\nBeams: %4\nSkip silence: %5\nDiarization: %6")
+                .arg(multiInput ? tr("multi audio") : tr("single audio"),
+                     QDir::toNativeSeparators(
+                         multiInput ? options.multiInputManifestFile : options.inputFile),
                      backendDeviceArgument(options.device),
                      QString::number(options.beams),
                      options.skipSilence ? tr("ON") : tr("OFF"),
@@ -966,15 +1068,18 @@ void MainWindow::handleTranscriptionStart()
 
 void MainWindow::handleCancellation()
 {
-    const AppActionPolicy policy = appActionPolicy(m_state, hasValidInput());
+    const AppActionPolicy policy = appActionPolicy(m_state, hasReadyInputForCurrentMode());
     if (!policy.canCancel || m_cancellationPending) {
         return;
     }
 
     m_cancellationPending = true;
     m_backendState = QStringLiteral("cancelling");
+    m_processedSeconds = -1.0;
+    m_totalSeconds = -1.0;
     logInfo(tr("Transcription Cancel Requested"));
     ui->processingProgressBar->setRange(0, 0);
+    ui->processingTimeLabel->setText(tr("—"));
     updateUiForState();
     emit cancellationRequested();
 }
@@ -1043,14 +1148,21 @@ void MainWindow::handleResultSave()
         return;
     }
 
-    m_resultOutputFile = QFileInfo(targetFile.absoluteFilePath()).absoluteFilePath();
+    // In a multi-input run the five backend files are one result set. Keep the
+    // UI and folder button linked to that set when the user exports an extra
+    // TXT copy. Single-input behaviour remains unchanged.
+    const QString savedResultFile = QFileInfo(targetFile.absoluteFilePath()).absoluteFilePath();
+    if (m_resultMergedAudioFile.isEmpty()) {
+        m_resultOutputFile = savedResultFile;
+        m_resultFolder = targetFile.absolutePath();
+    }
     m_settings.outputDirectory = targetFile.absolutePath();
     saveSettings();
     updateResultOutputUi();
     updateUiForState();
     statusBar()->showMessage(
         tr("결과를 저장했습니다: %1")
-            .arg(QDir::toNativeSeparators(m_resultOutputFile)));
+            .arg(QDir::toNativeSeparators(savedResultFile)));
 }
 
 void MainWindow::handleOpenResultFolder()
@@ -1058,18 +1170,17 @@ void MainWindow::handleOpenResultFolder()
     if (m_state != AppState::Completed) {
         return;
     }
-    if (!hasAvailableResult()) {
+    if (!hasAvailableResultFolder()) {
         updateUiForState();
-        showResultError(tr("열 수 있는 전사 결과 파일을 찾을 수 없습니다."));
+        showResultError(tr("열 수 있는 전사 결과 폴더를 찾을 수 없습니다."));
         return;
     }
 
-    const QFileInfo resultFile(m_resultOutputFile);
-    const QUrl folderUrl = QUrl::fromLocalFile(resultFile.absolutePath());
+    const QUrl folderUrl = QUrl::fromLocalFile(m_resultFolder);
     if (!QDesktopServices::openUrl(folderUrl)) {
         showResultError(
             tr("결과 폴더를 열 수 없습니다: %1")
-                .arg(QDir::toNativeSeparators(resultFile.absolutePath())));
+                .arg(QDir::toNativeSeparators(m_resultFolder)));
     }
 }
 
@@ -1273,7 +1384,10 @@ void MainWindow::backendStateChanged(const QString &state)
                     .arg(m_settings.diarizationDevice,
                          m_settings.diarizationFallbackToCpu ? tr("enabled") : tr("disabled")));
     }
+    m_processedSeconds = -1.0;
+    m_totalSeconds = -1.0;
     ui->processingProgressBar->setRange(0, 0);
+    ui->processingTimeLabel->setText(tr("—"));
     updateUiForState();
 }
 
@@ -1284,7 +1398,10 @@ void MainWindow::backendProgressChanged(int progress)
     }
 
     if (progress < 0) {
+        m_processedSeconds = -1.0;
+        m_totalSeconds = -1.0;
         ui->processingProgressBar->setRange(0, 0);
+        ui->processingTimeLabel->setText(tr("—"));
         return;
     }
 
@@ -1331,6 +1448,7 @@ void MainWindow::backendStandardErrorReceived(const QByteArray &data)
 
 void MainWindow::backendProcessStopped()
 {
+    m_multiAudioManifestFile.reset();
     // A protocol/process error is signalled before QProcess has necessarily
     // exited.  Keep actions disabled until this terminal notification, then
     // apply the normal Error-state policy so the user can try again.
@@ -1380,6 +1498,11 @@ void MainWindow::clearTranscript()
 {
     m_transcriptSegments.clear();
     m_resultOutputFile.clear();
+    m_resultSrtFile.clear();
+    m_resultMergedAudioFile.clear();
+    m_resultAlignmentFile.clear();
+    m_resultSelectionFile.clear();
+    m_resultFolder.clear();
     ui->resultTextEdit->clear();
     updateResultOutputUi();
 }
@@ -1526,17 +1649,37 @@ void MainWindow::updateInputFileUi()
 
 void MainWindow::updateResultOutputUi()
 {
-    const QString outputPath = m_resultOutputFile.isEmpty()
-        ? tr("—")
-        : QDir::toNativeSeparators(m_resultOutputFile);
-    ui->resultOutputPathLabel->setText(tr("출력 파일: %1").arg(outputPath));
-    ui->resultOutputPathLabel->setToolTip(m_resultOutputFile);
+    QStringList resultLines;
+    QStringList resultPaths;
+    const auto appendResult = [&resultLines, &resultPaths](const QString &label,
+                                                           const QString &path) {
+        if (path.isEmpty()) {
+            return;
+        }
+        const QString nativePath = QDir::toNativeSeparators(path);
+        resultLines.append(QStringLiteral("%1: %2").arg(label, nativePath));
+        resultPaths.append(nativePath);
+    };
+    appendResult(tr("TXT"), m_resultOutputFile);
+    appendResult(tr("SRT"), m_resultSrtFile);
+    appendResult(tr("통합 WAV"), m_resultMergedAudioFile);
+    appendResult(tr("정렬 진단"), m_resultAlignmentFile);
+    appendResult(tr("채널 선택 진단"), m_resultSelectionFile);
+
+    ui->resultOutputPathLabel->setText(
+        resultLines.isEmpty() ? tr("출력 파일: —") : resultLines.join(QLatin1Char('\n')));
+    ui->resultOutputPathLabel->setToolTip(resultPaths.join(QLatin1Char('\n')));
 }
 
 bool MainWindow::hasAvailableResult() const
 {
     const QFileInfo resultFile(m_resultOutputFile);
     return resultFile.exists() && resultFile.isFile();
+}
+
+bool MainWindow::hasAvailableResultFolder() const
+{
+    return !m_resultFolder.isEmpty() && QFileInfo(m_resultFolder).isDir();
 }
 
 void MainWindow::showResultError(const QString &message)
@@ -1942,24 +2085,24 @@ void MainWindow::updateUiForState()
         policy.canStartRecording && !m_inputInspectionPending && !backendBusy);
     ui->fileSelectButton->setEnabled(policy.canSelectFile && !backendBusy);
     ui->recordStopButton->setEnabled(policy.canStopRecording);
-    const bool multiInputAwaitingBackend =
-        m_inputMode == InputMode::MultiAudioFiles;
+    const bool multiInput = m_inputMode == InputMode::MultiAudioFiles;
+    const bool multiInputReady = !multiInput || hasCurrentMultiAudioSelection();
     ui->transcribeButton->setEnabled(
         policy.canStartTranscription
-        && !multiInputAwaitingBackend
+        && multiInputReady
         && !backendBusy);
     QString transcribeToolTip;
-    if (multiInputAwaitingBackend) {
+    if (multiInput) {
         QString alignmentReason;
         if (!hasResolvedMultiAudioAlignment(&alignmentReason)) {
             transcribeToolTip = alignmentReason;
         } else if (hasCurrentMultiAudioSelection()) {
             transcribeToolTip =
-                tr("시간 정렬과 채널 선택(수동 %1구간 포함)이 준비되었습니다. 다중 마이크 파일 전사 연동은 후속 개발 단계에서 제공됩니다.")
+                tr("시간 정렬과 채널 선택(수동 %1구간 포함)이 준비되었습니다. 통합 음성을 생성해 전사합니다.")
                     .arg(m_multiAudioSelectionPlan.manualSegmentCount());
         } else {
             transcribeToolTip =
-                tr("시간 정렬은 완료되었습니다. 다중 파일 설정에서 음질 분석으로 채널 선택을 확인하세요. 다중 마이크 파일 전사 연동은 후속 개발 단계에서 제공됩니다.");
+                tr("시간 정렬은 완료되었습니다. 다중 파일 설정에서 음질 분석으로 최종 채널 선택을 확인하세요.");
         }
     }
     ui->transcribeButton->setToolTip(transcribeToolTip);
@@ -1981,7 +2124,8 @@ void MainWindow::updateUiForState()
 
     const bool resultAvailable = m_state == AppState::Completed && hasAvailableResult();
     ui->saveResultButton->setEnabled(resultAvailable);
-    ui->openResultFolderButton->setEnabled(resultAvailable);
+    ui->openResultFolderButton->setEnabled(
+        m_state == AppState::Completed && hasAvailableResultFolder());
 
     if (m_state == AppState::Completed) {
         ui->processingProgressBar->setRange(0, 100);
