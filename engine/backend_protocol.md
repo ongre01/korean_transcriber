@@ -310,6 +310,10 @@ Qt `BackendProcess`는 취소할 때 stdin에 `cancel` 한 줄을 쓰고 `QProce
   스레드가 staging을 직접 지우고 종료 이벤트 없이 종료 코드 130으로 끝낸다. 사용자
   취소이므로 종료 이벤트 누락이 허용된다.
 - stdin 종료(EOF)나 다른 줄은 취소가 아니다. stdin을 닫은 채 실행해도 된다.
+- Windows에서는 stdin 파이프를 0.1초(`CANCEL_POLL_SECONDS`) 간격으로 확인하고 데이터가
+  있을 때만 읽는다. 동기 파이프에 읽기를 걸어 두면 같은 handle을 조회하는 확장 DLL의 C
+  runtime 초기화(numpy import)가 `cancel`이 들어올 때까지 멈추기 때문이다. 파이프가 아닌
+  stdin(콘솔, `NUL`)은 취소 요청 경로로 쓰지 않는다.
 - Qt는 취소를 요청한 뒤의 stdout 이벤트를 무시하고, 프로세스가 멈춘 뒤 이벤트·종료
   코드와 관계없이 취소로 처리한다. 프로토콜 오류로 실행을 중단할 때도 같은
   cancel 요청→terminate→유예 후 kill 순서로 프로세스를 멈춘다.

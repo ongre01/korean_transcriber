@@ -27,7 +27,12 @@ if str(ENGINE_DIR) not in sys.path:
     sys.path.insert(0, str(ENGINE_DIR))
 
 import backend_bridge
-from backend_bridge import CANCELLED_EXIT_CODE, CANCELLED_MESSAGE, CancellationWatcher
+from backend_bridge import (
+    CANCELLED_EXIT_CODE,
+    CANCELLED_MESSAGE,
+    CancellationWatcher,
+    StdinRequestLines,
+)
 from backend_protocol import CompletedEvent, ErrorEvent, parse_event_line, validate_stream
 import multimic
 from result_staging import OWNER_LOCK_NAME, ResultStaging
@@ -54,6 +59,49 @@ QT_CANCELLATION_GRACE_SECONDS = 3.0
 
 def interrupt(*_arguments, **_keyword_arguments):
     raise KeyboardInterrupt
+
+
+def run_with_open_stdin(
+    command: list[str], *, cwd: Path, timeout: float = 120.0
+) -> tuple[int | None, list[str], str]:
+    """Run the bridge the way Qt does: stdin stays open until it has exited.
+
+    The exit code is ``None`` if the bridge did not end within ``timeout``.
+    """
+
+    process = subprocess.Popen(
+        command,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        cwd=cwd,
+    )
+    outputs: dict[str, bytes] = {}
+
+    def drain(name: str, stream) -> None:
+        outputs[name] = stream.read()
+
+    readers = [
+        threading.Thread(target=drain, args=("stdout", process.stdout)),
+        threading.Thread(target=drain, args=("stderr", process.stderr)),
+    ]
+    for reader in readers:
+        reader.start()
+    try:
+        returncode = process.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        returncode = None
+        process.kill()
+        process.wait()
+    for reader in readers:
+        reader.join()
+    for stream in (process.stdin, process.stdout, process.stderr):
+        stream.close()
+    return (
+        returncode,
+        outputs["stdout"].decode("utf-8").splitlines(),
+        outputs["stderr"].decode("utf-8", "replace"),
+    )
 
 
 def wait_for_process_exit(pid: int, timeout: float) -> None:
@@ -389,6 +437,56 @@ class CancellationWatcherTests(unittest.TestCase):
             self.assertIn("did not stop in time", diagnostic.getvalue())
 
 
+class StdinRequestLinesTests(unittest.TestCase):
+    def test_lines_are_joined_across_writes_until_the_pipe_closes(self) -> None:
+        read_descriptor, write_descriptor = os.pipe()
+        self.addCleanup(os.close, read_descriptor)
+
+        def write() -> None:
+            os.write(write_descriptor, b"progress\ncan")
+            time.sleep(0.2)
+            os.write(write_descriptor, b"cel\r\nlast")
+            os.close(write_descriptor)
+
+        writer = threading.Thread(target=write)
+        writer.start()
+        lines = list(StdinRequestLines(read_descriptor, poll_seconds=0.01))
+        writer.join(5.0)
+
+        self.assertEqual(lines, [b"progress", b"cancel\r", b"last"])
+
+
+class BridgeOpenStdinTests(unittest.TestCase):
+    """Qt keeps stdin open for a cancel request for the whole run."""
+
+    def test_engine_import_does_not_wait_for_stdin(self) -> None:
+        # A blocking stdin read used to hang the first ``import numpy`` (in
+        # transcribe_npu) until Qt wrote ``cancel``.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "model").mkdir()
+            missing = root / "없는 녹음.wav"
+            returncode, lines, errors = run_with_open_stdin(
+                [
+                    sys.executable,
+                    str(ENGINE_DIR / "backend_bridge.py"),
+                    "--input", str(missing),
+                    "--model-dir", str(root / "model"),
+                    "--device", "CPU",
+                ],
+                cwd=root,
+                timeout=60.0,
+            )
+
+        self.assertIsNotNone(returncode, f"bridge hung with stdin open:\n{errors}")
+        self.assertEqual(returncode, 2, errors)
+        self.assertEqual(
+            validate_stream(lines, returncode)[-1],
+            ErrorEvent(f"Input file not found: {missing}"),
+        )
+        self.assertNotIn("Fatal Python error", errors)
+
+
 DRIVER = r'''
 import os
 import sys
@@ -405,7 +503,9 @@ from test_backend_bridge_multi_pipeline import MergedAudioEngine
 class BlockingEngine(MergedAudioEngine):
     """Blocks in Whisper inference until the job is cancelled or killed."""
 
-    def transcribe_windows(self, *_arguments, **_keyword_arguments):
+    def transcribe_windows(self, *arguments, **keyword_arguments):
+        if mode == "complete":
+            return super().transcribe_windows(*arguments, **keyword_arguments)
         Path(marker).write_text(str(os.getpid()), encoding="utf-8")
         while True:
             try:
@@ -423,21 +523,24 @@ raise SystemExit(backend_bridge.run_as_script(arguments, engine_module=BlockingE
 class BridgeProcessCancellationTests(JobCleanupTestCase):
     """The real script entry point, cancelled through stdin like Qt does."""
 
-    def start_bridge(self, mode: str) -> tuple[subprocess.Popen, int]:
+    def driver_command(self, mode: str, marker: Path) -> list[str]:
         driver = self.root / "bridge_driver.py"
         driver.write_text(DRIVER, encoding="utf-8")
+        return [
+            sys.executable,
+            str(driver),
+            str(ENGINE_DIR),
+            str(marker),
+            mode,
+            "--multi-input-manifest", str(self.manifest),
+            "--model-dir", str(self.model_dir),
+            "--device", "CPU",
+        ]
+
+    def start_bridge(self, mode: str) -> tuple[subprocess.Popen, int]:
         marker = self.root / "transcribing.pid"
         process = subprocess.Popen(
-            [
-                sys.executable,
-                str(driver),
-                str(ENGINE_DIR),
-                str(marker),
-                mode,
-                "--multi-input-manifest", str(self.manifest),
-                "--model-dir", str(self.model_dir),
-                "--device", "CPU",
-            ],
+            self.driver_command(mode, marker),
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -496,6 +599,19 @@ class BridgeProcessCancellationTests(JobCleanupTestCase):
         self.assertFalse([event for event in events if isinstance(event, CompletedEvent)])
         self.assert_cancelled_while_transcribing(lines)
         self.assert_job_left_no_trace({})
+
+    def test_completed_job_exits_normally_while_stdin_stays_open(self) -> None:
+        # The watcher used to hold the stdin reader's lock, so interpreter
+        # shutdown aborted with a fatal error after ``completed``.
+        returncode, lines, errors = run_with_open_stdin(
+            self.driver_command("complete", self.root / "unused.pid"),
+            cwd=self.root,
+        )
+
+        self.assertIsNotNone(returncode, f"bridge hung with stdin open:\n{errors}")
+        self.assertEqual(returncode, 0, errors)
+        self.assertIsInstance(validate_stream(lines, returncode)[-1], CompletedEvent)
+        self.assertNotIn("Fatal Python error", errors)
 
     def test_killed_job_leaves_staging_that_the_next_job_removes(self) -> None:
         process, pid = self.start_bridge("cooperative")

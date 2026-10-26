@@ -16,9 +16,10 @@ from pathlib import Path
 import signal
 import sys
 import threading
+import time
 import _thread
 import traceback
-from typing import TYPE_CHECKING, BinaryIO, Callable, Mapping, TextIO
+from typing import TYPE_CHECKING, Callable, Iterable, Iterator, Mapping, TextIO
 
 from backend_protocol import EventStreamValidator, parse_event_line
 from result_staging import ResultStaging, discard_active_staging
@@ -63,6 +64,8 @@ CANCELLED_EXIT_CODE = 130
 # Qt kills the process 3 s after it requests cancellation, so a job that
 # cannot unwind sooner is ended by the bridge itself after its cleanup.
 CANCEL_UNWIND_SECONDS = 2.0
+# How often a Windows stdin pipe is checked for a cancel request.
+CANCEL_POLL_SECONDS = 0.1
 
 
 class BridgeArgumentError(ValueError):
@@ -1517,6 +1520,82 @@ def _isolate_protocol_stdout() -> TextIO:
     )
 
 
+class StdinRequestLines:
+    """Lines written to stdin, read without leaving a read pending on it.
+
+    On Windows a synchronous read that waits on the stdin pipe blocks every
+    other call on that handle until data arrives.  The C runtime start-up of
+    some extension DLLs queries the standard handles (numpy's does), so
+    ``import numpy`` hung until Qt wrote ``cancel``.  The pipe is therefore
+    polled and read only once data is waiting; a stdin that is not a pipe (a
+    console, ``NUL``) carries no requests.  Reading the descriptor instead of
+    ``sys.stdin.buffer`` also leaves that reader's lock free, so interpreter
+    shutdown does not abort while the watcher waits.
+    """
+
+    def __init__(self, descriptor: int, *, poll_seconds: float = CANCEL_POLL_SECONDS):
+        self._descriptor = descriptor
+        self._poll_seconds = poll_seconds
+        self._waiting_bytes = (
+            _pipe_byte_counter(descriptor) if os.name == "nt" else None
+        )
+
+    def __iter__(self) -> Iterator[bytes]:
+        buffered = b""
+        while True:
+            chunk = self._read()
+            if not chunk:
+                break
+            *lines, buffered = (buffered + chunk).split(b"\n")
+            yield from lines
+        if buffered:
+            yield buffered
+
+    def _read(self) -> bytes:
+        if self._waiting_bytes is None:
+            return os.read(self._descriptor, 4096)
+        while True:
+            waiting = self._waiting_bytes()
+            if waiting is None:
+                return b""
+            if waiting:
+                return os.read(self._descriptor, min(waiting, 4096))
+            time.sleep(self._poll_seconds)
+
+
+def _pipe_byte_counter(descriptor: int) -> Callable[[], int | None]:
+    """Count the bytes waiting in a Windows pipe without reading them.
+
+    The counter returns ``None`` once the writer has closed the pipe, or when
+    the handle is not a pipe at all.
+    """
+
+    import ctypes
+    from ctypes import wintypes
+    import msvcrt
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    peek = kernel32.PeekNamedPipe
+    peek.argtypes = (
+        wintypes.HANDLE,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.LPDWORD,
+        wintypes.LPDWORD,
+        wintypes.LPDWORD,
+    )
+    peek.restype = wintypes.BOOL
+    handle = wintypes.HANDLE(msvcrt.get_osfhandle(descriptor))
+
+    def waiting_bytes() -> int | None:
+        available = wintypes.DWORD()
+        if not peek(handle, None, 0, None, ctypes.byref(available), None):
+            return None
+        return available.value
+
+    return waiting_bytes
+
+
 class CancellationWatcher:
     """Turn a ``cancel`` line on stdin into a cooperative cancellation.
 
@@ -1533,7 +1612,7 @@ class CancellationWatcher:
 
     def __init__(
         self,
-        stream: BinaryIO,
+        stream: Iterable[bytes],
         *,
         unwind_seconds: float = CANCEL_UNWIND_SECONDS,
         interrupt: Callable[[], None] = _thread.interrupt_main,
@@ -1617,10 +1696,13 @@ def run_as_script(
     protocol_stream = _isolate_protocol_stdout()
     if hasattr(signal, "SIGTERM"):
         signal.signal(signal.SIGTERM, _cancel_on_signal)
-    stdin = getattr(sys.stdin, "buffer", None)
     watcher = None
-    if stdin is not None:
-        watcher = CancellationWatcher(stdin, diagnostic=sys.stderr)
+    try:
+        requests = StdinRequestLines(sys.stdin.fileno())
+    except (AttributeError, OSError, ValueError):
+        requests = None
+    if requests is not None:
+        watcher = CancellationWatcher(requests, diagnostic=sys.stderr)
         watcher.start()
     try:
         return main(
