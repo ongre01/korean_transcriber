@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "dataset_id": "sample_20261026",
+  "description": "sample/의 동일 공간 2개 장치 녹음(약 1시간). 정답 전사가 없어 정확도(CER/WER)는 측정할 수 없고, 처리 시간·채널 전환·조건 간 전사 불일치만 측정한다.",
+  "authorization": {
+    "approved_by": null,
+    "basis": "2026-10-26 저장소 sample/에 추가된 사용자 제공 녹음(commit cc44ded). 녹음 참여자의 평가 사용 동의 기록은 저장소에 없어 확인이 필요하다."
+  },
+  "inputs": [
+    {"path": "../../../sample/recording_20261026_1.wav", "label": "mic 1 (wav)"},
+    {"path": "../../../sample/recording_20261026_2.m4a", "label": "mic 2 (m4a)"}
+  ],
+  "reference_index": 0,
+  "reference_transcript": null,
+  "alignment": {"manual_offsets_ms": {}},
+  "selection": {"window_seconds": 3.0, "hop_seconds": 1.0},
+  "settings": {
+    "device": "GPU",
+    "model_dir": "../../models/whisper-large-v3-turbo-int8",
+    "diarization": true,
+    "num_speakers": "auto",
+    "diarization_device": "CPU"
+  }
+}
