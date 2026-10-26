@@ -437,6 +437,56 @@ class BackendBridgeMultiPipelineTests(MultiInputBridgeTestCase):
         self.assertEqual(alignment["inputs"][1]["correction_method"], "manual_offset")
         self.assertEqual(alignment["inputs"][1]["offset_ms"], float(LATER_START_MS))
 
+    def test_unrelated_third_recording_blocks_merge_and_keeps_sources(self) -> None:
+        paths = self.write_inputs(gap=False)
+        unrelated_path = self.recordings / "다른 회의.wav"
+        unrelated_master = speech_like_master(seed=987, duration_seconds=16.0)
+        write_source_wav(
+            unrelated_path,
+            unrelated_master[3 * SAMPLE_RATE : 12 * SAMPLE_RATE],
+        )
+        paths.append(unrelated_path)
+        sources_before = {
+            path: multimic.fingerprint_file(path) for path in paths
+        }
+
+        manifest_path = self.write_manifest(paths)
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["inputs"].append(
+            {"path": str(unrelated_path), "label": "다른 회의"}
+        )
+        manifest_path.write_text(
+            json.dumps(manifest, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+        result, events, diagnostic = self.run_main(manifest_path)
+
+        self.assertEqual(result, 1, diagnostic)
+        self.assertEqual(
+            state_values(events),
+            ["preparing", "decoding_audio", "aligning_audio"],
+        )
+        error = events[-1]
+        self.assertIsInstance(error, ErrorEvent)
+        self.assertTrue(
+            error.message.startswith(
+                "Time alignment is unresolved for 다른 회의"
+            ),
+            error.message,
+        )
+        self.assertIn("manual offset", error.message)
+        self.assertNotIn("Traceback", error.message)
+        self.assertIn("Unresolved multi-input alignment:", diagnostic)
+        self.assertIn('"input_index": 2', diagnostic)
+        self.assertIn("Traceback", diagnostic)
+        self.assertEqual(self.engine.model_load_count, 0)
+        self.assert_no_multi_input_outputs(self.recordings)
+        self.assertEqual(
+            {path: multimic.fingerprint_file(path) for path in paths},
+            sources_before,
+        )
+
     def test_undecodable_input_is_a_user_error_with_stderr_detail(self) -> None:
         paths = self.write_inputs()
         paths[1].write_bytes(b"not an audio stream")

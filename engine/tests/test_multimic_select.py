@@ -328,6 +328,48 @@ class ChannelSelectionTests(unittest.TestCase):
         self.assertEqual(noise_owner, 1)
         assert_complete_partition(self, selected)
 
+    def test_local_clipping_selects_the_clean_channel(self) -> None:
+        sample_count = 5_000
+        clean = np.zeros(sample_count, dtype=np.float32)
+        selection_add_tone(clean, 250, 4_750, amplitude=0.32)
+        clipped = clean.copy()
+        clipped[2_000:3_000] = np.clip(
+            clean[2_000:3_000] * 5.0,
+            -1.0,
+            1.0,
+        )
+        quality = analyze_aligned_quality(
+            (
+                selection_analysis_signal(clean),
+                selection_analysis_signal(clipped),
+            ),
+            speech_config=selection_speech_config(),
+        )
+
+        affected_window = next(
+            window for window in quality.windows if window.start_sample == 2_000
+        )
+        clean_score = affected_window.score_for_input(0)
+        clipped_score = affected_window.score_for_input(1)
+        self.assertGreater(clipped_score.clipping_penalty, 0.0)
+        self.assertGreater(clean_score.score, clipped_score.score)
+
+        selected = select_channels(
+            quality,
+            config=ChannelSelectionConfig(
+                minimum_hold_seconds=0.0,
+                boundary_search_seconds=0.0,
+            ),
+        )
+
+        clipping_owner = next(
+            segment.selected_input_index
+            for segment in selected.segments
+            if segment.start_sample <= 2_500 < segment.end_sample
+        )
+        self.assertEqual(clipping_owner, 0)
+        assert_complete_partition(self, selected)
+
     def test_real_vad_pipeline_preserves_single_input_speech(self) -> None:
         sample_count = 5_000
         first = np.zeros(sample_count, dtype=np.float32)

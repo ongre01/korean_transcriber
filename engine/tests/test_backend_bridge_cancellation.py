@@ -121,8 +121,33 @@ class MultiInputCancellationTests(JobCleanupTestCase):
             raise KeyboardInterrupt
 
         cases = {
+            "decoding_audio": (
+                mock.patch(
+                    "multimic.pipeline.prepare_multi_audio_inputs",
+                    side_effect=interrupt,
+                ),
+                (),
+            ),
             "aligning_audio": (
                 mock.patch("multimic.pipeline.align_prepared_inputs", side_effect=interrupt),
+                (),
+            ),
+            "detecting_speech": (
+                mock.patch(
+                    "multimic.quality.analyze_aligned_speech",
+                    side_effect=interrupt,
+                ),
+                (),
+            ),
+            "assessing_channels": (
+                mock.patch(
+                    "multimic.quality.score_aligned_quality",
+                    side_effect=interrupt,
+                ),
+                (),
+            ),
+            "selecting_channels": (
+                mock.patch("multimic.select.select_channels", side_effect=interrupt),
                 (),
             ),
             "rendering_merged_audio": (

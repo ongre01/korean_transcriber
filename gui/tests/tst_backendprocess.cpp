@@ -106,6 +106,7 @@ class BackendProcessTests : public QObject
 private slots:
     void initTestCase();
     void optionsBuildMutuallyExclusiveInputArguments();
+    void warningIsForwardedBeforeMultiCompletion();
     void multiInputArtifactsAreStoredAndClearedForNextRun();
     void completionArtifactsMustMatchRunMode_data();
     void completionArtifactsMustMatchRunMode();
@@ -169,6 +170,42 @@ void BackendProcessTests::optionsBuildMutuallyExclusiveInputArguments()
     QVERIFY(!ambiguousInput.isValid(&errorMessage));
     QCOMPARE(errorMessage,
              QStringLiteral("exactly one of inputFile or multiInputManifestFile must be set"));
+}
+
+void BackendProcessTests::warningIsForwardedBeforeMultiCompletion()
+{
+    if (m_pythonProgram.isEmpty()) {
+        QSKIP("No Python executable was found via PYTHON or PATH (python).");
+    }
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString script = writeFakeBridge(directory, R"PY(
+emit({"type": "warning", "message": "Low alignment confidence."})
+emit({"type": "state", "value": "saving_result"})
+emit({"type": "completed", "text_file": "C:/result.txt", "srt_file": "C:/result.srt",
+      "merged_audio_file": "C:/merged.wav", "alignment_file": "C:/alignment.json",
+      "selection_file": "C:/selection.json"})
+)PY");
+    QVERIFY(!script.isEmpty());
+
+    BackendProcess backend;
+    backend.setPythonProgram(m_pythonProgram);
+    backend.setBridgeScript(script);
+    QSignalSpy warnings(&backend, &BackendProcess::warningOccurred);
+    QSignalSpy completed(&backend, &BackendProcess::completed);
+    QSignalSpy errors(&backend, &BackendProcess::errorOccurred);
+    QSignalSpy stopped(&backend, &BackendProcess::stopped);
+
+    TranscribeOptions options = fakeOptions(directory);
+    options.inputFile.clear();
+    options.multiInputManifestFile = directory.filePath(QStringLiteral("manifest.json"));
+    backend.start(options);
+    QTRY_COMPARE_WITH_TIMEOUT(stopped.count(), 1, 20000);
+
+    QCOMPARE(warnings.count(), 1);
+    QCOMPARE(warnings.at(0).at(0).toString(), QStringLiteral("Low alignment confidence."));
+    QCOMPARE(completed.count(), 1);
+    QCOMPARE(errors.count(), 0);
 }
 
 void BackendProcessTests::multiInputArtifactsAreStoredAndClearedForNextRun()
@@ -745,7 +782,10 @@ raise SystemExit(backend_bridge.run_as_script(
     QSignalSpy errors(&backend, &BackendProcess::errorOccurred);
     QSignalSpy stopped(&backend, &BackendProcess::stopped);
 
-    backend.start(fakeOptions(directory));
+    TranscribeOptions options = fakeOptions(directory);
+    options.inputFile.clear();
+    options.multiInputManifestFile = manifest;
+    backend.start(options);
     QTRY_VERIFY_WITH_TIMEOUT(
         !states.isEmpty()
             && states.constLast().at(0).toString() == QStringLiteral("transcribing"),

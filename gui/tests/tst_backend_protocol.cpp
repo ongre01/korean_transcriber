@@ -14,6 +14,7 @@ private slots:
     void emptySegmentFixture();
     void multiInputSuccessFixture();
     void multiInputErrorFixture();
+    void warningEventsAreParsedAndNonTerminal();
     void invalidEventsAreRejected();
     void terminalAndExitRules();
     void stateValuesRoundTrip();
@@ -208,6 +209,36 @@ void BackendProtocolTest::multiInputErrorFixture()
 
     QList<BackendEvent> ignored;
     QVERIFY(!validateStream(lines, 0, &ignored, &error));
+}
+
+void BackendProtocolTest::warningEventsAreParsedAndNonTerminal()
+{
+    BackendEvent warning;
+    QString error;
+    QVERIFY2(BackendProtocol::parseEventLine(
+                 QByteArrayLiteral(
+                     "{\"type\":\"warning\",\"message\":\"정렬 신뢰도가 낮습니다.\"}"),
+                 &warning, &error),
+             qPrintable(error));
+    QCOMPARE(warning.type, BackendEventType::Warning);
+    QCOMPARE(warning.warningMessage, QStringLiteral("정렬 신뢰도가 낮습니다."));
+
+    BackendEvent blankWarning;
+    QVERIFY(!BackendProtocol::parseEventLine(
+        QByteArrayLiteral("{\"type\":\"warning\",\"message\":\"   \"}"),
+        &blankWarning, &error));
+    QVERIFY(!error.isEmpty());
+
+    const BackendEvent state = parsed(QByteArrayLiteral(
+        "{\"type\":\"state\",\"value\":\"aligning_audio\"}"));
+    const BackendEvent completed = parsed(QByteArrayLiteral(
+        "{\"type\":\"completed\",\"text_file\":\"C:/a.txt\","
+        "\"srt_file\":\"C:/a.srt\"}"));
+    BackendProtocol::EventStreamValidator validator;
+    QVERIFY(validator.accept(state, &error));
+    QVERIFY(validator.accept(warning, &error));
+    QVERIFY(validator.accept(completed, &error));
+    QVERIFY2(validator.finish(0, &error), qPrintable(error));
 }
 
 void BackendProtocolTest::invalidEventsAreRejected()
