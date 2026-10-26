@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import json
 from pathlib import Path
 import sys
@@ -764,6 +765,113 @@ class DriftAlignmentTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "timeline_sample_count"):
             warp_signal_to_reference_timeline(source, alignment, True)
+
+
+class FallbackSearchTests(unittest.TestCase):
+    NARROW_ONLY = AlignmentConfig(fallback_max_offset_seconds=None)
+
+    @staticmethod
+    def late_target_recordings(
+        offset_seconds: float,
+    ) -> tuple[AnalysisSignal, AnalysisSignal]:
+        """Return a reference and a target that started ``offset_seconds`` later."""
+
+        master = speech_like_master(seed=4242, duration_seconds=40.0)
+        start = 3 * SAMPLE_RATE
+        length = 20 * SAMPLE_RATE
+        late = start + int(round(offset_seconds * SAMPLE_RATE))
+        target = (
+            0.70 * master[late : late + length]
+            + np.random.default_rng(102).normal(0.0, 0.003, length)
+        ).astype(np.float32)
+        return (
+            analysis_signal(master[start : start + length]),
+            analysis_signal(target),
+        )
+
+    def test_offset_beyond_narrow_search_is_resolved_by_fallback(self) -> None:
+        reference, target = self.late_target_recordings(6.0)
+
+        narrow = estimate_time_alignments(
+            (reference, target),
+            config=self.NARROW_ONLY,
+        ).inputs[1]
+        report = estimate_time_alignments((reference, target))
+        single = estimate_time_alignment(reference, target)
+
+        self.assertEqual(narrow.status, "failed")
+        self.assertTrue(report.success, report.inputs[1].failure_reason)
+        for result in (report.inputs[1], single):
+            self.assertTrue(result.success, result.failure_reason)
+            self.assertLessEqual(
+                abs(result.offset_samples - 6 * SAMPLE_RATE),
+                320,
+            )
+            self.assertGreater(result.confidence, 0.5)
+        json.dumps(report.to_dict(), allow_nan=False)
+
+    def test_long_recording_offset_beyond_narrow_search_keeps_drift_model(
+        self,
+    ) -> None:
+        reference, target = long_drift_recordings(offset_seconds=6.0)
+        # At this 400 Hz test rate the default 0.75 s window has only 300
+        # samples, so chance peaks can pass the correlation floor.  An 8 s
+        # window restores the chance-correlation level of 16 kHz windows.
+        config = AlignmentConfig(window_seconds=8.0, hop_seconds=2.0)
+
+        narrow = estimate_time_alignments(
+            (reference, target),
+            config=replace(config, fallback_max_offset_seconds=None),
+        ).inputs[1]
+        result = estimate_time_alignments(
+            (reference, target),
+            config=config,
+        ).inputs[1]
+
+        self.assertEqual(narrow.status, "failed")
+        self.assertTrue(result.success, result.failure_reason)
+        self.assertEqual(result.correction_method, "affine")
+        self.assertAlmostEqual(result.offset_ms, 6000.0, delta=20.0)
+        self.assertAlmostEqual(result.drift_ppm, 200.0, delta=30.0)
+
+    def test_inputs_resolved_by_narrow_search_are_unchanged(self) -> None:
+        reference, positive, negative = cropped_recordings()
+        signals = (reference, positive, negative)
+
+        self.assertEqual(
+            estimate_time_alignments(signals).to_dict(),
+            estimate_time_alignments(signals, config=self.NARROW_ONLY).to_dict(),
+        )
+
+    def test_unrelated_recording_keeps_narrow_search_failure(self) -> None:
+        reference, _, _ = cropped_recordings()
+        unrelated = analysis_signal(
+            speech_like_master(seed=987)[3 * SAMPLE_RATE : 12 * SAMPLE_RATE]
+        )
+
+        result = estimate_time_alignments((reference, unrelated)).inputs[1]
+        narrow = estimate_time_alignments(
+            (reference, unrelated),
+            config=self.NARROW_ONLY,
+        ).inputs[1]
+
+        self.assertEqual(result.status, "failed")
+        self.assertIsNone(result.offset_samples)
+        self.assertEqual(result.to_dict(), narrow.to_dict())
+
+    def test_fallback_bound_is_validated(self) -> None:
+        for value in (0.0, -1.0, float("nan"), True, "30"):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "fallback_max_offset_seconds",
+                ):
+                    AlignmentConfig(
+                        fallback_max_offset_seconds=value,  # type: ignore[arg-type]
+                    )
+        AlignmentConfig(fallback_max_offset_seconds=None)
+        # A bound that does not widen the search simply disables the retry.
+        AlignmentConfig(max_offset_seconds=60.0, fallback_max_offset_seconds=30.0)
 
 
 class AlignmentPipelineTests(unittest.TestCase):

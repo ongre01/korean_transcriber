@@ -44,11 +44,19 @@ class AlignmentConfig:
     Defaults favor conservative failure over returning a plausible-looking
     offset for unrelated or repetitive recordings.  ``max_offset_seconds`` is
     a search bound, not the +/-0.5 second acceptance-test value.
+
+    Independently started recorders are often several seconds apart.  When
+    the ``max_offset_seconds`` search fails an input, the time-alignment entry
+    points search that input once more within
+    ``fallback_max_offset_seconds``; inputs that the narrow search resolves
+    keep exactly the narrow-search result.  ``None`` or a value not above
+    ``max_offset_seconds`` disables the fallback.
     """
 
     window_seconds: float = 0.75
     hop_seconds: float = 0.25
     max_offset_seconds: float = 2.0
+    fallback_max_offset_seconds: float | None = 30.0
     max_windows: int = 8
     min_reference_windows: int = 3
     min_consistent_windows: int = 3
@@ -77,6 +85,10 @@ class AlignmentConfig:
         _require_positive("window_seconds", self.window_seconds)
         _require_positive("hop_seconds", self.hop_seconds)
         _require_positive("max_offset_seconds", self.max_offset_seconds)
+        if self.fallback_max_offset_seconds is not None:
+            _require_positive(
+                "fallback_max_offset_seconds", self.fallback_max_offset_seconds
+            )
         _require_positive("peak_exclusion_ms", self.peak_exclusion_ms)
         _require_positive("consensus_tolerance_ms", self.consensus_tolerance_ms)
         _require_positive(
@@ -2467,6 +2479,79 @@ def _estimate_time_pair(
     return result
 
 
+def _estimate_time_input(
+    reference: _SignalView,
+    target: _SignalView,
+    reference_windows: Sequence[tuple[int, int]],
+    *,
+    analyze_drift: bool,
+    input_index: int,
+    reference_index: int,
+    config: AlignmentConfig,
+    conditioned_reference_pair: tuple[np.ndarray, np.ndarray] | None = None,
+) -> InputAlignment:
+    if analyze_drift:
+        return _estimate_time_pair(
+            reference,
+            target,
+            reference_windows,
+            input_index=input_index,
+            reference_index=reference_index,
+            config=config,
+            conditioned_reference_pair=conditioned_reference_pair,
+        )
+    return _offset_only_diagnostics(
+        _estimate_pair(
+            reference,
+            target,
+            reference_windows,
+            input_index=input_index,
+            reference_index=reference_index,
+            config=config,
+            conditioned_reference_pair=conditioned_reference_pair,
+        )
+    )
+
+
+def _fallback_search_config(config: AlignmentConfig) -> AlignmentConfig | None:
+    fallback = config.fallback_max_offset_seconds
+    if fallback is None or fallback <= config.max_offset_seconds:
+        return None
+    return replace(config, max_offset_seconds=fallback)
+
+
+def _retry_with_fallback_search(
+    result: InputAlignment,
+    reference: _SignalView,
+    target: _SignalView,
+    fallback_windows: Sequence[tuple[int, int]],
+    *,
+    analyze_drift: bool,
+    config: AlignmentConfig,
+    conditioned_reference_pair: tuple[np.ndarray, np.ndarray] | None = None,
+) -> InputAlignment:
+    """Replace a failed narrow-search result only when the wide search succeeds.
+
+    A wide-search failure keeps the narrow-search diagnostics so unrelated
+    recordings still report the same failure as before the fallback existed.
+    A manual-review result is kept because it still requires user review.
+    """
+
+    if len(fallback_windows) < config.min_reference_windows:
+        return result
+    retried = _estimate_time_input(
+        reference,
+        target,
+        fallback_windows,
+        analyze_drift=analyze_drift,
+        input_index=result.input_index,
+        reference_index=result.reference_index,
+        config=config,
+        conditioned_reference_pair=conditioned_reference_pair,
+    )
+    return result if retried.status == "failed" else retried
+
+
 def estimate_initial_offset(
     reference: AnalysisSignalLike,
     target: AnalysisSignalLike,
@@ -2623,7 +2708,8 @@ def estimate_time_alignment(
     The returned transform maps target samples onto the unchanged reference
     time axis as ``reference = time_scale * target + offset_samples``.  Short
     inputs retain the MM-DEV-004 offset-only behavior because their baseline is
-    too small for a reliable clock-rate estimate.
+    too small for a reliable clock-rate estimate.  A failed input is searched
+    again within ``config.fallback_max_offset_seconds``.
     """
 
     settings = config if config is not None else AlignmentConfig()
@@ -2661,25 +2747,30 @@ def estimate_time_alignment(
             ),
             selected_window_count=len(windows),
         )
-    if not analyze_drift:
-        return _offset_only_diagnostics(
-            _estimate_pair(
-                reference_view,
-                target_view,
-                windows,
-                input_index=target_index,
-                reference_index=base_index,
-                config=settings,
-            )
-        )
-    return _estimate_time_pair(
+    result = _estimate_time_input(
         reference_view,
         target_view,
         windows,
+        analyze_drift=analyze_drift,
         input_index=target_index,
         reference_index=base_index,
         config=settings,
     )
+    fallback_settings = _fallback_search_config(settings)
+    if result.status == "failed" and fallback_settings is not None:
+        result = _retry_with_fallback_search(
+            result,
+            reference_view,
+            target_view,
+            _select_reference_windows(
+                reference_view,
+                fallback_settings,
+                reserve_drift_edges=analyze_drift,
+            ),
+            analyze_drift=analyze_drift,
+            config=fallback_settings,
+        )
+    return result
 
 
 def estimate_time_alignments(
@@ -2688,7 +2779,14 @@ def estimate_time_alignments(
     reference_index: int = 0,
     config: AlignmentConfig | None = None,
 ) -> MultiAudioAlignment:
-    """Estimate safe per-input affine transforms on one reference time axis."""
+    """Estimate safe per-input affine transforms on one reference time axis.
+
+    A failed input is searched again within
+    ``config.fallback_max_offset_seconds``.  Its window observations then
+    come from the wider search's reference windows, while the report's
+    ``reference_windows`` remain the narrow-search windows shared by every
+    other input.
+    """
 
     settings = config if config is not None else AlignmentConfig()
     if not isinstance(settings, AlignmentConfig):
@@ -2747,6 +2845,8 @@ def estimate_time_alignments(
         reference.samples,
         reference.valid_mask,
     )
+    fallback_settings = _fallback_search_config(settings)
+    fallback_windows: tuple[tuple[int, int], ...] | None = None
     results: list[InputAlignment] = []
     for index, target in enumerate(views):
         if index == base_index:
@@ -2758,32 +2858,33 @@ def estimate_time_alignments(
                 )
             )
             continue
-        if analyze_drift:
-            results.append(
-                _estimate_time_pair(
+        result = _estimate_time_input(
+            reference,
+            target,
+            windows,
+            analyze_drift=analyze_drift,
+            input_index=index,
+            reference_index=base_index,
+            config=settings,
+            conditioned_reference_pair=conditioned_reference_pair,
+        )
+        if result.status == "failed" and fallback_settings is not None:
+            if fallback_windows is None:
+                fallback_windows = _select_reference_windows(
                     reference,
-                    target,
-                    windows,
-                    input_index=index,
-                    reference_index=base_index,
-                    config=settings,
-                    conditioned_reference_pair=conditioned_reference_pair,
+                    fallback_settings,
+                    reserve_drift_edges=analyze_drift,
                 )
+            result = _retry_with_fallback_search(
+                result,
+                reference,
+                target,
+                fallback_windows,
+                analyze_drift=analyze_drift,
+                config=fallback_settings,
+                conditioned_reference_pair=conditioned_reference_pair,
             )
-        else:
-            results.append(
-                _offset_only_diagnostics(
-                    _estimate_pair(
-                        reference,
-                        target,
-                        windows,
-                        input_index=index,
-                        reference_index=base_index,
-                        config=settings,
-                        conditioned_reference_pair=conditioned_reference_pair,
-                    )
-                )
-            )
+        results.append(result)
 
     return MultiAudioAlignment(
         reference_index=base_index,

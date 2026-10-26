@@ -1,0 +1,5 @@
+# Authorized meeting evaluation artifacts can contain audio and transcripts.
+/artifacts/
+
+# Local audio samples can be large and must not be committed.
+/sample/
