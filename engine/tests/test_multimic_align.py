@@ -16,8 +16,10 @@ if str(ENGINE_DIR) not in sys.path:
 
 from multimic.align import (
     AlignmentConfig,
+    DriftAnchor,
     InputAlignment,
     WindowAlignment,
+    _candidate_explains_prior_drift_anchors,
     _candidate_clusters,
     _coerce_signal,
     _select_reference_windows,
@@ -157,6 +159,41 @@ def long_drift_recordings(
         analysis_signal_at_rate(reference_samples, sample_rate),
         analysis_signal_at_rate(target_samples, sample_rate),
     )
+
+
+def sparse_shared_drift_recordings(
+    *,
+    offset_seconds: float,
+) -> tuple[AnalysisSignal, AnalysisSignal]:
+    """Corrupt early strong windows while retaining shared events elsewhere."""
+
+    reference, target = long_drift_recordings(offset_seconds=offset_seconds)
+    target_samples = target.samples.copy()
+    random = np.random.default_rng(991)
+    time_scale = 1.0002
+    for reference_start_seconds in (2.0, 30.0, 190.0, 468.0):
+        target_start = max(
+            0,
+            int(
+                ((reference_start_seconds - offset_seconds) - 4.0)
+                * target.sample_rate
+                / time_scale
+            ),
+        )
+        target_end = min(
+            target_samples.size,
+            int(
+                ((reference_start_seconds - offset_seconds) + 12.0)
+                * target.sample_rate
+                / time_scale
+            ),
+        )
+        target_samples[target_start:target_end] = random.normal(
+            0.0,
+            0.15,
+            target_end - target_start,
+        ).astype(np.float32)
+    return reference, analysis_signal_at_rate(target_samples, target.sample_rate)
 
 
 def cropped_recordings() -> tuple[AnalysisSignal, AnalysisSignal, AnalysisSignal]:
@@ -604,6 +641,187 @@ class InitialOffsetTests(unittest.TestCase):
 
 
 class DriftAlignmentTests(unittest.TestCase):
+    def test_fallback_expands_windows_for_sparse_shared_anchors(self) -> None:
+        reference, sparse_target = sparse_shared_drift_recordings(
+            offset_seconds=6.0,
+        )
+        config = AlignmentConfig(
+            window_seconds=8.0,
+            hop_seconds=2.0,
+        )
+
+        # This is the wide-search result produced before the coverage rescue:
+        # eight windows find one internally consistent model, but only in the
+        # middle and end of the recording.
+        wide_search_seconds = config.fallback_max_offset_seconds
+        self.assertIsNotNone(wide_search_seconds)
+        former_budget = estimate_time_alignment(
+            reference,
+            sparse_target,
+            config=replace(
+                config,
+                max_offset_seconds=wide_search_seconds,
+                fallback_max_offset_seconds=None,
+                drift_coverage_retry_max_windows=None,
+            ),
+        )
+        result = estimate_time_alignment(
+            reference,
+            sparse_target,
+            config=config,
+        )
+
+        self.assertEqual(
+            former_budget.failure_code,
+            "insufficient_drift_coverage",
+        )
+        self.assertEqual(former_budget.status, "manual_review")
+        self.assertTrue(result.success, result.failure_reason)
+        self.assertEqual(
+            result.selected_window_count,
+            config.drift_coverage_retry_max_windows,
+        )
+        self.assertAlmostEqual(result.offset_ms, 6000.0, delta=20.0)
+        self.assertAlmostEqual(result.drift_ppm, 200.0, delta=30.0)
+        self.assertEqual(
+            {anchor.region for anchor in result.drift_anchors},
+            {"start", "middle", "end"},
+        )
+
+    def test_narrow_search_also_expands_sparse_shared_anchors(self) -> None:
+        reference, sparse_target = sparse_shared_drift_recordings(
+            offset_seconds=1.0,
+        )
+        config = AlignmentConfig(
+            window_seconds=8.0,
+            hop_seconds=2.0,
+            fallback_max_offset_seconds=None,
+        )
+
+        without_retry = estimate_time_alignment(
+            reference,
+            sparse_target,
+            config=replace(config, drift_coverage_retry_max_windows=None),
+        )
+        result = estimate_time_alignment(
+            reference,
+            sparse_target,
+            config=config,
+        )
+
+        self.assertEqual(
+            without_retry.failure_code,
+            "insufficient_drift_coverage",
+        )
+        self.assertEqual(without_retry.status, "manual_review")
+        self.assertTrue(result.success, result.failure_reason)
+        self.assertEqual(
+            result.selected_window_count,
+            config.drift_coverage_retry_max_windows,
+        )
+        self.assertAlmostEqual(result.offset_ms, 1000.0, delta=20.0)
+        self.assertAlmostEqual(result.drift_ppm, 200.0, delta=30.0)
+        self.assertEqual(
+            {anchor.region for anchor in result.drift_anchors},
+            {"start", "middle", "end"},
+        )
+
+    def test_coverage_retry_guard_preserves_prior_drift_anchors(self) -> None:
+        config = AlignmentConfig()
+        sample_rate = 1_000
+        expected_offset_samples = 100
+        anchors = tuple(
+            DriftAnchor(
+                reference_sample=target_sample + expected_offset_samples,
+                target_sample=target_sample,
+                observed_offset_samples=expected_offset_samples,
+                observed_offset_ms=float(expected_offset_samples),
+                predicted_reference_sample=float(
+                    target_sample + expected_offset_samples
+                ),
+                residual_samples=0.0,
+                residual_ms=0.0,
+                correlation=0.9,
+                peak_prominence=0.1,
+                inlier=True,
+                region=region,
+            )
+            for target_sample, region in zip(
+                (100, 200, 300),
+                ("start", "middle", "end"),
+                strict=True,
+            )
+        )
+        candidate = InputAlignment(
+            input_index=1,
+            reference_index=0,
+            offset_samples=expected_offset_samples,
+            offset_ms=float(expected_offset_samples),
+            confidence=0.9,
+            method="test",
+            failure=None,
+            selected_window_count=12,
+            accepted_window_count=6,
+            consistent_window_count=6,
+            offset_dispersion_ms=0.0,
+            time_scale=1.0,
+            estimated_time_scale=1.0,
+            correction_method="affine",
+            correction_applied=True,
+            drift_anchors=anchors,
+        )
+
+        self.assertTrue(
+            _candidate_explains_prior_drift_anchors(
+                candidate,
+                candidate,
+                config=config,
+                sample_rate=sample_rate,
+            )
+        )
+        tolerance_samples = int(
+            config.drift_residual_tolerance_ms * sample_rate / 1_000.0
+        )
+        at_limit = replace(
+            candidate,
+            offset_samples=expected_offset_samples + tolerance_samples,
+            offset_ms=float(expected_offset_samples + tolerance_samples),
+        )
+        beyond_limit = replace(
+            candidate,
+            offset_samples=expected_offset_samples + tolerance_samples + 1,
+            offset_ms=float(expected_offset_samples + tolerance_samples + 1),
+        )
+        wrong_direction = replace(
+            candidate,
+            offset_samples=-expected_offset_samples,
+            offset_ms=float(-expected_offset_samples),
+        )
+        self.assertTrue(
+            _candidate_explains_prior_drift_anchors(
+                candidate,
+                at_limit,
+                config=config,
+                sample_rate=sample_rate,
+            )
+        )
+        self.assertFalse(
+            _candidate_explains_prior_drift_anchors(
+                candidate,
+                beyond_limit,
+                config=config,
+                sample_rate=sample_rate,
+            )
+        )
+        self.assertFalse(
+            _candidate_explains_prior_drift_anchors(
+                candidate,
+                wrong_direction,
+                config=config,
+                sample_rate=sample_rate,
+            )
+        )
+
     def test_thirty_minute_linear_drift_is_corrected_and_diagnosed(self) -> None:
         reference, target = long_drift_recordings()
 
@@ -872,6 +1090,19 @@ class FallbackSearchTests(unittest.TestCase):
         AlignmentConfig(fallback_max_offset_seconds=None)
         # A bound that does not widen the search simply disables the retry.
         AlignmentConfig(max_offset_seconds=60.0, fallback_max_offset_seconds=30.0)
+
+        for value in (0, -1, 1.5, True, "12"):
+            with self.subTest(drift_coverage_retry_max_windows=value):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "drift_coverage_retry_max_windows",
+                ):
+                    AlignmentConfig(
+                        drift_coverage_retry_max_windows=value,  # type: ignore[arg-type]
+                    )
+        AlignmentConfig(drift_coverage_retry_max_windows=None)
+        # A retry budget no larger than the first pass disables expansion.
+        AlignmentConfig(drift_coverage_retry_max_windows=8)
 
 
 class AlignmentPipelineTests(unittest.TestCase):

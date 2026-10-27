@@ -51,6 +51,12 @@ class AlignmentConfig:
     ``fallback_max_offset_seconds``; inputs that the narrow search resolves
     keep exactly the narrow-search result.  ``None`` or a value not above
     ``max_offset_seconds`` disables the fallback.
+
+    Long recordings from different microphones may share only some of the
+    reference's strongest windows.  If a consistent drift model fails only
+    temporal-coverage checks, ``drift_coverage_retry_max_windows`` allows one
+    denser retry without weakening any correlation, confidence, or residual
+    threshold.  ``None`` or a value not above ``max_windows`` disables it.
     """
 
     window_seconds: float = 0.75
@@ -80,6 +86,7 @@ class AlignmentConfig:
     drift_residual_tolerance_ms: float = 20.0
     drift_max_abs_ppm: float = 2_000.0
     drift_min_correction_ms: float = 20.0
+    drift_coverage_retry_max_windows: int | None = 12
 
     def __post_init__(self) -> None:
         _require_positive("window_seconds", self.window_seconds)
@@ -107,6 +114,12 @@ class AlignmentConfig:
         _require_non_negative("min_signal_rms", self.min_signal_rms)
 
         _require_integer_at_least("max_windows", self.max_windows, 1)
+        if self.drift_coverage_retry_max_windows is not None:
+            _require_integer_at_least(
+                "drift_coverage_retry_max_windows",
+                self.drift_coverage_retry_max_windows,
+                1,
+            )
         _require_integer_at_least(
             "min_reference_windows", self.min_reference_windows, 1
         )
@@ -2479,6 +2492,93 @@ def _estimate_time_pair(
     return result
 
 
+def _candidate_explains_prior_drift_anchors(
+    prior: InputAlignment,
+    candidate: InputAlignment,
+    *,
+    config: AlignmentConfig,
+    sample_rate: int,
+) -> bool:
+    """Return whether a successful retry preserves the earlier drift evidence."""
+
+    if (
+        candidate.status != "aligned"
+        or candidate.time_scale is None
+        or candidate.offset_samples is None
+    ):
+        return False
+    inlier_anchors = tuple(anchor for anchor in prior.drift_anchors if anchor.inlier)
+    if len(inlier_anchors) < config.drift_min_anchors:
+        return False
+
+    tolerance_samples = max(
+        1.0,
+        config.drift_residual_tolerance_ms * sample_rate / 1000.0,
+    )
+    rounding_epsilon = (
+        np.finfo(np.float64).eps * max(1.0, tolerance_samples) * 16.0
+    )
+    return all(
+        abs(
+            anchor.reference_sample
+            - (
+                candidate.time_scale * anchor.target_sample
+                + candidate.offset_samples
+            )
+        )
+        <= tolerance_samples + rounding_epsilon
+        for anchor in inlier_anchors
+    )
+
+
+def _retry_insufficient_drift_coverage(
+    result: InputAlignment,
+    reference: _SignalView,
+    target: _SignalView,
+    *,
+    input_index: int,
+    reference_index: int,
+    config: AlignmentConfig,
+    conditioned_reference_pair: tuple[np.ndarray, np.ndarray] | None = None,
+) -> InputAlignment:
+    """Retry a coverage-only review with a bounded, denser window budget."""
+
+    retry_max_windows = config.drift_coverage_retry_max_windows
+    if (
+        result.status != "manual_review"
+        or result.failure_code != "insufficient_drift_coverage"
+        or retry_max_windows is None
+        or retry_max_windows <= config.max_windows
+    ):
+        return result
+
+    expanded_config = replace(config, max_windows=retry_max_windows)
+    expanded_windows = _select_reference_windows(
+        reference,
+        expanded_config,
+        reserve_drift_edges=True,
+    )
+    if len(expanded_windows) < expanded_config.min_reference_windows:
+        return result
+    candidate = _estimate_time_pair(
+        reference,
+        target,
+        expanded_windows,
+        input_index=input_index,
+        reference_index=reference_index,
+        config=expanded_config,
+        conditioned_reference_pair=conditioned_reference_pair,
+    )
+    if _candidate_explains_prior_drift_anchors(
+        result,
+        candidate,
+        config=expanded_config,
+        sample_rate=reference.sample_rate,
+    ):
+        return candidate
+    return result
+
+
 def _estimate_time_input(
     reference: _SignalView,
     target: _SignalView,
@@ -2491,10 +2591,19 @@ def _estimate_time_input(
     conditioned_reference_pair: tuple[np.ndarray, np.ndarray] | None = None,
 ) -> InputAlignment:
     if analyze_drift:
-        return _estimate_time_pair(
+        result = _estimate_time_pair(
             reference,
             target,
             reference_windows,
+            input_index=input_index,
+            reference_index=reference_index,
+            config=config,
+            conditioned_reference_pair=conditioned_reference_pair,
+        )
+        return _retry_insufficient_drift_coverage(
+            result,
+            reference,
+            target,
             input_index=input_index,
             reference_index=reference_index,
             config=config,
@@ -2534,7 +2643,8 @@ def _retry_with_fallback_search(
 
     A wide-search failure keeps the narrow-search diagnostics so unrelated
     recordings still report the same failure as before the fallback existed.
-    A manual-review result is kept because it still requires user review.
+    Coverage-only drift reviews receive the same guarded denser-window retry
+    as the narrow search through :func:`_estimate_time_input`.
     """
 
     if len(fallback_windows) < config.min_reference_windows:
@@ -2709,7 +2819,9 @@ def estimate_time_alignment(
     time axis as ``reference = time_scale * target + offset_samples``.  Short
     inputs retain the MM-DEV-004 offset-only behavior because their baseline is
     too small for a reliable clock-rate estimate.  A failed input is searched
-    again within ``config.fallback_max_offset_seconds``.
+    again within ``config.fallback_max_offset_seconds``.  A coverage-only
+    drift review may return observations from the configured denser-window
+    retry.
     """
 
     settings = config if config is not None else AlignmentConfig()
@@ -2785,7 +2897,8 @@ def estimate_time_alignments(
     ``config.fallback_max_offset_seconds``.  Its window observations then
     come from the wider search's reference windows, while the report's
     ``reference_windows`` remain the narrow-search windows shared by every
-    other input.
+    other input.  A coverage-only drift review may likewise return
+    observations from the configured denser-window retry.
     """
 
     settings = config if config is not None else AlignmentConfig()
