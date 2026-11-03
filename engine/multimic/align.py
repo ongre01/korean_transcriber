@@ -57,6 +57,17 @@ class AlignmentConfig:
     temporal-coverage checks, ``drift_coverage_retry_max_windows`` allows one
     denser retry without weakening any correlation, confidence, or residual
     threshold.  ``None`` or a value not above ``max_windows`` disables it.
+
+    Recorders started minutes apart, or a short clip taken from inside a long
+    meeting, are outside both sample-level searches.  When ``global_search``
+    is enabled and both searches fail an input, a coarse search correlates
+    10 ms log-energy envelopes over every offset that leaves at least
+    ``global_min_overlap_seconds`` of shared audio (at most half of the
+    shorter recording for short inputs).  Up to ``global_max_candidates``
+    offsets whose score is at least ``global_min_peak_sigma`` robust standard
+    deviations above the score distribution of all offsets are verified by
+    the unchanged sample-level estimator on the shared span only.  The coarse
+    score is a hypothesis generator and never evidence of alignment by itself.
     """
 
     window_seconds: float = 0.75
@@ -87,6 +98,10 @@ class AlignmentConfig:
     drift_max_abs_ppm: float = 2_000.0
     drift_min_correction_ms: float = 20.0
     drift_coverage_retry_max_windows: int | None = 12
+    global_search: bool = True
+    global_min_overlap_seconds: float = 60.0
+    global_min_peak_sigma: float = 8.0
+    global_max_candidates: int = 3
 
     def __post_init__(self) -> None:
         _require_positive("window_seconds", self.window_seconds)
@@ -155,6 +170,15 @@ class AlignmentConfig:
 
         if not isinstance(self.use_gcc_phat, bool):
             raise ValueError("use_gcc_phat must be a boolean")
+        if not isinstance(self.global_search, bool):
+            raise ValueError("global_search must be a boolean")
+        _require_positive(
+            "global_min_overlap_seconds", self.global_min_overlap_seconds
+        )
+        _require_positive("global_min_peak_sigma", self.global_min_peak_sigma)
+        _require_integer_at_least(
+            "global_max_candidates", self.global_max_candidates, 1
+        )
 
 
 @dataclass(frozen=True)
@@ -2622,6 +2646,403 @@ def _estimate_time_input(
     )
 
 
+_GLOBAL_FRAME_SECONDS = 0.01
+_GLOBAL_CONTRAST_SECONDS = 1.0
+_GLOBAL_PEAK_EXCLUSION_SECONDS = 0.5
+_GLOBAL_ENERGY_FLOOR = 1.0e-10
+_GLOBAL_MIN_SCORED_OFFSETS = 200
+_GLOBAL_ENERGY_BLOCK_FRAMES = 4096
+
+
+@dataclass(frozen=True)
+class _GlobalEnvelope:
+    """Local log-energy contrast of conditioned audio at a coarse frame rate."""
+
+    values: np.ndarray
+    valid: np.ndarray
+    frame_samples: int
+
+
+@dataclass(frozen=True)
+class _GlobalCandidate:
+    offset_samples: int
+    sigma: float
+    correlation: float
+    overlap_frames: int
+
+
+def _global_envelope(
+    conditioned_pair: tuple[np.ndarray, np.ndarray],
+    sample_rate: int,
+    config: AlignmentConfig,
+) -> _GlobalEnvelope:
+    """Return a gain-independent speech-activity contour for coarse search.
+
+    Subtracting a one-second local mean removes the different microphone
+    gains, noise floors, and slow level changes, leaving the syllable-scale
+    energy pattern that two microphones in the same room share.
+    """
+
+    conditioned, conditioned_mask = conditioned_pair
+    frame = max(1, int(round(_GLOBAL_FRAME_SECONDS * sample_rate)))
+    count = conditioned.size // frame
+    if count == 0:
+        return _GlobalEnvelope(
+            values=np.zeros(0, dtype=np.float64),
+            valid=np.zeros(0, dtype=np.bool_),
+            frame_samples=frame,
+        )
+
+    frames = conditioned[: count * frame].reshape(count, frame)
+    valid_counts = np.count_nonzero(
+        conditioned_mask[: count * frame].reshape(count, frame),
+        axis=1,
+    )
+    # Masked samples are already zero in the conditioned signal.  Blocks
+    # bound the float64 temporary for hour-long inputs.
+    energy = np.empty(count, dtype=np.float64)
+    for start in range(0, count, _GLOBAL_ENERGY_BLOCK_FRAMES):
+        stop = min(count, start + _GLOBAL_ENERGY_BLOCK_FRAMES)
+        block = frames[start:stop].astype(np.float64)
+        energy[start:stop] = np.einsum("ij,ij->i", block, block)
+    energy /= np.maximum(valid_counts, 1)
+    valid = valid_counts >= math.ceil(config.min_valid_ratio * frame)
+    level = np.log(np.maximum(energy, _GLOBAL_ENERGY_FLOOR))
+
+    half_width = max(
+        1,
+        int(round(_GLOBAL_CONTRAST_SECONDS / _GLOBAL_FRAME_SECONDS)) // 2,
+    )
+    valid_levels = np.where(valid, level, 0.0)
+    level_prefix = _prefix_sum(valid_levels, dtype=np.float64)
+    count_prefix = _prefix_sum(valid.astype(np.int64), dtype=np.int64)
+    positions = np.arange(count)
+    lower = np.maximum(0, positions - half_width)
+    upper = np.minimum(count, positions + half_width + 1)
+    local_counts = count_prefix[upper] - count_prefix[lower]
+    local_means = (level_prefix[upper] - level_prefix[lower]) / np.maximum(
+        local_counts, 1
+    )
+    values = np.where(valid, level - local_means, 0.0)
+    return _GlobalEnvelope(values=values, valid=valid, frame_samples=frame)
+
+
+def _global_offset_candidates(
+    reference: _GlobalEnvelope,
+    target: _GlobalEnvelope,
+    config: AlignmentConfig,
+    sample_rate: int,
+) -> tuple[_GlobalCandidate, ...]:
+    """Rank coarse placement offsets by masked envelope correlation.
+
+    Each offset is scored as Pearson correlation over the jointly valid frames
+    times the square root of their count.  Under unrelated audio this score
+    has a roughly overlap-independent spread, so a robust median/MAD sigma of
+    the scores of every admissible offset is a self-calibrated noise floor.
+    """
+
+    reference_count = reference.values.size
+    target_count = target.values.size
+    if not reference_count or not target_count:
+        return ()
+    frame_rate = sample_rate / reference.frame_samples
+    shorter_valid = min(
+        int(np.count_nonzero(reference.valid)),
+        int(np.count_nonzero(target.valid)),
+    )
+    required_overlap = max(
+        2,
+        math.ceil(
+            min(
+                config.global_min_overlap_seconds * frame_rate,
+                0.5 * shorter_valid,
+            )
+        ),
+    )
+    if shorter_valid < required_overlap:
+        return ()
+
+    fft_size = _next_power_of_two(reference_count + target_count - 1)
+    reference_mask = reference.valid.astype(np.float64)
+    target_mask = target.valid.astype(np.float64)
+    reference_spectra = {
+        "mask": np.fft.rfft(reference_mask, fft_size),
+        "values": np.fft.rfft(reference.values, fft_size),
+        "squares": np.fft.rfft(np.square(reference.values), fft_size),
+    }
+    target_spectra = {
+        "mask": np.conj(np.fft.rfft(target_mask, fft_size)),
+        "values": np.conj(np.fft.rfft(target.values, fft_size)),
+        "squares": np.conj(np.fft.rfft(np.square(target.values), fft_size)),
+    }
+
+    def lagged(reference_key: str, target_key: str) -> np.ndarray:
+        # Entry ``k`` is sum_i reference[i + lag] * target[i] for
+        # lag = k - (target_count - 1): target frame zero sits at
+        # reference frame ``lag``, the module's placement convention.
+        circular = np.fft.irfft(
+            reference_spectra[reference_key] * target_spectra[target_key],
+            fft_size,
+        )
+        return np.concatenate(
+            (circular[fft_size - (target_count - 1) :], circular[:reference_count])
+        )
+
+    counts = np.rint(np.maximum(0.0, lagged("mask", "mask"))).astype(np.int64)
+    sum_x = lagged("values", "mask")
+    sum_y = lagged("mask", "values")
+    sum_xx = lagged("squares", "mask")
+    sum_yy = lagged("mask", "squares")
+    sum_xy = lagged("values", "values")
+    safe_counts = np.maximum(counts, 1).astype(np.float64)
+    covariance = sum_xy - sum_x * sum_y / safe_counts
+    variance_x = sum_xx - np.square(sum_x) / safe_counts
+    variance_y = sum_yy - np.square(sum_y) / safe_counts
+    minimum_variance = 1.0e-9 * safe_counts
+    usable = (
+        (counts >= required_overlap)
+        & (variance_x > minimum_variance)
+        & (variance_y > minimum_variance)
+    )
+    if int(np.count_nonzero(usable)) < _GLOBAL_MIN_SCORED_OFFSETS:
+        return ()
+
+    correlations = np.full(counts.size, np.nan, dtype=np.float64)
+    correlations[usable] = covariance[usable] / np.sqrt(
+        variance_x[usable] * variance_y[usable]
+    )
+    np.clip(correlations, -1.0, 1.0, out=correlations)
+    scores = np.full(counts.size, -np.inf, dtype=np.float64)
+    scores[usable] = correlations[usable] * np.sqrt(safe_counts[usable])
+    usable_scores = scores[usable]
+    median = float(np.median(usable_scores))
+    spread = 1.4826 * float(np.median(np.abs(usable_scores - median)))
+    if not math.isfinite(spread) or spread <= np.finfo(np.float64).eps:
+        return ()
+
+    exclusion = max(1, int(round(_GLOBAL_PEAK_EXCLUSION_SECONDS * frame_rate)))
+    remaining = scores.copy()
+    candidates: list[_GlobalCandidate] = []
+    for _ in range(config.global_max_candidates):
+        index = int(np.argmax(remaining))
+        score = float(remaining[index])
+        if not math.isfinite(score):
+            break
+        sigma = (score - median) / spread
+        if sigma < config.global_min_peak_sigma or correlations[index] <= 0.0:
+            break
+        lag = index - (target_count - 1)
+        candidates.append(
+            _GlobalCandidate(
+                offset_samples=int(lag * reference.frame_samples),
+                sigma=float(sigma),
+                correlation=float(correlations[index]),
+                overlap_frames=int(counts[index]),
+            )
+        )
+        remaining[max(0, index - exclusion) : index + exclusion + 1] = -np.inf
+    return tuple(candidates)
+
+
+def _shift_alignment_result(
+    local: InputAlignment,
+    *,
+    reference_start: int,
+    target_start: int,
+    sample_rate: int,
+) -> InputAlignment:
+    """Map a result estimated on cropped spans back to the full inputs.
+
+    The cropped transform ``ref - reference_start = s * (tgt - target_start)
+    + o`` becomes ``ref = s * tgt + (o + reference_start - s * target_start)``.
+    Local window offsets are differences of positions and therefore move by
+    the constant ``reference_start - target_start``; affine residuals and
+    error statistics are translation invariant.
+    """
+
+    shift = reference_start - target_start
+
+    def shifted_window(window: WindowAlignment) -> WindowAlignment:
+        return replace(
+            window,
+            reference_start_sample=window.reference_start_sample + reference_start,
+            reference_end_sample=window.reference_end_sample + reference_start,
+            offset_samples=(
+                None
+                if window.offset_samples is None
+                else window.offset_samples + shift
+            ),
+            gcc_phat_offset_samples=(
+                None
+                if window.gcc_phat_offset_samples is None
+                else window.gcc_phat_offset_samples + shift
+            ),
+        )
+
+    def shifted_anchor(anchor: DriftAnchor) -> DriftAnchor:
+        observed = anchor.observed_offset_samples + shift
+        return replace(
+            anchor,
+            reference_sample=anchor.reference_sample + reference_start,
+            target_sample=anchor.target_sample + target_start,
+            observed_offset_samples=observed,
+            observed_offset_ms=float(observed * 1000.0 / sample_rate),
+            predicted_reference_sample=(
+                anchor.predicted_reference_sample + reference_start
+            ),
+        )
+
+    offset_samples: int | None = None
+    if local.offset_samples is not None:
+        scale = 1.0 if local.time_scale is None else local.time_scale
+        if scale == 1.0:
+            offset_samples = local.offset_samples + shift
+        else:
+            # With a target crop, rounding the full intercept moves the
+            # placement by at most half a sample (31 us at 16 kHz).
+            offset_samples = int(
+                round(local.offset_samples + reference_start - scale * target_start)
+            )
+    return replace(
+        local,
+        offset_samples=offset_samples,
+        offset_ms=(
+            None
+            if offset_samples is None
+            else float(offset_samples * 1000.0 / sample_rate)
+        ),
+        method=f"global_envelope+{local.method}",
+        window_observations=tuple(
+            shifted_window(window) for window in local.window_observations
+        ),
+        drift_anchors=tuple(shifted_anchor(anchor) for anchor in local.drift_anchors),
+    )
+
+
+def _estimate_global_candidate(
+    candidate: _GlobalCandidate,
+    reference: _SignalView,
+    target: _SignalView,
+    *,
+    input_index: int,
+    reference_index: int,
+    config: AlignmentConfig,
+    conditioned_reference_pair: tuple[np.ndarray, np.ndarray],
+) -> InputAlignment | None:
+    """Verify one coarse offset with the sample-level estimator on the overlap."""
+
+    offset = candidate.offset_samples
+    reference_start = max(0, offset)
+    reference_end = min(reference.samples.size, offset + target.samples.size)
+    target_start = reference_start - offset
+    target_end = reference_end - offset
+    if reference_end - reference_start < 2 * _window_samples(
+        config, reference.sample_rate
+    ):
+        return None
+
+    reference_span = _SignalView(
+        samples=reference.samples[reference_start:reference_end],
+        valid_mask=reference.valid_mask[reference_start:reference_end],
+        sample_rate=reference.sample_rate,
+    )
+    target_span = _SignalView(
+        samples=target.samples[target_start:target_end],
+        valid_mask=target.valid_mask[target_start:target_end],
+        sample_rate=target.sample_rate,
+    )
+    analyze_drift = (
+        reference_span.samples.size / reference_span.sample_rate
+        >= config.drift_min_duration_seconds
+        and config.max_windows >= config.drift_min_anchors
+    )
+    windows = _select_reference_windows(
+        reference_span,
+        config,
+        reserve_drift_edges=analyze_drift,
+    )
+    if len(windows) < config.min_reference_windows:
+        return None
+    conditioned_reference, conditioned_mask = conditioned_reference_pair
+    local = _estimate_time_input(
+        reference_span,
+        target_span,
+        windows,
+        analyze_drift=analyze_drift,
+        input_index=input_index,
+        reference_index=reference_index,
+        config=config,
+        conditioned_reference_pair=(
+            conditioned_reference[reference_start:reference_end],
+            conditioned_mask[reference_start:reference_end],
+        ),
+    )
+    if local.status == "failed":
+        return None
+    return _shift_alignment_result(
+        local,
+        reference_start=reference_start,
+        target_start=target_start,
+        sample_rate=reference.sample_rate,
+    )
+
+
+def _retry_with_global_search(
+    result: InputAlignment,
+    reference: _SignalView,
+    target: _SignalView,
+    *,
+    config: AlignmentConfig,
+    conditioned_reference_pair: tuple[np.ndarray, np.ndarray],
+    reference_envelope: _GlobalEnvelope,
+) -> InputAlignment:
+    """Replace a failed result only when a coarse offset is verified.
+
+    Every candidate runs the narrow sample-level search on the shared span,
+    so the correlation, consensus, drift, and confidence thresholds are the
+    ones a nearby recording must pass.  An aligned candidate wins over an
+    earlier manual-review candidate; without either, the original failure
+    diagnostics are returned unchanged.
+    """
+
+    if not config.global_search:
+        return result
+    target_envelope = _global_envelope(
+        _condition_signal(target.samples, target.valid_mask),
+        target.sample_rate,
+        config,
+    )
+    candidates = _global_offset_candidates(
+        reference_envelope,
+        target_envelope,
+        config,
+        reference.sample_rate,
+    )
+    local_config = replace(
+        config,
+        fallback_max_offset_seconds=None,
+        global_search=False,
+    )
+    review: InputAlignment | None = None
+    for candidate in candidates:
+        verified = _estimate_global_candidate(
+            candidate,
+            reference,
+            target,
+            input_index=result.input_index,
+            reference_index=result.reference_index,
+            config=local_config,
+            conditioned_reference_pair=conditioned_reference_pair,
+        )
+        if verified is None:
+            continue
+        if verified.status == "aligned":
+            return verified
+        if review is None:
+            review = verified
+    return result if review is None else review
+
+
 def _fallback_search_config(config: AlignmentConfig) -> AlignmentConfig | None:
     fallback = config.fallback_max_offset_seconds
     if fallback is None or fallback <= config.max_offset_seconds:
@@ -2819,9 +3240,10 @@ def estimate_time_alignment(
     time axis as ``reference = time_scale * target + offset_samples``.  Short
     inputs retain the MM-DEV-004 offset-only behavior because their baseline is
     too small for a reliable clock-rate estimate.  A failed input is searched
-    again within ``config.fallback_max_offset_seconds``.  A coverage-only
-    drift review may return observations from the configured denser-window
-    retry.
+    again within ``config.fallback_max_offset_seconds`` and then, when
+    ``config.global_search`` is enabled, over every offset with enough shared
+    audio (see :class:`AlignmentConfig`).  A coverage-only drift review may
+    return observations from the configured denser-window retry.
     """
 
     settings = config if config is not None else AlignmentConfig()
@@ -2859,6 +3281,10 @@ def estimate_time_alignment(
             ),
             selected_window_count=len(windows),
         )
+    conditioned_reference_pair = _condition_signal(
+        reference_view.samples,
+        reference_view.valid_mask,
+    )
     result = _estimate_time_input(
         reference_view,
         target_view,
@@ -2867,6 +3293,7 @@ def estimate_time_alignment(
         input_index=target_index,
         reference_index=base_index,
         config=settings,
+        conditioned_reference_pair=conditioned_reference_pair,
     )
     fallback_settings = _fallback_search_config(settings)
     if result.status == "failed" and fallback_settings is not None:
@@ -2881,6 +3308,20 @@ def estimate_time_alignment(
             ),
             analyze_drift=analyze_drift,
             config=fallback_settings,
+            conditioned_reference_pair=conditioned_reference_pair,
+        )
+    if result.status == "failed" and settings.global_search:
+        result = _retry_with_global_search(
+            result,
+            reference_view,
+            target_view,
+            config=settings,
+            conditioned_reference_pair=conditioned_reference_pair,
+            reference_envelope=_global_envelope(
+                conditioned_reference_pair,
+                reference_view.sample_rate,
+                settings,
+            ),
         )
     return result
 
@@ -2894,11 +3335,13 @@ def estimate_time_alignments(
     """Estimate safe per-input affine transforms on one reference time axis.
 
     A failed input is searched again within
-    ``config.fallback_max_offset_seconds``.  Its window observations then
-    come from the wider search's reference windows, while the report's
-    ``reference_windows`` remain the narrow-search windows shared by every
-    other input.  A coverage-only drift review may likewise return
-    observations from the configured denser-window retry.
+    ``config.fallback_max_offset_seconds`` and then, when
+    ``config.global_search`` is enabled, over every offset with enough shared
+    audio.  Its window observations then come from the wider search's
+    reference windows, while the report's ``reference_windows`` remain the
+    narrow-search windows shared by every other input.  A coverage-only drift
+    review may likewise return observations from the configured denser-window
+    retry.
     """
 
     settings = config if config is not None else AlignmentConfig()
@@ -2960,6 +3403,7 @@ def estimate_time_alignments(
     )
     fallback_settings = _fallback_search_config(settings)
     fallback_windows: tuple[tuple[int, int], ...] | None = None
+    reference_envelope: _GlobalEnvelope | None = None
     results: list[InputAlignment] = []
     for index, target in enumerate(views):
         if index == base_index:
@@ -2996,6 +3440,21 @@ def estimate_time_alignments(
                 analyze_drift=analyze_drift,
                 config=fallback_settings,
                 conditioned_reference_pair=conditioned_reference_pair,
+            )
+        if result.status == "failed" and settings.global_search:
+            if reference_envelope is None:
+                reference_envelope = _global_envelope(
+                    conditioned_reference_pair,
+                    reference.sample_rate,
+                    settings,
+                )
+            result = _retry_with_global_search(
+                result,
+                reference,
+                target,
+                config=settings,
+                conditioned_reference_pair=conditioned_reference_pair,
+                reference_envelope=reference_envelope,
             )
         results.append(result)
 

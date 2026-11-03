@@ -986,7 +986,10 @@ class DriftAlignmentTests(unittest.TestCase):
 
 
 class FallbackSearchTests(unittest.TestCase):
-    NARROW_ONLY = AlignmentConfig(fallback_max_offset_seconds=None)
+    NARROW_ONLY = AlignmentConfig(
+        fallback_max_offset_seconds=None,
+        global_search=False,
+    )
 
     @staticmethod
     def late_target_recordings(
@@ -1039,7 +1042,11 @@ class FallbackSearchTests(unittest.TestCase):
 
         narrow = estimate_time_alignments(
             (reference, target),
-            config=replace(config, fallback_max_offset_seconds=None),
+            config=replace(
+                config,
+                fallback_max_offset_seconds=None,
+                global_search=False,
+            ),
         ).inputs[1]
         result = estimate_time_alignments(
             (reference, target),
@@ -1051,6 +1058,7 @@ class FallbackSearchTests(unittest.TestCase):
         self.assertEqual(result.correction_method, "affine")
         self.assertAlmostEqual(result.offset_ms, 6000.0, delta=20.0)
         self.assertAlmostEqual(result.drift_ppm, 200.0, delta=30.0)
+        self.assertFalse(result.method.startswith("global_envelope+"))
 
     def test_inputs_resolved_by_narrow_search_are_unchanged(self) -> None:
         reference, positive, negative = cropped_recordings()
@@ -1103,6 +1111,219 @@ class FallbackSearchTests(unittest.TestCase):
         AlignmentConfig(drift_coverage_retry_max_windows=None)
         # A retry budget no larger than the first pass disables expansion.
         AlignmentConfig(drift_coverage_retry_max_windows=8)
+
+
+def irregular_speech_master(
+    *,
+    seed: int,
+    duration_seconds: float,
+) -> np.ndarray:
+    """Build speech-like audio whose syllable timing never repeats.
+
+    ``speech_like_master`` places bursts on one fixed schedule for every
+    seed, so its energy contours of unrelated seeds still match.  Coarse
+    envelope search needs recordings that differ in timing, not only in
+    carrier noise.
+    """
+
+    sample_count = int(round(duration_seconds * SAMPLE_RATE))
+    rng = np.random.default_rng(seed)
+    kernel = np.hanning(25)
+    kernel /= np.sum(kernel)
+    colored = np.convolve(rng.normal(0.0, 1.0, sample_count), kernel, mode="same")
+    colored /= max(float(np.std(colored)), 1.0e-12)
+
+    envelope = np.zeros(sample_count, dtype=np.float64)
+    position = 0.2
+    while position < duration_seconds - 0.6:
+        length = float(rng.uniform(0.12, 0.45))
+        start = int(round(position * SAMPLE_RATE))
+        end = min(sample_count, start + int(round(length * SAMPLE_RATE)))
+        envelope[start:end] += float(rng.uniform(0.4, 1.0)) * (
+            np.sin(np.linspace(0.0, np.pi, end - start)) ** 2
+        )
+        position += length + float(rng.uniform(0.08, 0.9))
+
+    floor = rng.normal(0.0, 0.002, sample_count)
+    return np.asarray(0.30 * envelope * colored + floor, dtype=np.float32)
+
+
+class GlobalSearchTests(unittest.TestCase):
+    NO_GLOBAL = AlignmentConfig(global_search=False)
+
+    @staticmethod
+    def placed_recordings(
+        offset_seconds: float,
+        *,
+        reference_seconds: float = 150.0,
+        target_seconds: float = 120.0,
+    ) -> tuple[AnalysisSignal, AnalysisSignal]:
+        """Return recordings whose target sample zero is at ``offset_seconds``."""
+
+        lead = abs(offset_seconds)
+        master = irregular_speech_master(
+            seed=5150,
+            duration_seconds=lead + max(reference_seconds, target_seconds) + 1.0,
+        )
+        reference_start = 0 if offset_seconds >= 0.0 else lead
+        target_start = lead if offset_seconds >= 0.0 else 0
+        reference_begin = int(round(reference_start * SAMPLE_RATE))
+        target_begin = int(round(target_start * SAMPLE_RATE))
+        reference_count = int(round(reference_seconds * SAMPLE_RATE))
+        target_count = int(round(target_seconds * SAMPLE_RATE))
+        target = (
+            0.6 * master[target_begin : target_begin + target_count]
+            + np.random.default_rng(77).normal(0.0, 0.003, target_count)
+        ).astype(np.float32)
+        return (
+            analysis_signal(master[reference_begin : reference_begin + reference_count]),
+            analysis_signal(target),
+        )
+
+    def test_offsets_beyond_fallback_are_found_and_verified(self) -> None:
+        for offset_seconds in (45.0, -60.0):
+            with self.subTest(offset_seconds=offset_seconds):
+                reference, target = self.placed_recordings(offset_seconds)
+
+                without_global = estimate_time_alignments(
+                    (reference, target),
+                    config=self.NO_GLOBAL,
+                ).inputs[1]
+                report = estimate_time_alignments((reference, target))
+                single = estimate_time_alignment(reference, target)
+
+                self.assertEqual(without_global.status, "failed")
+                self.assertTrue(report.success, report.inputs[1].failure_reason)
+                for result in (report.inputs[1], single):
+                    self.assertTrue(result.success, result.failure_reason)
+                    self.assertTrue(result.method.startswith("global_envelope+"))
+                    self.assertLessEqual(
+                        abs(
+                            result.offset_samples
+                            - int(round(offset_seconds * SAMPLE_RATE))
+                        ),
+                        320,
+                    )
+                    self.assertGreaterEqual(result.confidence, 0.55)
+                    # Window evidence is reported on the full input axes.
+                    for window in result.window_observations:
+                        if window.accepted:
+                            self.assertLessEqual(
+                                abs(
+                                    window.offset_samples
+                                    - int(round(offset_seconds * SAMPLE_RATE))
+                                ),
+                                320,
+                            )
+                json.dumps(report.to_dict(), allow_nan=False)
+
+    def test_global_search_keeps_affine_drift_for_an_earlier_target(self) -> None:
+        late_reference, late_target = long_drift_recordings(offset_seconds=45.0)
+        # Swapping roles makes the target start 45 s before the reference and
+        # crops the target during verification, so the full-axis intercept
+        # must account for the clock scale over the cropped lead-in.
+        reference, target = late_target, late_reference
+        config = AlignmentConfig(window_seconds=8.0, hop_seconds=2.0)
+        expected_scale = 1.0 / 1.0002
+        expected_offset_ms = -45_000.0 * expected_scale
+
+        without_global = estimate_time_alignments(
+            (reference, target),
+            config=replace(config, global_search=False),
+        ).inputs[1]
+        result = estimate_time_alignments(
+            (reference, target),
+            config=config,
+        ).inputs[1]
+
+        self.assertEqual(without_global.status, "failed")
+        self.assertTrue(result.success, result.failure_reason)
+        self.assertTrue(result.method.startswith("global_envelope+"))
+        self.assertEqual(result.correction_method, "affine")
+        self.assertAlmostEqual(result.offset_ms, expected_offset_ms, delta=20.0)
+        self.assertAlmostEqual(
+            result.drift_ppm,
+            (expected_scale - 1.0) * 1_000_000.0,
+            delta=30.0,
+        )
+        tolerance = config.drift_residual_tolerance_ms * reference.sample_rate / 1000.0
+        inliers = [anchor for anchor in result.drift_anchors if anchor.inlier]
+        self.assertGreaterEqual(len(inliers), config.drift_min_anchors)
+        for anchor in inliers:
+            self.assertLessEqual(
+                abs(
+                    anchor.reference_sample
+                    - (
+                        result.time_scale * anchor.target_sample
+                        + result.offset_samples
+                    )
+                ),
+                tolerance + 1.0,
+            )
+            self.assertAlmostEqual(
+                anchor.residual_samples,
+                anchor.reference_sample - anchor.predicted_reference_sample,
+                delta=1.0e-6,
+            )
+            # The reported full-axis transform reproduces the verified local
+            # model up to the half-sample rounding of its integer intercept.
+            self.assertLessEqual(
+                abs(
+                    anchor.predicted_reference_sample
+                    - (
+                        result.time_scale * anchor.target_sample
+                        + result.offset_samples
+                    )
+                ),
+                0.5 + 1.0e-6,
+            )
+
+    def test_unrelated_long_recording_keeps_the_earlier_failure(self) -> None:
+        reference = analysis_signal(
+            irregular_speech_master(seed=11, duration_seconds=150.0)
+        )
+        unrelated = analysis_signal(
+            irregular_speech_master(seed=12, duration_seconds=120.0)
+        )
+
+        result = estimate_time_alignments((reference, unrelated)).inputs[1]
+        without_global = estimate_time_alignments(
+            (reference, unrelated),
+            config=self.NO_GLOBAL,
+        ).inputs[1]
+
+        self.assertEqual(result.status, "failed")
+        self.assertIsNone(result.offset_samples)
+        self.assertEqual(result.to_dict(), without_global.to_dict())
+
+    def test_inputs_resolved_earlier_never_run_the_global_search(self) -> None:
+        reference, target = FallbackSearchTests.late_target_recordings(6.0)
+
+        with mock.patch(
+            "multimic.align._retry_with_global_search",
+            side_effect=AssertionError("global search must not run"),
+        ):
+            result = estimate_time_alignments((reference, target)).inputs[1]
+
+        self.assertTrue(result.success, result.failure_reason)
+
+    def test_global_search_settings_are_validated(self) -> None:
+        for name, values in (
+            ("global_search", (1, "yes", None)),
+            ("global_min_overlap_seconds", (0.0, -1.0, float("nan"), True)),
+            ("global_min_peak_sigma", (0.0, -2.0, float("inf"), "8")),
+            ("global_max_candidates", (0, -1, 1.5, True)),
+        ):
+            for value in values:
+                with self.subTest(name=name, value=value):
+                    with self.assertRaisesRegex(ValueError, name):
+                        AlignmentConfig(**{name: value})  # type: ignore[arg-type]
+        AlignmentConfig(
+            global_search=False,
+            global_min_overlap_seconds=5.0,
+            global_min_peak_sigma=6.0,
+            global_max_candidates=1,
+        )
 
 
 class AlignmentPipelineTests(unittest.TestCase):
