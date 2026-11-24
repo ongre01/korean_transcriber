@@ -29,9 +29,15 @@ private:
     void chooseFile(QLineEdit *target, const QString &caption, const QString &filter);
     void chooseDirectory(QLineEdit *target, const QString &caption);
     bool hasValidValues(QString *errorMessage) const;
+    void updateEngineFields();
 
     QLineEdit *m_pythonPathEdit = nullptr;
     QLineEdit *m_outputDirectoryEdit = nullptr;
+    QComboBox *m_transcriptionEngineComboBox = nullptr;
+    QGroupBox *m_nemotronGroupBox = nullptr;
+    QLineEdit *m_nemotronExecutableEdit = nullptr;
+    QLineEdit *m_nemotronModelFileEdit = nullptr;
+    QLineEdit *m_nemotronConfigFileEdit = nullptr;
     QLineEdit *m_whisperModelDirectoryEdit = nullptr;
     QSpinBox *m_beamsSpinBox = nullptr;
     QDoubleSpinBox *m_windowSecondsSpinBox = nullptr;

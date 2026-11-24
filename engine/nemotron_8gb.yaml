@@ -1,0 +1,15 @@
+# Nemotron 3.5 Transcribe, IQ4_NL decoder + matching Encoder-F16.gguf.
+# Starting preset for an 8 GB GPU. MoE experts reside in system RAM;
+# available host RAM and inference speed must be checked on your machine.
+# Source: NVIDIA/NeMo-Speech.cpp docs/salm/configuration.md (2026-11-05).
+# Requires the n_cpu_moe support added in upstream commit 536b17a.
+# The older 0.3.0+nightly.d8a1abf runtime does not accept this preset.
+asr:
+  salm:
+    max_sequences: 1
+    n_ctx_per_sequence: 32768
+    max_context: 32768
+    n_cpu_moe: 53
+    n_batch: 512
+    encoder_max_batch: 1
+    encoder_ahead_seconds: 600

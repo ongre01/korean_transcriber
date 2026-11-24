@@ -39,6 +39,47 @@ Run setup.bat once. It creates/reuses .venv, installs the runtime packages,
 prepares both Whisper models, and downloads the speaker diarization models.
 Existing models are reused.
 
+선택형 Nemotron 엔진
+--------------------
+GUI의 전사 엔진에서 Nemotron 3.5 Transcribe를 선택할 수 있다. 기본값은
+기존 Whisper이며, Nemotron은 별도 설치한 NeMo-Speech.cpp 실행 파일과
+IQ4_NL decoder/encoder GGUF를 사용한다. `setup.bat`은 Nemotron 런타임이나
+가중치를 내려받지 않는다.
+
+기본 8GB 프리셋에는 NeMo-Speech.cpp 공식 커밋 `536b17a`의 `n_cpu_moe`
+지원이 필요하다. `0.3.0+nightly.d8a1abf`는 해당 키를 거부한다. 이 오류가
+나면 YAML의 오프로딩 설정을 삭제하지 말고 지원 런타임으로 교체한다.
+
+8GB GPU용 기본 설정은 `nemotron_8gb.yaml`이며 MoE expert를 시스템 RAM에
+두고 요청별 최대 29분의 음성을 처리한다. 긴 녹음은 `backend_bridge.py`가
+16 kHz 정수 샘플 인덱스로 겹치지 않는 연속 구간에 균등 분할해 순차 전사한다.
+구간 수는 `ceil(전체 샘플 수 / 요청별 최대 샘플 수)`이며, 1시간 1분 9초는
+기본 설정에서 20분 23초씩 세 구간이 된다. 사용자 YAML은 요청별 최대 1시간이며
+실제 처리 가능 길이는 해당 설정의 메모리·맥락 한계에 따른다.
+`nemotron.py` 단일 요청 어댑터의 1시간 제한은 유지된다.
+
+구간의 시작 시각을 더해 원본 시간축을 복원하고, 모든 구간이 성공한 뒤
+TXT/SRT 각 한 파일로 저장한다. 중간 실패·취소 시 부분 결과를 확정하지 않고
+기존 결과를 보존한다. 진행률은 구간 완료 시에만 갱신하며 Whisper ETA는
+표시하지 않는다. 경계에서 단어·문맥이 나뉘어 인식 품질이 낮아질 수 있다.
+내장 화자 분리는 구간당 최대 8명을 구분하며, 구간마다 겹치지 않는 화자 번호를
+부여하므로 전체 결과의 번호는 8개를 넘을 수 있다. 같은 사람의 구간 간 연결은
+제공하지 않으며 같은 사람도 다른 번호를 받을 수 있다는 경고를 표시한다.
+
+실제 RAM 사용량·속도·인식 품질은 사용할 PC와 녹음으로 확인해야 한다.
+설치, GUI 설정, CLI 예제와 제약은
+[Nemotron 엔진 사용 가이드](../docs/Nemotron_엔진_사용_가이드.md)를 참조한다.
+
+NVIDIA 원본 모델만 직접 다운로드하려면 프로젝트 루트에서 실행한다:
+
+```powershell
+.\engine\.venv\Scripts\python.exe .\engine\download_nemotron.py
+```
+
+약 67.5GB이며 기본 저장 위치는 `%LOCALAPPDATA%\NeMoSpeech\checkpoints` 아래다.
+`--output-dir`로 위치를 바꾸고 `--verify-only`로 기존 파일의 체크섬을 확인할 수 있다.
+이 스크립트는 원본 다운로드 전용이며 GGUF 변환은 사용 가이드의 별도 절차다.
+
 Qt GUI 설정
 -----------
 GUI는 엔진 폴더를 찾아 `engine/.venv/Scripts/python.exe`와

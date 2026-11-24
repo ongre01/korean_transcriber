@@ -12,6 +12,12 @@ public:
     static Settings load();
     void save() const;
     void applyEngineDefaults(const EnginePaths &paths, const QString &pythonOverride = {});
+    // Resolve the default command on PATH, then the Windows per-user install.
+    // Explicit user paths are preserved; call again before launch after an install.
+    QString resolvedNemotronExecutable() const;
+    // An empty model selection can use the installed, nonempty decoder/encoder pair.
+    // Explicit user paths are preserved, including paths that are unavailable.
+    QString resolvedNemotronModelFile() const;
 
     bool validateForRun(bool diarizationEnabled, QString *errorMessage = nullptr) const;
 
@@ -19,12 +25,16 @@ public:
     QString lastInputDirectory;
     QString outputDirectory;
     QByteArray selectedMicrophoneId;
+    QString transcriptionEngine = QStringLiteral("whisper");
     QString selectedDevice = QStringLiteral("AUTO");
     bool diarizationEnabled = false;
     QString speakerCount = QStringLiteral("Auto");
 
-    // The bridge requires a model directory. The remaining fields are optional
-    // overrides: an empty path preserves the engine's built-in default.
+    QString nemotronExecutable = QStringLiteral("nemo-speech");
+    QString nemotronModelFile;
+    QString nemotronConfigFile;
+
+    // Whisper-only options are retained when another engine is selected.
     QString whisperModelDirectory;
     int beams = 1;
     double windowSeconds = 120.0;

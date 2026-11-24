@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import argparse
 from contextlib import redirect_stdout
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import gc
 import importlib
 import json
@@ -25,6 +25,7 @@ from backend_protocol import EventStreamValidator, parse_event_line
 from result_staging import ResultStaging, discard_active_staging
 
 if TYPE_CHECKING:
+    from nemotron import NemotronConfig
     from vad import SpeechRegion
 
 
@@ -33,6 +34,9 @@ DEFAULT_WINDOW_SECONDS = 120.0
 DEFAULT_OVERLAP_SECONDS = 4.0
 DEFAULT_HOTWORDS_FILE = APP_DIR / "hotwords.txt"
 DEFAULT_INITIAL_PROMPT_FILE = APP_DIR / "initial_prompt.txt"
+DEFAULT_NEMOTRON_CONFIG = APP_DIR / "nemotron_8gb.yaml"
+NEMOTRON_DEFAULT_CHUNK_SECONDS = 29 * 60
+NEMOTRON_MAX_CHUNK_SECONDS = 60 * 60
 DEFAULT_DIARIZATION_DIR = APP_DIR / "models" / "diarization"
 DEFAULT_SEGMENTATION_MODEL = (
     DEFAULT_DIARIZATION_DIR
@@ -635,8 +639,12 @@ def build_parser() -> argparse.ArgumentParser:
     input_group = parser.add_mutually_exclusive_group(required=True)
     input_group.add_argument("--input")
     input_group.add_argument("--multi-input-manifest", metavar="JSON_PATH")
+    parser.add_argument("--engine", choices=("whisper", "nemotron"), default="whisper")
+    parser.add_argument("--nemotron-executable", default="nemo-speech")
+    parser.add_argument("--nemotron-model", default="", metavar="DECODER_GGUF")
+    parser.add_argument("--nemotron-config", default=str(DEFAULT_NEMOTRON_CONFIG), metavar="YAML_PATH")
     parser.add_argument("--device", type=_device, default="AUTO")
-    parser.add_argument("--model-dir", required=True)
+    parser.add_argument("--model-dir")
     parser.add_argument("--model-label", default="")
     parser.add_argument("--beams", type=int, default=1)
     parser.add_argument("--language", default="<|ko|>")
@@ -679,6 +687,19 @@ def build_parser() -> argparse.ArgumentParser:
 
 def parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
     args = build_parser().parse_args(argv)
+    if args.engine == "whisper" and not args.model_dir:
+        raise BridgeArgumentError("--model-dir is required for the Whisper engine")
+    if args.engine == "nemotron":
+        if not args.nemotron_model.strip():
+            raise BridgeArgumentError("--nemotron-model is required for the Nemotron engine")
+        if not args.nemotron_executable.strip():
+            raise BridgeArgumentError("--nemotron-executable must not be empty")
+        if args.diarization and args.num_speakers != -1:
+            raise BridgeArgumentError("Nemotron supports automatic speaker count only (--num-speakers auto)")
+        if args.skip_silence:
+            raise BridgeArgumentError("--skip-silence is a Whisper-only option; Nemotron processes the full recording")
+        if args.device != "AUTO":
+            raise BridgeArgumentError("--device is a Whisper-only option; configure Nemotron through --nemotron-config")
     args.multi_input_manifest_path = None
     args.multi_input_manifest_data = None
     if args.multi_input_manifest is not None:
@@ -856,12 +877,13 @@ def _load_diarize_function() -> Callable:
 class _TranscriptionContext:
     """Settings both input modes resolve before any audio is processed."""
 
-    model_dir: Path
+    model_dir: Path | None
     output_dir: Path
     hotwords: str
     initial_prompt: str
     device: str
     npu_context_tokens: bool
+    nemotron_config: NemotronConfig | None = None
 
 
 def _prepare_transcription(
@@ -871,8 +893,9 @@ def _prepare_transcription(
     *,
     default_output_dir: Path,
 ) -> _TranscriptionContext:
-    model_dir = Path(args.model_dir).expanduser().resolve()
-    if not model_dir.is_dir():
+    is_nemotron = getattr(args, "engine", "whisper") == "nemotron"
+    model_dir = None if is_nemotron else Path(args.model_dir).expanduser().resolve()
+    if model_dir is not None and not model_dir.is_dir():
         raise BridgeFailure(f"Model directory not found: {model_dir}", exit_code=3)
 
     output_dir = (
@@ -891,6 +914,26 @@ def _prepare_transcription(
             Path(args.initial_prompt_file).expanduser().resolve()
         ),
     )
+    if is_nemotron:
+        from nemotron import NemotronConfig, validate_config
+
+        config = _call(
+            "Nemotron 설정을 확인해 주세요",
+            lambda: validate_config(NemotronConfig(
+                executable=args.nemotron_executable,
+                model=Path(args.nemotron_model),
+                config=Path(args.nemotron_config) if args.nemotron_config else DEFAULT_NEMOTRON_CONFIG,
+            )),
+        )
+        return _TranscriptionContext(
+            model_dir=None,
+            output_dir=output_dir,
+            hotwords=hotwords,
+            initial_prompt=initial_prompt,
+            device="",
+            npu_context_tokens=False,
+            nemotron_config=config,
+        )
     device = _call(
         "OpenVINO device selection failed",
         lambda: resolve_device(engine, args.device),
@@ -921,32 +964,16 @@ def _prepare_transcription(
     )
 
 
-def _transcribe_and_save(
+def _transcribe_whisper(
     args: argparse.Namespace,
     engine,
     writer: EventWriter,
     context: _TranscriptionContext,
     audio,
-    result_input_path: Path,
-    *,
-    staging: ResultStaging,
-    diarize_function: Callable | None = None,
-    artifacts: Mapping[str, str | Path] | None = None,
-) -> int:
-    """Run the Whisper, diarization and saving stages shared by both modes.
-
-    ``audio`` is 16 kHz mono and starts at the time origin of the result, so
-    every segment, TXT and SRT timestamp is measured on that timeline.
-    ``result_input_path`` names the TXT/SRT files exactly as the existing
-    engine names them for a user-selected file.  ``artifacts`` are the extra
-    multi-input files reported with ``completed``; they wait in ``staging``
-    under their final names.  The TXT/SRT files are written to ``staging``
-    too, and the whole set is published, artifacts first, only after the last
-    file is complete, so a failed or cancelled job leaves no partial or
-    orphaned result under a final name.
-    """
-
-    duration = len(audio) / engine.TARGET_SAMPLE_RATE
+    duration: float,
+    diarize_function: Callable | None,
+):
+    """Keep the existing Whisper/VAD/sherpa pipeline independent of Nemotron."""
 
     speech_regions: list[SpeechRegion] | None = None
     if getattr(args, "skip_silence", False):
@@ -1068,6 +1095,151 @@ def _transcribe_and_save(
             engine.assign_speakers(segments, turns)
 
         _call("Speaker diarization failed", perform_diarization)
+
+    return segments
+
+
+def _transcribe_nemotron(
+    args: argparse.Namespace,
+    engine,
+    writer: EventWriter,
+    context: _TranscriptionContext,
+    audio,
+):
+    """Run bounded native requests and restore the original recording timeline.
+
+    Balanced, adjacent sample ranges cover the input exactly once and avoid a
+    final chunk shorter than the runtime's 20 ms minimum. Native speaker IDs
+    are local to each request, so different chunks get disjoint result IDs.
+    Transcript segments stay unpublished until every request succeeds.
+    """
+    from nemotron import transcribe_audio
+
+    config = context.nemotron_config
+    limit_seconds = (
+        NEMOTRON_DEFAULT_CHUNK_SECONDS
+        if config.config == DEFAULT_NEMOTRON_CONFIG.resolve()
+        else NEMOTRON_MAX_CHUNK_SECONDS
+    )
+    sample_rate = engine.TARGET_SAMPLE_RATE
+    limit_samples = limit_seconds * sample_rate
+    sample_count = len(audio)
+    chunk_count = max(1, (sample_count + limit_samples - 1) // limit_samples)
+    if chunk_count > 1:
+        message = (
+            f"긴 녹음을 {chunk_count}개 구간(구간당 최대 {limit_seconds // 60}분)으로 "
+            "자동 분할해 전사하고 원본 시간 기준으로 병합합니다. "
+            "분할 경계에서는 단어나 문맥의 인식 품질이 낮아질 수 있습니다."
+        )
+        if args.diarization:
+            message += (
+                " 화자 번호는 구간마다 새로 부여하므로 같은 사람도 다른 번호로 "
+                "표시될 수 있습니다. 구간 사이의 동일 화자는 자동으로 연결하지 않습니다."
+            )
+        writer.warning(message)
+
+    writer.state("loading_model")
+    writer.progress(None)
+    writer.state("transcribing")
+    if chunk_count > 1:
+        writer.progress(0)
+    segments = []
+    next_speaker = 0
+    for index in range(chunk_count):
+        start_sample = index * sample_count // chunk_count
+        end_sample = (index + 1) * sample_count // chunk_count
+        chunk_duration = (end_sample - start_sample) / sample_rate
+        offset = start_sample / sample_rate
+        chunk = audio if chunk_count == 1 else audio[start_sample:end_sample]
+        if chunk_count > 1:
+            print(
+                f"Nemotron chunk {index + 1}/{chunk_count} | "
+                f"{offset:.3f}s - {end_sample / sample_rate:.3f}s",
+                file=sys.stderr, flush=True,
+            )
+
+        def warning_callback(message: str) -> None:
+            writer.warning(
+                f"Nemotron {index + 1}/{chunk_count} 구간: {message}"
+                if chunk_count > 1 else message
+            )
+
+        chunk_segments = _call(
+            f"Nemotron {index + 1}/{chunk_count} 구간 전사에 실패했습니다"
+            if chunk_count > 1 else "Nemotron 전사에 실패했습니다",
+            lambda: transcribe_audio(
+                chunk,
+                chunk_duration,
+                config,
+                diarization=args.diarization,
+                language=args.language,
+                hotwords=context.hotwords,
+                initial_prompt=context.initial_prompt,
+                warning_callback=warning_callback,
+            ),
+        )
+        if chunk_count == 1:
+            return chunk_segments
+
+        speakers: dict[int, int] = {}
+        for segment in chunk_segments:
+            speaker = None
+            if args.diarization and segment.speaker is not None:
+                if (
+                    isinstance(segment.speaker, bool)
+                    or not isinstance(segment.speaker, Integral)
+                    or segment.speaker < 0
+                ):
+                    raise BridgeFailure("Transcription produced an invalid speaker number")
+                if segment.speaker not in speakers:
+                    speakers[segment.speaker] = next_speaker
+                    next_speaker += 1
+                speaker = speakers[segment.speaker]
+            segments.append(replace(
+                segment,
+                start=segment.start + offset,
+                end=segment.end + offset,
+                speaker=speaker,
+            ))
+        # Only completed chunks are measurable; omit timing fields so Qt does
+        # not extrapolate a Whisper window ETA. Saving alone may report 100%.
+        writer.progress(min(99, end_sample * 100 // sample_count))
+    return segments
+
+
+def _transcribe_and_save(
+    args: argparse.Namespace,
+    engine,
+    writer: EventWriter,
+    context: _TranscriptionContext,
+    audio,
+    result_input_path: Path,
+    *,
+    staging: ResultStaging,
+    diarize_function: Callable | None = None,
+    artifacts: Mapping[str, str | Path] | None = None,
+) -> int:
+    """Run the selected engine and save results for either input mode.
+
+    ``audio`` is 16 kHz mono and starts at the time origin of the result, so
+    every segment, TXT and SRT timestamp is measured on that timeline.
+    ``result_input_path`` names the TXT/SRT files exactly as the existing
+    engine names them for a user-selected file.  ``artifacts`` are the extra
+    multi-input files reported with ``completed``; they wait in ``staging``
+    under their final names.  The TXT/SRT files are written to ``staging``
+    too, and the whole set is published, artifacts first, only after the last
+    file is complete, so a failed or cancelled job leaves no partial or
+    orphaned result under a final name.
+    """
+
+    duration = len(audio) / engine.TARGET_SAMPLE_RATE
+
+    if context.nemotron_config is not None:
+        segments = _transcribe_nemotron(args, engine, writer, context, audio)
+    else:
+        segments = _transcribe_whisper(
+            args, engine, writer, context, audio, duration, diarize_function
+        )
 
     # Segment events are emitted only after optional diarization has finished.
     # This is the bridge contract: provisional STT segments are never sent and

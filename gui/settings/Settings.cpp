@@ -58,6 +58,12 @@ Settings Settings::load()
         QStringLiteral("outputDirectory"), defaultOutputDirectory()).toString();
     result.selectedMicrophoneId = settings.value(
         QStringLiteral("selectedMicrophoneId")).toByteArray();
+    result.transcriptionEngine = settings.value(
+        QStringLiteral("transcriptionEngine"), result.transcriptionEngine).toString();
+    result.nemotronExecutable = settings.value(
+        QStringLiteral("nemotronExecutable"), result.nemotronExecutable).toString();
+    result.nemotronModelFile = settings.value(QStringLiteral("nemotronModelFile")).toString();
+    result.nemotronConfigFile = settings.value(QStringLiteral("nemotronConfigFile")).toString();
     result.selectedDevice = settings.value(
         QStringLiteral("selectedDevice"), result.selectedDevice).toString().trimmed();
     result.diarizationEnabled = settings.value(
@@ -107,6 +113,8 @@ Settings Settings::load()
 
 void Settings::applyEngineDefaults(const EnginePaths &paths, const QString &pythonOverride)
 {
+    nemotronExecutable = resolvedNemotronExecutable();
+    nemotronModelFile = resolvedNemotronModelFile();
     const QString python = pythonPath.trimmed();
     if (python.isEmpty() || python == QStringLiteral("python")) {
         pythonPath = paths.defaultPythonProgram(pythonOverride);
@@ -123,6 +131,54 @@ void Settings::applyEngineDefaults(const EnginePaths &paths, const QString &pyth
     }
 }
 
+QString Settings::resolvedNemotronExecutable() const
+{
+    const QString configured = nemotronExecutable.trimmed();
+    if (!configured.isEmpty() && configured != QStringLiteral("nemo-speech")
+        && configured != QStringLiteral("nemo-speech.exe")) {
+        return configured;
+    }
+    const QString program = configured.isEmpty() ? QStringLiteral("nemo-speech") : configured;
+    const QString onPath = QStandardPaths::findExecutable(program);
+    if (!onPath.isEmpty()) {
+        return onPath;
+    }
+#ifdef Q_OS_WIN
+    // A running application may still have the PATH from before installation.
+    const QString localAppData = qEnvironmentVariable("LOCALAPPDATA");
+    if (!localAppData.isEmpty()) {
+        const QFileInfo installed(QDir(localAppData).filePath(
+            QStringLiteral("Programs/NeMoSpeech/bin/nemo-speech.exe")));
+        if (installed.isFile()) {
+            return installed.absoluteFilePath();
+        }
+    }
+#endif
+    return program;
+}
+
+QString Settings::resolvedNemotronModelFile() const
+{
+    const QString configured = nemotronModelFile.trimmed();
+    if (!configured.isEmpty()) {
+        return configured;
+    }
+#ifdef Q_OS_WIN
+    const QString localAppData = qEnvironmentVariable("LOCALAPPDATA");
+    if (!localAppData.isEmpty()) {
+        const QDir models(QDir(localAppData).filePath(QStringLiteral("NeMoSpeech/models")));
+        const QFileInfo decoder(models.filePath(
+            QStringLiteral("NVIDIA-Nemotron-3.5-Transcribe-30B-A4B-IQ4_NL.gguf")));
+        const QFileInfo encoder(models.filePath(
+            QStringLiteral("NVIDIA-Nemotron-3.5-Transcribe-30B-A4B-Encoder-F16.gguf")));
+        if (decoder.isFile() && decoder.size() > 0 && encoder.isFile() && encoder.size() > 0) {
+            return decoder.absoluteFilePath();
+        }
+    }
+#endif
+    return {};
+}
+
 void Settings::save() const
 {
     QSettings settings;
@@ -132,6 +188,10 @@ void Settings::save() const
     settings.setValue(QStringLiteral("lastInputDirectory"), lastInputDirectory);
     settings.setValue(QStringLiteral("outputDirectory"), outputDirectory);
     settings.setValue(QStringLiteral("selectedMicrophoneId"), selectedMicrophoneId);
+    settings.setValue(QStringLiteral("transcriptionEngine"), transcriptionEngine);
+    settings.setValue(QStringLiteral("nemotronExecutable"), nemotronExecutable.trimmed());
+    settings.setValue(QStringLiteral("nemotronModelFile"), nemotronModelFile.trimmed());
+    settings.setValue(QStringLiteral("nemotronConfigFile"), nemotronConfigFile.trimmed());
     settings.setValue(QStringLiteral("selectedDevice"), selectedDevice);
     settings.setValue(QStringLiteral("diarizationEnabled"), diarizationEnabled);
     settings.setValue(QStringLiteral("speakerCount"), speakerCount);
@@ -173,15 +233,37 @@ bool Settings::validateForRun(bool runWithDiarization, QString *errorMessage) co
     if (!isPythonProgramAvailable(python)) {
         return fail(QObject::tr("Python 실행 파일을 찾을 수 없습니다: %1").arg(python));
     }
-    if (whisperModelDirectory.trimmed().isEmpty()) {
-        return fail(QObject::tr("Whisper 모델 폴더가 설정되지 않았습니다. engine/setup.bat 실행 후 모델 폴더를 확인하세요."));
+    const bool nemotron = transcriptionEngine == QStringLiteral("nemotron");
+    if (!nemotron && transcriptionEngine != QStringLiteral("whisper")) {
+        return fail(QObject::tr("지원하지 않는 전사 엔진입니다: %1").arg(transcriptionEngine));
     }
-    if (!QFileInfo(whisperModelDirectory.trimmed()).isDir()) {
-        return fail(QObject::tr("Whisper 모델 폴더를 찾을 수 없습니다: %1")
-                        .arg(whisperModelDirectory));
-    }
-    if (beams < 1) {
-        return fail(QObject::tr("Beam 수는 1 이상이어야 합니다."));
+    if (nemotron) {
+        const QString executable = resolvedNemotronExecutable();
+        if (!isPythonProgramAvailable(executable)) {
+            return fail(QObject::tr("Nemotron 실행 파일을 찾을 수 없습니다. 설정에서 nemo-speech 실행 파일을 선택하세요: %1")
+                            .arg(executable));
+        }
+        const QString modelFile = resolvedNemotronModelFile();
+        if (!QFileInfo(modelFile).isFile()) {
+            return fail(QObject::tr("Nemotron 디코더 GGUF 모델 파일을 선택하세요: %1")
+                            .arg(modelFile));
+        }
+        if (!nemotronConfigFile.trimmed().isEmpty()
+            && !QFileInfo(nemotronConfigFile.trimmed()).isFile()) {
+            return fail(QObject::tr("Nemotron YAML 설정 파일을 찾을 수 없습니다: %1")
+                            .arg(nemotronConfigFile));
+        }
+    } else {
+        if (whisperModelDirectory.trimmed().isEmpty()) {
+            return fail(QObject::tr("Whisper 모델 폴더가 설정되지 않았습니다. engine/setup.bat 실행 후 모델 폴더를 확인하세요."));
+        }
+        if (!QFileInfo(whisperModelDirectory.trimmed()).isDir()) {
+            return fail(QObject::tr("Whisper 모델 폴더를 찾을 수 없습니다: %1")
+                            .arg(whisperModelDirectory));
+        }
+        if (beams < 1) {
+            return fail(QObject::tr("Beam 수는 1 이상이어야 합니다."));
+        }
     }
     if (outputDirectory.trimmed().isEmpty()) {
         return fail(QObject::tr("결과 출력 폴더가 설정되지 않았습니다."));
@@ -191,11 +273,11 @@ bool Settings::validateForRun(bool runWithDiarization, QString *errorMessage) co
         return fail(QObject::tr("결과 출력 경로가 폴더가 아닙니다: %1")
                         .arg(outputDirectory));
     }
-    if (!std::isfinite(windowSeconds) || windowSeconds < 30.0) {
+    if (!nemotron && (!std::isfinite(windowSeconds) || windowSeconds < 30.0)) {
         return fail(QObject::tr("Window Seconds는 30 이상이어야 합니다."));
     }
-    if (!std::isfinite(overlapSeconds) || overlapSeconds < 0.0
-        || overlapSeconds >= windowSeconds / 2.0) {
+    if (!nemotron && (!std::isfinite(overlapSeconds) || overlapSeconds < 0.0
+        || overlapSeconds >= windowSeconds / 2.0)) {
         return fail(QObject::tr("Overlap Seconds는 0 이상이고 Window Seconds의 절반보다 작아야 합니다."));
     }
     if (!hotwordsFile.trimmed().isEmpty() && !QFileInfo(hotwordsFile).isFile()) {
@@ -205,17 +287,17 @@ bool Settings::validateForRun(bool runWithDiarization, QString *errorMessage) co
         return fail(QObject::tr("Initial Prompt 파일을 찾을 수 없습니다: %1")
                         .arg(initialPromptFile));
     }
-    if (!std::isfinite(silenceThresholdDb) || silenceThresholdDb < -100.0
-        || silenceThresholdDb >= 0.0) {
+    if (!nemotron && (!std::isfinite(silenceThresholdDb) || silenceThresholdDb < -100.0
+        || silenceThresholdDb >= 0.0)) {
         return fail(QObject::tr("무음 감지 임계값은 -100 dBFS 이상 0 dBFS 미만이어야 합니다."));
     }
-    if (!std::isfinite(silenceMinimumSpeechDuration)
+    if (!nemotron && (!std::isfinite(silenceMinimumSpeechDuration)
         || silenceMinimumSpeechDuration < 0.0
         || !std::isfinite(silenceMinimumDuration) || silenceMinimumDuration < 0.0
-        || !std::isfinite(silencePaddingDuration) || silencePaddingDuration < 0.0) {
+        || !std::isfinite(silencePaddingDuration) || silencePaddingDuration < 0.0)) {
         return fail(QObject::tr("무음 감지 시간 값은 0 이상이어야 합니다."));
     }
-    if (runWithDiarization) {
+    if (runWithDiarization && !nemotron) {
         if (!std::isfinite(speakerThreshold) || speakerThreshold <= 0.0
             || speakerThreshold > 1.0) {
             return fail(QObject::tr("Cluster Threshold는 0보다 크고 1 이하여야 합니다."));

@@ -51,6 +51,12 @@ SettingsDialog::SettingsDialog(const Settings &currentSettings, QWidget *parent)
     auto *mainLayout = new QVBoxLayout(this);
     auto *basicForm = new QFormLayout;
 
+    m_transcriptionEngineComboBox = new QComboBox(this);
+    m_transcriptionEngineComboBox->setObjectName(QStringLiteral("transcriptionEngineComboBox"));
+    m_transcriptionEngineComboBox->addItem(tr("Whisper (OpenVINO)"), QStringLiteral("whisper"));
+    m_transcriptionEngineComboBox->addItem(tr("Nemotron (NeMo-Speech.cpp)"), QStringLiteral("nemotron"));
+    basicForm->addRow(tr("전사 엔진"), m_transcriptionEngineComboBox);
+
     QPushButton *pythonBrowseButton = nullptr;
     basicForm->addRow(tr("Python 실행 파일"),
                       pathEditor(m_pythonPathEdit, pythonBrowseButton, this, tr("찾아보기...")));
@@ -67,11 +73,53 @@ SettingsDialog::SettingsDialog(const Settings &currentSettings, QWidget *parent)
     });
     mainLayout->addLayout(basicForm);
 
-    m_advancedToggleButton = new QPushButton(tr("고급 설정 표시"), this);
+    m_nemotronGroupBox = new QGroupBox(tr("Nemotron 설정"), this);
+    auto *nemotronForm = new QFormLayout(m_nemotronGroupBox);
+    QPushButton *nemotronExecutableBrowseButton = nullptr;
+    nemotronForm->addRow(tr("nemo-speech 실행 파일"),
+                        pathEditor(m_nemotronExecutableEdit, nemotronExecutableBrowseButton,
+                                   m_nemotronGroupBox, tr("찾아보기...")));
+    m_nemotronExecutableEdit->setObjectName(QStringLiteral("nemotronExecutableEdit"));
+    connect(nemotronExecutableBrowseButton, &QPushButton::clicked, this, [this]() {
+        chooseFile(m_nemotronExecutableEdit, tr("nemo-speech 실행 파일 선택"),
+                   tr("실행 파일 (*.exe);;모든 파일 (*.*)"));
+    });
+    QPushButton *nemotronModelBrowseButton = nullptr;
+    nemotronForm->addRow(tr("디코더 GGUF 모델"),
+                        pathEditor(m_nemotronModelFileEdit, nemotronModelBrowseButton,
+                                   m_nemotronGroupBox, tr("선택...")));
+    m_nemotronModelFileEdit->setObjectName(QStringLiteral("nemotronModelFileEdit"));
+    m_nemotronModelFileEdit->setPlaceholderText(tr("비워두면 기본 설치 폴더의 모델 쌍을 자동 탐색"));
+    connect(nemotronModelBrowseButton, &QPushButton::clicked, this, [this]() {
+        chooseFile(m_nemotronModelFileEdit, tr("Nemotron 디코더 모델 선택"),
+                   tr("GGUF 모델 (*.gguf);;모든 파일 (*.*)"));
+    });
+    QPushButton *nemotronConfigBrowseButton = nullptr;
+    nemotronForm->addRow(tr("YAML 설정 (선택)"),
+                        pathEditor(m_nemotronConfigFileEdit, nemotronConfigBrowseButton,
+                                   m_nemotronGroupBox, tr("선택...")));
+    m_nemotronConfigFileEdit->setObjectName(QStringLiteral("nemotronConfigFileEdit"));
+    m_nemotronConfigFileEdit->setPlaceholderText(tr("비워두면 8GB GPU + 시스템 RAM 기본 설정"));
+    connect(nemotronConfigBrowseButton, &QPushButton::clicked, this, [this]() {
+        chooseFile(m_nemotronConfigFileEdit, tr("Nemotron YAML 설정 선택"),
+                   tr("YAML 설정 (*.yaml *.yml);;모든 파일 (*.*)"));
+    });
+    auto *nemotronHelp = new QLabel(
+        tr("NeMo-Speech.cpp와 Nemotron 모델을 별도로 준비하세요. 디코더와 짝이 맞는 "
+           "인코더 GGUF도 같은 폴더에 필요합니다.\n"
+           "기본 설정은 8GB GPU와 시스템 RAM을 사용하며 녹음은 최대 29분까지 처리합니다. "
+           "더 긴 녹음은 나누어 주세요.\n"
+           "화자 수는 자동으로 감지합니다. Hotwords와 초기 프롬프트는 메인 화면에서 입력할 수 있습니다."),
+        m_nemotronGroupBox);
+    nemotronHelp->setWordWrap(true);
+    nemotronForm->addRow(nemotronHelp);
+    mainLayout->addWidget(m_nemotronGroupBox);
+
+    m_advancedToggleButton = new QPushButton(tr("Whisper 고급 설정 표시"), this);
     m_advancedToggleButton->setCheckable(true);
     mainLayout->addWidget(m_advancedToggleButton, 0, Qt::AlignLeft);
 
-    m_advancedGroupBox = new QGroupBox(tr("고급 설정"), this);
+    m_advancedGroupBox = new QGroupBox(tr("Whisper 고급 설정"), this);
     auto *advancedForm = new QFormLayout(m_advancedGroupBox);
 
     QPushButton *modelBrowseButton = nullptr;
@@ -167,7 +215,7 @@ SettingsDialog::SettingsDialog(const Settings &currentSettings, QWidget *parent)
     m_advancedGroupBox->setVisible(false);
     connect(m_advancedToggleButton, &QPushButton::toggled, this, [this](bool visible) {
         m_advancedGroupBox->setVisible(visible);
-        m_advancedToggleButton->setText(visible ? tr("고급 설정 숨기기") : tr("고급 설정 표시"));
+        m_advancedToggleButton->setText(visible ? tr("Whisper 고급 설정 숨기기") : tr("Whisper 고급 설정 표시"));
         adjustSize();
     });
     mainLayout->addWidget(m_advancedGroupBox);
@@ -179,6 +227,11 @@ SettingsDialog::SettingsDialog(const Settings &currentSettings, QWidget *parent)
 
     m_pythonPathEdit->setText(currentSettings.pythonPath);
     m_outputDirectoryEdit->setText(currentSettings.outputDirectory);
+    m_transcriptionEngineComboBox->setCurrentIndex(
+        currentSettings.transcriptionEngine == QStringLiteral("nemotron") ? 1 : 0);
+    m_nemotronExecutableEdit->setText(currentSettings.resolvedNemotronExecutable());
+    m_nemotronModelFileEdit->setText(currentSettings.resolvedNemotronModelFile());
+    m_nemotronConfigFileEdit->setText(currentSettings.nemotronConfigFile);
     m_whisperModelDirectoryEdit->setText(currentSettings.whisperModelDirectory);
     m_beamsSpinBox->setValue(currentSettings.beams);
     m_windowSecondsSpinBox->setValue(currentSettings.windowSeconds);
@@ -200,6 +253,19 @@ SettingsDialog::SettingsDialog(const Settings &currentSettings, QWidget *parent)
         currentSettings.diarizationDevice, Qt::MatchFixedString);
     m_diarizationDeviceComboBox->setCurrentIndex(deviceIndex >= 0 ? deviceIndex : 0);
     m_diarizationFallbackCheckBox->setChecked(currentSettings.diarizationFallbackToCpu);
+    connect(m_transcriptionEngineComboBox, qOverload<int>(&QComboBox::currentIndexChanged),
+            this, &SettingsDialog::updateEngineFields);
+    updateEngineFields();
+}
+
+void SettingsDialog::updateEngineFields()
+{
+    const bool nemotron = m_transcriptionEngineComboBox->currentData().toString()
+        == QStringLiteral("nemotron");
+    m_nemotronGroupBox->setVisible(nemotron);
+    m_advancedToggleButton->setVisible(!nemotron);
+    m_advancedGroupBox->setVisible(!nemotron && m_advancedToggleButton->isChecked());
+    adjustSize();
 }
 
 Settings SettingsDialog::settings() const
@@ -207,6 +273,10 @@ Settings SettingsDialog::settings() const
     Settings result = m_currentSettings;
     result.pythonPath = m_pythonPathEdit->text().trimmed();
     result.outputDirectory = m_outputDirectoryEdit->text().trimmed();
+    result.transcriptionEngine = m_transcriptionEngineComboBox->currentData().toString();
+    result.nemotronExecutable = m_nemotronExecutableEdit->text().trimmed();
+    result.nemotronModelFile = m_nemotronModelFileEdit->text().trimmed();
+    result.nemotronConfigFile = m_nemotronConfigFileEdit->text().trimmed();
     result.whisperModelDirectory = m_whisperModelDirectoryEdit->text().trimmed();
     result.beams = m_beamsSpinBox->value();
     result.windowSeconds = m_windowSecondsSpinBox->value();
@@ -268,6 +338,12 @@ bool SettingsDialog::hasValidValues(QString *errorMessage) const
     }
     if (m_outputDirectoryEdit->text().trimmed().isEmpty()) {
         return fail(tr("결과 출력 폴더를 입력하세요."));
+    }
+    if (m_transcriptionEngineComboBox->currentData().toString() == QStringLiteral("nemotron")) {
+        if (m_nemotronExecutableEdit->text().trimmed().isEmpty()) {
+            return fail(tr("nemo-speech 실행 파일을 입력하세요."));
+        }
+        return true;
     }
     if (m_beamsSpinBox->value() < 1) {
         return fail(tr("Beam 수는 1 이상이어야 합니다."));

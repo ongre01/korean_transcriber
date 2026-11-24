@@ -281,6 +281,22 @@ MainWindow::MainWindow(QWidget *parent)
             [this](const QString &) { saveSettings(); });
     connect(ui->deviceComboBox, &QComboBox::currentTextChanged, this,
             [this](const QString &) { saveSettings(); });
+    connect(ui->transcriptionEngineComboBox, qOverload<int>(&QComboBox::currentIndexChanged), this,
+            [this](int index) {
+                const bool nemotron = index == 1;
+                if (nemotron) {
+                    m_settings.speakerCount = ui->speakerCountComboBox->currentText();
+                }
+                {
+                    const QSignalBlocker blocker(ui->speakerCountComboBox);
+                    const int speakerIndex = ui->speakerCountComboBox->findText(
+                        m_settings.speakerCount, Qt::MatchFixedString);
+                    ui->speakerCountComboBox->setCurrentIndex(
+                        nemotron || speakerIndex < 0 ? 0 : speakerIndex);
+                }
+                saveSettings();
+                updateUiForState();
+            });
     connect(ui->hotwordsTextEdit, &QPlainTextEdit::textChanged,
             this, &MainWindow::scheduleHotwordsSave);
     connect(ui->initialPromptTextEdit, &QPlainTextEdit::textChanged,
@@ -1002,6 +1018,10 @@ void MainWindow::handleTranscriptionStart()
         options.inputFile = m_currentInputFile;
     }
     options.device = backendDevice(ui->deviceComboBox->currentText());
+    options.transcriptionEngine = m_settings.transcriptionEngine;
+    options.nemotronExecutable = m_settings.resolvedNemotronExecutable();
+    options.nemotronModelFile = m_settings.resolvedNemotronModelFile();
+    options.nemotronConfigFile = m_settings.nemotronConfigFile;
     options.outputDirectory = m_settings.outputDirectory;
     options.modelDirectory = m_settings.whisperModelDirectory;
     options.beams = m_settings.beams;
@@ -1022,7 +1042,7 @@ void MainWindow::handleTranscriptionStart()
     options.diarizationEmbeddingModel = m_settings.diarizationEmbeddingModel;
     options.diarizationDevice = backendDevice(m_settings.diarizationDevice);
     options.diarizationFallbackToCpu = m_settings.diarizationFallbackToCpu;
-    if (options.diarizationEnabled) {
+    if (options.diarizationEnabled && options.transcriptionEngine == QStringLiteral("whisper")) {
         const QString speakerCount = ui->speakerCountComboBox->currentText().trimmed();
         if (speakerCount.compare(QStringLiteral("Auto"), Qt::CaseInsensitive) != 0) {
             bool isNumber = false;
@@ -1052,16 +1072,26 @@ void MainWindow::handleTranscriptionStart()
     clearTranscript();
     resetProcessingIndicators();
     setAppState(AppState::Processing);
-    logInfo(tr("Transcription Start"),
-            tr("Input mode: %1\nInput: %2\nDevice: %3\nBeams: %4\nSkip silence: %5\nDiarization: %6")
-                .arg(multiInput ? tr("multi audio") : tr("single audio"),
-                     QDir::toNativeSeparators(
-                         multiInput ? options.multiInputManifestFile : options.inputFile),
-                     backendDeviceArgument(options.device),
-                     QString::number(options.beams),
-                     options.skipSilence ? tr("ON") : tr("OFF"),
-                     options.diarizationEnabled ? tr("ON") : tr("OFF")));
-    logInfo(tr("Model"), QDir::toNativeSeparators(options.modelDirectory));
+    if (options.transcriptionEngine == QStringLiteral("nemotron")) {
+        logInfo(tr("Transcription Start"),
+                tr("Engine: Nemotron\nInput: %1\nDiarization: %2")
+                    .arg(QDir::toNativeSeparators(
+                             multiInput ? options.multiInputManifestFile : options.inputFile),
+                         options.diarizationEnabled ? tr("ON") : tr("OFF")));
+    } else {
+        logInfo(tr("Transcription Start"),
+                tr("Input mode: %1\nInput: %2\nDevice: %3\nBeams: %4\nSkip silence: %5\nDiarization: %6")
+                    .arg(multiInput ? tr("multi audio") : tr("single audio"),
+                         QDir::toNativeSeparators(
+                             multiInput ? options.multiInputManifestFile : options.inputFile),
+                         backendDeviceArgument(options.device),
+                         QString::number(options.beams),
+                         options.skipSilence ? tr("ON") : tr("OFF"),
+                         options.diarizationEnabled ? tr("ON") : tr("OFF")));
+    }
+    logInfo(tr("Model"), QDir::toNativeSeparators(
+                options.transcriptionEngine == QStringLiteral("nemotron")
+                    ? options.nemotronModelFile : options.modelDirectory));
     emit transcriptionStartRequested();
     m_backendProcess->start(options);
 }
@@ -1213,9 +1243,13 @@ void MainWindow::handleLogView()
 void MainWindow::updateSpeakerCountEnabled()
 {
     const bool optionsEnabled = m_state != AppState::Recording
-        && m_state != AppState::Processing;
+        && m_state != AppState::Processing && !m_inputInspectionPending
+        && (!m_backendProcess || !m_backendProcess->isRunning());
+    const bool nemotron = ui->transcriptionEngineComboBox->currentIndex() == 1;
     ui->speakerCountComboBox->setEnabled(
-        optionsEnabled && ui->diarizationCheckBox->isChecked());
+        optionsEnabled && !nemotron && ui->diarizationCheckBox->isChecked());
+    ui->speakerCountComboBox->setToolTip(
+        nemotron ? tr("Nemotron은 화자 수를 자동으로 감지합니다.") : QString());
 }
 
 void MainWindow::updateMicrophoneUi()
@@ -1375,7 +1409,9 @@ void MainWindow::backendStateChanged(const QString &state)
     m_backendState = state;
     logInfo(tr("Backend State"), state);
     if (state == QStringLiteral("loading_model")) {
-        logInfo(tr("Model Loading"), QDir::toNativeSeparators(m_settings.whisperModelDirectory));
+        logInfo(tr("Model Loading"), QDir::toNativeSeparators(
+                    m_settings.transcriptionEngine == QStringLiteral("nemotron")
+                        ? m_settings.resolvedNemotronModelFile() : m_settings.whisperModelDirectory));
     } else if (state == QStringLiteral("transcribing")) {
         logInfo(tr("Transcription Processing Started"));
     } else if (state == QStringLiteral("diarization")) {
@@ -1800,6 +1836,10 @@ void MainWindow::applySettingsToUi()
     m_audioFileInfo->setPythonProgram(m_settings.pythonPath);
     m_backendProcess->setPythonProgram(m_settings.pythonPath);
 
+    const QSignalBlocker engineBlocker(ui->transcriptionEngineComboBox);
+    const bool nemotron = m_settings.transcriptionEngine == QStringLiteral("nemotron");
+    ui->transcriptionEngineComboBox->setCurrentIndex(nemotron ? 1 : 0);
+
     const QSignalBlocker deviceBlocker(ui->deviceComboBox);
     const int deviceIndex = ui->deviceComboBox->findText(
         m_settings.selectedDevice, Qt::MatchFixedString);
@@ -1810,7 +1850,7 @@ void MainWindow::applySettingsToUi()
     const QSignalBlocker speakerCountBlocker(ui->speakerCountComboBox);
     const int speakerCountIndex = ui->speakerCountComboBox->findText(
         m_settings.speakerCount, Qt::MatchFixedString);
-    ui->speakerCountComboBox->setCurrentIndex(speakerCountIndex >= 0 ? speakerCountIndex : 0);
+    ui->speakerCountComboBox->setCurrentIndex(!nemotron && speakerCountIndex >= 0 ? speakerCountIndex : 0);
 
     if (!m_settings.selectedMicrophoneId.isEmpty()
         && !m_audioRecorder->setInputDevice(m_settings.selectedMicrophoneId)) {
@@ -1828,9 +1868,13 @@ void MainWindow::saveSettings()
     }
 
     m_settings.selectedMicrophoneId = m_audioRecorder->selectedInputDeviceId();
+    m_settings.transcriptionEngine = ui->transcriptionEngineComboBox->currentIndex() == 1
+        ? QStringLiteral("nemotron") : QStringLiteral("whisper");
     m_settings.selectedDevice = ui->deviceComboBox->currentText();
     m_settings.diarizationEnabled = ui->diarizationCheckBox->isChecked();
-    m_settings.speakerCount = ui->speakerCountComboBox->currentText();
+    if (m_settings.transcriptionEngine == QStringLiteral("whisper")) {
+        m_settings.speakerCount = ui->speakerCountComboBox->currentText();
+    }
     m_settings.save();
 }
 
@@ -2114,7 +2158,13 @@ void MainWindow::updateUiForState()
     ui->microphoneComboBox->setEnabled(
         controlsEnabled && !m_audioRecorder->inputDevices().isEmpty());
     ui->diarizationCheckBox->setEnabled(controlsEnabled);
-    ui->deviceComboBox->setEnabled(controlsEnabled);
+    const bool nemotron = ui->transcriptionEngineComboBox->currentIndex() == 1;
+    ui->transcriptionEngineComboBox->setEnabled(controlsEnabled);
+    ui->transcriptionEngineComboBox->setToolTip(
+        nemotron ? tr("설정 메뉴에서 nemo-speech 실행 파일과 Nemotron GGUF 모델을 지정하세요.") : QString());
+    ui->deviceComboBox->setVisible(!nemotron);
+    ui->deviceLabel->setVisible(!nemotron);
+    ui->deviceComboBox->setEnabled(controlsEnabled && !nemotron);
     ui->hotwordsTextEdit->setEnabled(m_state != AppState::Processing && !backendBusy);
     ui->initialPromptTextEdit->setEnabled(m_state != AppState::Processing && !backendBusy);
     if (m_settingsAction) {

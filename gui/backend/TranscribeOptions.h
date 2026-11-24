@@ -34,6 +34,10 @@ struct TranscribeOptions
 {
     QString inputFile;
     QString multiInputManifestFile;
+    QString transcriptionEngine = QStringLiteral("whisper");
+    QString nemotronExecutable = QStringLiteral("nemo-speech");
+    QString nemotronModelFile;
+    QString nemotronConfigFile;
     BackendDevice device = BackendDevice::Auto;
     bool diarizationEnabled = false;
     // No value means Auto. The GUI contract otherwise permits 2, 3, 4, or 5.
@@ -82,6 +86,21 @@ struct TranscribeOptions
         if (hasInputFile == hasMultiInputManifest) {
             return fail(QStringLiteral(
                 "exactly one of inputFile or multiInputManifestFile must be set"));
+        }
+        if (transcriptionEngine == QStringLiteral("nemotron")) {
+            if (nemotronExecutable.trimmed().isEmpty() || nemotronModelFile.trimmed().isEmpty()) {
+                return fail(QStringLiteral("Nemotron executable and decoder model must be set"));
+            }
+            if (speakerCount) {
+                return fail(QStringLiteral("Nemotron supports automatic speaker count only"));
+            }
+            if (errorMessage) {
+                errorMessage->clear();
+            }
+            return true;
+        }
+        if (transcriptionEngine != QStringLiteral("whisper")) {
+            return fail(QStringLiteral("unsupported transcription engine"));
         }
         if (modelDirectory.trimmed().isEmpty()) {
             return fail(QStringLiteral("modelDirectory must not be empty"));
@@ -135,13 +154,23 @@ struct TranscribeOptions
             isMultiInput() ? QStringLiteral("--multi-input-manifest")
                            : QStringLiteral("--input"),
             isMultiInput() ? multiInputManifestFile : inputFile,
-            QStringLiteral("--device"), backendDeviceArgument(device),
-            QStringLiteral("--model-dir"), modelDirectory,
-            QStringLiteral("--beams"), QString::number(beams),
-            QStringLiteral("--language"), language,
-            QStringLiteral("--window-seconds"), QString::number(windowSeconds, 'g', 15),
-            QStringLiteral("--overlap-seconds"), QString::number(overlapSeconds, 'g', 15)
+            QStringLiteral("--language"), language
         };
+        const bool nemotron = transcriptionEngine == QStringLiteral("nemotron");
+        if (nemotron) {
+            arguments << QStringLiteral("--engine") << transcriptionEngine
+                      << QStringLiteral("--nemotron-executable") << nemotronExecutable
+                      << QStringLiteral("--nemotron-model") << nemotronModelFile;
+            if (!nemotronConfigFile.isEmpty()) {
+                arguments << QStringLiteral("--nemotron-config") << nemotronConfigFile;
+            }
+        } else {
+            arguments << QStringLiteral("--device") << backendDeviceArgument(device)
+                      << QStringLiteral("--model-dir") << modelDirectory
+                      << QStringLiteral("--beams") << QString::number(beams)
+                      << QStringLiteral("--window-seconds") << QString::number(windowSeconds, 'g', 15)
+                      << QStringLiteral("--overlap-seconds") << QString::number(overlapSeconds, 'g', 15);
+        }
 
         if (!outputDirectory.isEmpty()) {
             arguments << QStringLiteral("--output-dir") << outputDirectory;
@@ -158,7 +187,7 @@ struct TranscribeOptions
         if (!initialPromptFile.isEmpty()) {
             arguments << QStringLiteral("--initial-prompt-file") << initialPromptFile;
         }
-        if (skipSilence) {
+        if (skipSilence && !nemotron) {
             arguments << QStringLiteral("--skip-silence")
                       << QStringLiteral("--silence-threshold-db")
                       << QString::number(silenceThresholdDb, 'g', 15)
@@ -173,8 +202,11 @@ struct TranscribeOptions
         if (diarizationEnabled) {
             arguments << QStringLiteral("--diarization")
                       << QStringLiteral("--num-speakers")
-                      << (speakerCount ? QString::number(*speakerCount) : QStringLiteral("auto"))
-                      << QStringLiteral("--speaker-threshold")
+                      << (speakerCount ? QString::number(*speakerCount) : QStringLiteral("auto"));
+            if (nemotron) {
+                return arguments;
+            }
+            arguments << QStringLiteral("--speaker-threshold")
                       << QString::number(speakerThreshold, 'g', 15)
                       << QStringLiteral("--diarization-min-duration-on")
                       << QString::number(minimumSpeechDuration, 'g', 15)

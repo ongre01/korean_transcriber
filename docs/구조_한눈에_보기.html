@@ -1,0 +1,954 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Korean Transcriber 구조</title>
+<meta name="description" content="Qt GUI와 Python 엔진으로 나뉜 Korean Transcriber의 구성, 실행 흐름, 통신 계약, 다중 마이크 전처리, 수정 시 함께 고칠 위치를 한 페이지로 정리한 구조 안내서">
+<style>
+:root {
+  --font: "Pretendard", "Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans KR", system-ui, sans-serif;
+  --mono: "Cascadia Code", "D2Coding", Consolas, "SFMono-Regular", monospace;
+  --bg: #f7f7f5;
+  --surface: #ffffff;
+  --surface-2: #f1f0ec;
+  --text: #1d1d1b;
+  --muted: #5f5e59;
+  --border: #dcdad3;
+  --gui: #2a64c4;      --gui-bg: #e9f0fc;
+  --bridge: #a8650a;   --bridge-bg: #fbf1e1;
+  --engine: #1c7f53;   --engine-bg: #e5f3eb;
+  --multi: #6e45bd;    --multi-bg: #efe9fa;
+  --tool: #66655f;     --tool-bg: #eeede9;
+  --warn: #b3261e;     --warn-bg: #fbeae8;
+  --code-bg: #efeee9;
+  --shadow: 0 1px 2px rgba(0,0,0,.05);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #141413; --surface: #1d1d1b; --surface-2: #262624; --text: #ecebe6; --muted: #a6a59f; --border: #3a3936;
+    --gui: #86aef2;    --gui-bg: #1b2940;
+    --bridge: #e3a74d; --bridge-bg: #33281a;
+    --engine: #62c899; --engine-bg: #172f24;
+    --multi: #b99bf0;  --multi-bg: #291f3f;
+    --tool: #b3b2ac;   --tool-bg: #2a2a28;
+    --warn: #f0857d;   --warn-bg: #3a1f1d;
+    --code-bg: #2a2a28;
+    --shadow: none;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #141413; --surface: #1d1d1b; --surface-2: #262624; --text: #ecebe6; --muted: #a6a59f; --border: #3a3936;
+  --gui: #86aef2;    --gui-bg: #1b2940;
+  --bridge: #e3a74d; --bridge-bg: #33281a;
+  --engine: #62c899; --engine-bg: #172f24;
+  --multi: #b99bf0;  --multi-bg: #291f3f;
+  --tool: #b3b2ac;   --tool-bg: #2a2a28;
+  --warn: #f0857d;   --warn-bg: #3a1f1d;
+  --code-bg: #2a2a28;
+  --shadow: none;
+}
+
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; scroll-padding-top: 16px; }
+body {
+  margin: 0; background: var(--bg); color: var(--text);
+  font-family: var(--font); font-size: 15px; line-height: 1.65;
+  -webkit-text-size-adjust: 100%;
+}
+a { color: var(--gui); text-decoration: none; }
+a:hover { text-decoration: underline; }
+code {
+  font-family: var(--mono); font-size: .86em; background: var(--code-bg);
+  padding: .1em .35em; border-radius: 4px; word-break: break-word;
+}
+h1, h2, h3 { line-height: 1.3; margin: 0; }
+h2 { font-size: 1.35rem; margin-bottom: 6px; }
+h3 { font-size: 1.02rem; margin: 22px 0 8px; }
+p { margin: 8px 0; }
+.muted { color: var(--muted); }
+.small { font-size: .86rem; }
+
+.layout {
+  max-width: 1200px; margin: 0 auto; padding: 0 16px 64px;
+  display: grid; grid-template-columns: 210px minmax(0, 1fr); gap: 32px;
+}
+header.page {
+  max-width: 1200px; margin: 0 auto; padding: 28px 16px 18px;
+  display: flex; justify-content: space-between; align-items: flex-start; gap: 16px;
+}
+header.page h1 { font-size: 1.7rem; letter-spacing: -.01em; }
+header.page .meta { margin-top: 8px; color: var(--muted); font-size: .88rem; }
+.theme-btn {
+  flex: none; border: 1px solid var(--border); background: var(--surface); color: var(--text);
+  border-radius: 8px; padding: 6px 10px; font: inherit; font-size: .85rem; cursor: pointer;
+}
+
+nav.toc { position: sticky; top: 16px; align-self: start; font-size: .9rem; }
+nav.toc ol { list-style: none; margin: 0; padding: 0; border-left: 2px solid var(--border); }
+nav.toc li a {
+  display: block; padding: 4px 12px; color: var(--muted); margin-left: -2px; border-left: 2px solid transparent;
+}
+nav.toc li a:hover { color: var(--text); text-decoration: none; }
+nav.toc li a.active { color: var(--text); border-left-color: var(--gui); font-weight: 600; }
+
+main section { padding-top: 8px; margin-bottom: 44px; }
+.lead { color: var(--muted); margin-bottom: 14px; }
+
+.card {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+  padding: 16px 18px; box-shadow: var(--shadow);
+}
+.summary-points { margin: 0; padding-left: 20px; }
+.summary-points li { margin: 6px 0; }
+
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-top: 14px; }
+.stat { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; }
+.stat .num { font-size: 1.45rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+.stat .lbl { font-size: .82rem; color: var(--muted); }
+
+.legend { display: flex; flex-wrap: wrap; gap: 8px 16px; font-size: .84rem; color: var(--muted); margin: 10px 0 0; }
+.legend span::before {
+  content: ""; display: inline-block; width: 10px; height: 10px; border-radius: 3px;
+  margin-right: 6px; vertical-align: -1px; background: var(--c);
+}
+
+.diagram { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 12px; overflow-x: auto; }
+.diagram svg { display: block; width: 100%; min-width: 720px; height: auto; }
+.diagram figcaption { font-size: .84rem; color: var(--muted); padding: 8px 4px 0; }
+
+/* SVG text and shapes */
+.svg-title { font: 600 14px var(--font); fill: var(--text); }
+.svg-sub { font: 400 11.5px var(--font); fill: var(--muted); }
+.svg-mono { font: 400 11px var(--mono); fill: var(--muted); }
+.svg-edge { font: 500 11.5px var(--font); fill: var(--text); }
+.lane-label { font: 700 13px var(--font); }
+.lane-note { font: 400 11px var(--font); fill: var(--muted); }
+.lane-gui { fill: var(--gui-bg); }
+.lane-py { fill: var(--engine-bg); }
+.box { fill: var(--surface); stroke-width: 1.2; }
+.box-gui { stroke: var(--gui); }
+.box-py { stroke: var(--engine); }
+.box-bridge { stroke: var(--bridge); fill: var(--bridge-bg); }
+.box-ext { stroke: var(--tool); stroke-dasharray: 5 4; }
+.fill-gui { fill: var(--gui); } .fill-engine { fill: var(--engine); } .fill-bridge { fill: var(--bridge); }
+.fill-muted { fill: var(--muted); } .fill-warn { fill: var(--warn); }
+.line { fill: none; stroke-width: 1.6; }
+.line-bridge { stroke: var(--bridge); }
+.line-muted { stroke: var(--muted); }
+.line-warn { stroke: var(--warn); stroke-dasharray: 5 4; }
+.node { stroke-width: 1.4; }
+.node-idle { fill: var(--surface-2); stroke: var(--tool); }
+.node-in { fill: var(--gui-bg); stroke: var(--gui); }
+.node-proc { fill: var(--bridge-bg); stroke: var(--bridge); }
+.node-ok { fill: var(--engine-bg); stroke: var(--engine); }
+.node-err { fill: var(--warn-bg); stroke: var(--warn); }
+.node-text { font: 600 13px var(--mono); fill: var(--text); }
+
+/* Pipelines */
+.pipe { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 8px 0 4px; }
+.chip {
+  font-family: var(--mono); font-size: .8rem; padding: 4px 9px; border-radius: 999px;
+  border: 1px solid var(--border); background: var(--surface); white-space: nowrap;
+}
+.chip.opt { border-style: dashed; }
+.chip.multi { background: var(--multi-bg); border-color: var(--multi); color: var(--text); }
+.chip.end { background: var(--engine-bg); border-color: var(--engine); }
+.chip.label { font-family: var(--font); font-weight: 600; background: transparent; border-color: transparent; padding-left: 0; }
+.arrow { color: var(--muted); font-size: .8rem; }
+.group {
+  display: inline-flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 6px 8px;
+  border: 1px dashed var(--multi); border-radius: 12px; background: color-mix(in srgb, var(--multi-bg) 60%, transparent);
+}
+.group-title { font-size: .76rem; color: var(--multi); font-weight: 700; width: 100%; }
+.flow-row { padding: 12px 14px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); margin-bottom: 10px; }
+.flow-row .row-head { font-weight: 700; margin-bottom: 2px; }
+
+/* Stage cards */
+.stages { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 10px; counter-reset: stage; }
+.stage {
+  background: var(--surface); border: 1px solid var(--border); border-top: 3px solid var(--multi);
+  border-radius: 10px; padding: 12px 14px; counter-increment: stage;
+}
+.stage h4 { margin: 0 0 4px; font-size: .95rem; }
+.stage h4::before { content: counter(stage) ". "; color: var(--multi); }
+.stage .state { font-family: var(--mono); font-size: .78rem; color: var(--multi); }
+.stage ul { margin: 6px 0 0; padding-left: 18px; font-size: .88rem; }
+.stage li { margin: 3px 0; }
+.stage .src { font-size: .78rem; color: var(--muted); margin-top: 6px; }
+
+/* Tables */
+.table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); }
+table { width: 100%; border-collapse: collapse; font-size: .88rem; }
+th, td { text-align: left; vertical-align: top; padding: 8px 12px; border-bottom: 1px solid var(--border); }
+th { background: var(--surface-2); font-weight: 600; white-space: nowrap; }
+tr:last-child td { border-bottom: none; }
+td.c, th.c { text-align: center; }
+td:first-child code { white-space: nowrap; word-break: normal; }
+.yes { color: var(--engine); font-weight: 700; }
+.no { color: var(--muted); }
+
+/* Directory tree */
+.tree { font-size: .9rem; }
+.tree details { margin: 0; }
+.tree summary { cursor: pointer; padding: 3px 0; list-style: none; }
+.tree summary::-webkit-details-marker { display: none; }
+.tree summary::before { content: "▸"; display: inline-block; width: 16px; color: var(--muted); transition: transform .15s; }
+.tree details[open] > summary::before { transform: rotate(90deg); }
+.tree .children { margin-left: 8px; padding-left: 14px; border-left: 1px solid var(--border); }
+.tree .leaf { padding: 3px 0 3px 16px; }
+.tree .name { font-family: var(--mono); font-size: .86rem; font-weight: 600; }
+.tree .desc { color: var(--muted); }
+.tag {
+  display: inline-block; font-size: .72rem; font-weight: 600; padding: 1px 7px; border-radius: 999px;
+  margin-left: 6px; vertical-align: 1px; border: 1px solid currentColor;
+}
+.tag.gui { color: var(--gui); } .tag.engine { color: var(--engine); } .tag.multi { color: var(--multi); }
+.tag.tool { color: var(--tool); } .tag.new { color: var(--warn); } .tag.bridge { color: var(--bridge); }
+
+.grid-2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 12px; }
+.note {
+  border-left: 3px solid var(--bridge); background: var(--bridge-bg); padding: 10px 14px; border-radius: 0 8px 8px 0;
+  font-size: .88rem; margin: 12px 0;
+}
+.note.warn { border-left-color: var(--warn); background: var(--warn-bg); }
+ol.steps { padding-left: 20px; margin: 6px 0; }
+ol.steps li { margin: 5px 0; }
+
+footer { border-top: 1px solid var(--border); padding-top: 14px; color: var(--muted); font-size: .84rem; }
+
+@media (max-width: 860px) {
+  .layout { grid-template-columns: minmax(0, 1fr); gap: 0; }
+  nav.toc {
+    position: sticky; top: 0; z-index: 5; background: var(--bg); padding: 8px 0; margin: 0 -16px 12px;
+    padding-left: 16px; padding-right: 16px; border-bottom: 1px solid var(--border); overflow-x: auto;
+  }
+  nav.toc ol { display: flex; gap: 6px; border-left: none; white-space: nowrap; }
+  nav.toc li a { border: 1px solid var(--border); border-radius: 999px; padding: 3px 10px; margin: 0; font-size: .82rem; }
+  nav.toc li a.active { border-color: var(--gui); }
+  header.page h1 { font-size: 1.35rem; }
+  html { scroll-padding-top: 56px; }
+}
+</style>
+</head>
+<body>
+
+<header class="page">
+  <div>
+    <h1>Korean Transcriber 구조 한눈에 보기</h1>
+    <div class="meta">
+      작성 기준: 2026-11-23 · <code>develop</code> 브랜치 <code>66bd597</code>와 아직 커밋되지 않은 Nemotron 변경을 포함한 작업 트리 ·
+      코드와 문서를 읽어 정리한 내용이며 앱을 실행해 확인한 것은 아님
+    </div>
+  </div>
+  <button class="theme-btn" id="themeBtn" type="button" aria-label="화면 테마 전환">테마</button>
+</header>
+
+<div class="layout">
+<nav class="toc" aria-label="목차">
+  <ol>
+    <li><a href="#summary">요약</a></li>
+    <li><a href="#architecture">시스템 구성도</a></li>
+    <li><a href="#directories">디렉토리 지도</a></li>
+    <li><a href="#flow">전사 실행 흐름</a></li>
+    <li><a href="#multimic">다중 마이크 전처리</a></li>
+    <li><a href="#engines">전사 엔진 비교</a></li>
+    <li><a href="#gui">GUI 상태와 입력</a></li>
+    <li><a href="#contract">GUI–Python 계약</a></li>
+    <li><a href="#results">결과 파일 게시</a></li>
+    <li><a href="#tools">보조 도구·R&amp;D</a></li>
+    <li><a href="#tests">테스트</a></li>
+    <li><a href="#change-guide">수정 시 함께 고칠 곳</a></li>
+    <li><a href="#docs">관련 문서</a></li>
+  </ol>
+</nav>
+
+<main>
+
+<!-- 1. 요약 -->
+<section id="summary">
+  <h2>요약</h2>
+  <div class="card">
+    <ul class="summary-points">
+      <li><strong>두 프로세스 구조.</strong> Qt/C++ GUI(<code>gui/</code>)는 녹음, 입력 선택, 상태 표시, 결과 표시를 맡습니다. 음성 디코드, 전사, 화자 분리, 다중 마이크 처리는 Python 엔진(<code>engine/</code>)이 처리합니다. 둘은 <code>QProcess</code>로 연결됩니다.</li>
+      <li><strong>통신 계약.</strong> GUI는 <code>backend_bridge.py</code>에 인자 목록을 넘겨 실행합니다. Bridge는 stdout으로 JSON Lines 이벤트를 보내고 stderr로 진단 로그를 남깁니다. 계약 문서는 <a href="../engine/backend_protocol.md"><code>engine/backend_protocol.md</code></a>입니다.</li>
+      <li><strong>입력 3종, 실행 경로 하나.</strong> 단일 파일·녹음·다중 마이크 입력은 모두 16 kHz mono 신호로 바뀐 뒤 같은 전사·저장 경로를 탑니다. 다중 입력은 먼저 정렬·채널 선택을 거쳐 <code>merged_16k_mono.wav</code> 하나로 합쳐집니다.</li>
+      <li><strong>전사 엔진 2종.</strong> 기본 엔진은 Whisper(OpenVINO GenAI, NPU/GPU/CPU)입니다. Nemotron(외부 <code>nemo-speech.exe</code>, GGUF)도 고를 수 있으며 이 기능은 아직 커밋되지 않은 작업 트리 변경입니다.</li>
+    </ul>
+  </div>
+  <div class="stats" aria-label="코드 규모">
+    <div class="stat"><div class="num">11.4k</div><div class="lbl">GUI C++ 줄 수 (테스트 제외)</div></div>
+    <div class="stat"><div class="num">4.6k</div><div class="lbl">엔진 핵심 Python 줄 수 (bridge·Whisper·VAD·화자 분리·Nemotron 등)</div></div>
+    <div class="stat"><div class="num">10.8k</div><div class="lbl">다중 마이크 줄 수 (<code>multimic/</code>와 분석 CLI)</div></div>
+    <div class="stat"><div class="num">29 · 7</div><div class="lbl">Python 테스트 파일 · Qt 테스트 프로젝트</div></div>
+  </div>
+  <p class="small muted">줄 수는 2026-11-23 작업 트리에서 <code>wc -l</code>로 센 값이며 주석과 빈 줄을 포함합니다.</p>
+</section>
+
+<!-- 2. 구성도 -->
+<section id="architecture">
+  <h2>시스템 구성도</h2>
+  <p class="lead">GUI 컴포넌트가 호출하는 Python 진입점은 세 개입니다. 파일 검사용, 다중 입력 분석용, 전사 실행용입니다.</p>
+  <figure class="diagram" style="margin:0">
+    <svg viewBox="0 0 960 632" role="img" aria-labelledby="archTitle archDesc">
+      <title id="archTitle">Qt GUI와 Python 엔진의 구성 요소 및 연결</title>
+      <desc id="archDesc">왼쪽은 Qt GUI 컴포넌트, 오른쪽은 Python 진입점입니다. AudioFileInfo는 audio_metadata.py를 호출하고, MultiAudioInputDialog는 multimic 분석 CLI를 호출합니다. BackendProcess는 backend_bridge.py를 실행해 JSON Lines 이벤트를 받습니다.</desc>
+      <defs>
+        <marker id="mBridge" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="fill-bridge"/></marker>
+        <marker id="mMuted" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="fill-muted"/></marker>
+      </defs>
+
+      <!-- lanes -->
+      <rect x="12" y="12" width="336" height="608" rx="14" class="lane-gui"/>
+      <text x="28" y="38" class="lane-label fill-gui">Qt GUI · gui/</text>
+      <text x="332" y="38" text-anchor="end" class="lane-note">C++17 · Qt Widgets · qmake</text>
+
+      <rect x="612" y="12" width="336" height="608" rx="14" class="lane-py"/>
+      <text x="628" y="38" class="lane-label fill-engine">Python 엔진 · engine/</text>
+      <text x="932" y="38" text-anchor="end" class="lane-note">engine/.venv의 python.exe</text>
+
+      <text x="480" y="38" text-anchor="middle" class="lane-label fill-bridge">프로세스 경계 (QProcess)</text>
+
+      <!-- GUI boxes -->
+      <rect x="28" y="56" width="304" height="60" rx="10" class="box box-gui"/>
+      <text x="44" y="80" class="svg-title">MainWindow</text>
+      <text x="44" y="100" class="svg-sub">AppState · 입력 모드 · 결과 표시 · 컴포넌트 연결</text>
+
+      <rect x="28" y="132" width="304" height="48" rx="10" class="box box-gui"/>
+      <text x="44" y="152" class="svg-title">AudioRecorder · WavWriter</text>
+      <text x="44" y="170" class="svg-sub">마이크 캡처 → recording_*.wav</text>
+
+      <rect x="28" y="196" width="304" height="48" rx="10" class="box box-gui"/>
+      <text x="44" y="216" class="svg-title">AudioFileInfo</text>
+      <text x="44" y="234" class="svg-sub">입력 파일 검사 (비동기)</text>
+
+      <rect x="28" y="260" width="304" height="68" rx="10" class="box box-gui"/>
+      <text x="44" y="280" class="svg-title">MultiAudioInputDialog</text>
+      <text x="44" y="298" class="svg-sub">다중 입력 · 시간 정렬 · 채널 선택 검토</text>
+      <text x="44" y="316" class="svg-mono">InputModel · SelectionModel · ManifestFile</text>
+
+      <rect x="28" y="344" width="304" height="48" rx="10" class="box box-gui"/>
+      <text x="44" y="364" class="svg-title">Settings · SettingsDialog · AppLogger</text>
+      <text x="44" y="382" class="svg-sub">QSettings 저장 · 로그 파일 · LogDialog</text>
+
+      <rect x="28" y="408" width="304" height="68" rx="10" class="box box-gui"/>
+      <text x="44" y="428" class="svg-title">BackendProcess</text>
+      <text x="44" y="446" class="svg-sub">QProcess 실행 · 이벤트 검증 (BackendEvent)</text>
+      <text x="44" y="464" class="svg-sub">오류 분류 (BackendFailure) · 취소</text>
+
+      <rect x="28" y="492" width="304" height="48" rx="10" class="box box-gui"/>
+      <text x="44" y="512" class="svg-title">TranscribeOptions</text>
+      <text x="44" y="530" class="svg-sub">설정·입력 → Bridge 인자 목록</text>
+      <path d="M180 492 V480" class="line line-muted" marker-end="url(#mMuted)"/>
+
+      <rect x="28" y="556" width="304" height="48" rx="10" class="box box-gui"/>
+      <text x="44" y="576" class="svg-title">EnginePaths</text>
+      <text x="44" y="594" class="svg-sub">engine/ 폴더 · .venv · 기본 모델 경로 탐색</text>
+
+      <!-- Python boxes -->
+      <rect x="628" y="56" width="304" height="60" rx="10" class="box box-py"/>
+      <text x="644" y="80" class="svg-title">.venv · models/</text>
+      <text x="644" y="100" class="svg-sub">setup.bat: 패키지 · Whisper · 화자 분리 모델</text>
+
+      <rect x="628" y="196" width="304" height="48" rx="10" class="box box-py"/>
+      <text x="644" y="216" class="svg-title">audio_metadata.py</text>
+      <text x="644" y="234" class="svg-sub">PyAV 디코드 → 길이·형식 JSON</text>
+
+      <rect x="628" y="260" width="304" height="68" rx="10" class="box box-py"/>
+      <text x="644" y="280" class="svg-title">multimic_alignment / _quality.py</text>
+      <text x="644" y="298" class="svg-sub">정렬, 채널 선택 계획까지만 실행</text>
+      <text x="644" y="316" class="svg-sub">stdout: JSON 1개 · multimic/ 사용</text>
+
+      <rect x="628" y="408" width="304" height="68" rx="10" class="box box-py"/>
+      <text x="644" y="428" class="svg-title">backend_bridge.py</text>
+      <text x="644" y="446" class="svg-sub">인자·매니페스트 검증 · EventWriter</text>
+      <text x="644" y="464" class="svg-sub">multimic → Whisper | Nemotron → 저장</text>
+
+      <rect x="628" y="492" width="304" height="48" rx="10" class="box box-py"/>
+      <text x="644" y="512" class="svg-title">출력 폴더</text>
+      <text x="644" y="530" class="svg-sub">TXT · SRT (다중: + 통합 WAV · 진단 JSON)</text>
+      <path d="M780 476 V488" class="line line-muted" marker-end="url(#mMuted)"/>
+
+      <rect x="628" y="556" width="304" height="48" rx="10" class="box box-ext"/>
+      <text x="644" y="576" class="svg-title">nemo-speech.exe (외부 · 선택)</text>
+      <text x="644" y="594" class="svg-sub">Nemotron 선택 시 bridge가 subprocess로 호출</text>
+      <path d="M932 452 H941 V580 H936" class="line line-muted" style="stroke-dasharray:4 3" marker-end="url(#mMuted)"/>
+
+      <!-- contract box -->
+      <rect x="364" y="318" width="232" height="80" rx="10" class="box box-bridge"/>
+      <text x="480" y="340" text-anchor="middle" class="svg-title">backend_protocol.md</text>
+      <text x="480" y="358" text-anchor="middle" class="svg-sub">Python ↔ backend_protocol.py</text>
+      <text x="480" y="374" text-anchor="middle" class="svg-sub">Qt ↔ BackendEvent.h</text>
+      <text x="480" y="390" text-anchor="middle" class="svg-sub">공용 fixture로 양쪽 테스트</text>
+
+      <!-- cross-process arrows -->
+      <path d="M336 220 H622" class="line line-bridge" marker-end="url(#mBridge)"/>
+      <text x="480" y="212" text-anchor="middle" class="svg-edge">QProcess · stdout JSON 1개</text>
+
+      <path d="M336 294 H622" class="line line-bridge" marker-end="url(#mBridge)"/>
+      <text x="480" y="286" text-anchor="middle" class="svg-edge">매니페스트 JSON → 분석 결과 JSON</text>
+
+      <path d="M336 430 H622" class="line line-bridge" marker-end="url(#mBridge)"/>
+      <text x="480" y="424" text-anchor="middle" class="svg-edge">인자 목록 · stdin "cancel"</text>
+
+      <path d="M624 454 H338" class="line line-bridge" marker-end="url(#mBridge)"/>
+      <text x="480" y="472" text-anchor="middle" class="svg-edge">stdout JSON Lines · stderr 로그</text>
+    </svg>
+    <figcaption>근거: <code>gui/input/AudioFileInfo.cpp</code>, <code>gui/input/MultiAudioInputDialog.cpp</code>(생성자에서 <code>multimic_alignment.py</code> 경로를 설정), <code>gui/backend/BackendProcess.h</code>, <code>engine/backend_protocol.md</code>.</figcaption>
+  </figure>
+  <div class="legend">
+    <span style="--c: var(--gui)">Qt GUI</span>
+    <span style="--c: var(--engine)">Python 엔진</span>
+    <span style="--c: var(--bridge)">프로세스 경계·계약</span>
+    <span style="--c: var(--tool)">외부 실행 파일 (점선)</span>
+  </div>
+
+  <h3>책임 경계 (AGENTS.md 규칙)</h3>
+  <div class="grid-2">
+    <div class="card">
+      <strong style="color:var(--gui)">Qt/C++에서 구현</strong>
+      <p class="small">UI, 마이크 녹음과 WAV 저장, 앱 상태, 설정, 로그, Python 프로세스 실행·취소, 이벤트 검증</p>
+    </div>
+    <div class="card">
+      <strong style="color:var(--engine)">Python을 재사용</strong>
+      <p class="small">음성 디코드(PyAV), Whisper/OpenVINO 전사, VAD, 화자 분리, 다중 마이크 정렬·선택·합성, Nemotron 호출. C++로 다시 구현하지 않음</p>
+    </div>
+  </div>
+</section>
+
+<!-- 3. 디렉토리 -->
+<section id="directories">
+  <h2>디렉토리 지도</h2>
+  <p class="lead">항목을 누르면 펼쳐집니다. <span class="tag new" style="margin-left:0">미커밋</span>은 현재 작업 트리에만 있고 아직 커밋되지 않은 파일입니다.</p>
+  <div class="card tree">
+    <div class="leaf"><span class="name">AGENTS.md</span> <span class="desc">— 개발 규칙. 사양서를 우선하고 Python 처리 로직은 재사용</span></div>
+    <details>
+      <summary><span class="name">docs/</span> <span class="desc">— 사양서, 사용 가이드, MM-DEV 검토 문서, 이 페이지</span></summary>
+      <div class="children">
+        <div class="leaf"><span class="name">Qt_Widgets_음성_녹음_전사_UI_개발_사양서.md</span> <span class="desc">— 1차 GUI 기준 사양</span></div>
+        <div class="leaf"><span class="name">다중_마이크_녹음_통합_전사_기능_개발_사양서.md</span> <span class="desc">— 다중 마이크 사양</span></div>
+        <div class="leaf"><span class="name">사용_및_구조_가이드.md</span> <span class="desc">— 사용 절차와 구조(텍스트판)</span></div>
+        <div class="leaf"><span class="name">Nemotron_엔진_사용_가이드.md</span><span class="tag new">미커밋</span></div>
+        <div class="leaf"><span class="name">MM-DEV-016 ~ 019_*.md</span> <span class="desc">— 수용 검증, CER/WER 평가, 겹침 발화, FGCS/CGCS 검토</span></div>
+      </div>
+    </details>
+    <details>
+      <summary><span class="name">ticket/</span> <span class="desc">— 작업 티켓</span></summary>
+      <div class="children">
+        <div class="leaf"><span class="name">TICKET-001 ~ 017</span> <span class="desc">— 1차 GUI: qmake, 상태, 이벤트 계약, bridge, 녹음, 취소, 저장, 설정, 로그, 수용 검증</span></div>
+        <div class="leaf"><span class="name">MM-DEV-001 ~ 019</span> <span class="desc">— 다중 마이크: 단계 M1~M3, BACKLOG ([GUI]/[Algorithm]/[Protocol]/[R&amp;D])</span></div>
+      </div>
+    </details>
+    <details open>
+      <summary><span class="name">gui/</span><span class="tag gui">Qt</span> <span class="desc">— <code>AudioTranscriber.pro</code>가 qmake 기준 프로젝트. <code>transcriber.pro</code>는 이를 include하는 호환 진입점</span></summary>
+      <div class="children">
+        <div class="leaf"><span class="name">main.cpp · mainwindow.{h,cpp,ui}</span> <span class="desc">— 앱 시작과 메인 창. 상태 전환, 입력 모드, 전사 시작·취소, 결과 표시 (mainwindow.cpp 2,228줄)</span></div>
+        <div class="leaf"><span class="name">app/</span> <span class="desc">— <code>AppState.h</code>(상태 enum과 동작 허용표), <code>EnginePaths.*</code>(engine 폴더 탐색, <code>EnginePaths.pri</code>가 소스 엔진 경로를 기록)</span></div>
+        <div class="leaf"><span class="name">audio/</span> <span class="desc">— <code>AudioRecorder</code>(Qt 6은 QAudioSource, Qt 5는 QAudioInput), <code>WavWriter</code>(헤더 마무리 후 commit)</span></div>
+        <div class="leaf"><span class="name">input/</span> <span class="desc">— <code>AudioFileInfo</code>(파일 검사), <code>MultiAudioInputDialog</code>·<code>MultiAudioInputModel</code>·<code>MultiAudioSelectionModel</code>(다중 입력 UI와 모델), <code>MultiAudioManifestFile</code>(임시 매니페스트 JSON)</span></div>
+        <div class="leaf"><span class="name">backend/</span> <span class="desc">— <code>BackendProcess</code>(QProcess), <code>BackendEvent.h</code>(이벤트 파싱·검증), <code>BackendFailure.h</code>(오류 분류), <code>TranscribeOptions.h</code>(인자 생성), <code>TranscriptSegment.h</code></span></div>
+        <div class="leaf"><span class="name">settings/</span> <span class="desc">— <code>Settings</code>(QSettings), <code>SettingsDialog</code></span></div>
+        <div class="leaf"><span class="name">logging/</span> <span class="desc">— <code>AppLogger</code>, <code>LogDialog</code>(도구 → 상세 로그 보기)</span></div>
+        <div class="leaf"><span class="name">resources/</span> <span class="desc">— <code>resources.qrc</code></span></div>
+        <div class="leaf"><span class="name">tests/</span> <span class="desc">— QtTest 프로젝트 7개 (<code>tst_engineselection.cpp</code><span class="tag new">미커밋</span>)</span></div>
+      </div>
+    </details>
+    <details open>
+      <summary><span class="name">engine/</span><span class="tag engine">Python</span> <span class="desc">— 음성 처리 엔진</span></summary>
+      <div class="children">
+        <div class="leaf"><span class="name">backend_bridge.py</span><span class="tag bridge">GUI 진입점</span> <span class="desc">— 인자·매니페스트 검증, 실행 순서 조율, 이벤트 출력, 취소 감시 (1,892줄)</span></div>
+        <div class="leaf"><span class="name">backend_protocol.{md,py}</span> <span class="desc">— 이벤트·인자 계약 문서와 Python 쪽 검증기</span></div>
+        <div class="leaf"><span class="name">transcribe_npu.py</span> <span class="desc">— 기존 Whisper 엔진이자 독립 CLI: 디코드, 창 단위 전사, 저장(TXT/SRT)</span></div>
+        <div class="leaf"><span class="name">vad.py · diarization.py</span> <span class="desc">— 에너지 기반 발화 구간 검출 · OpenVINO 화자 분리(segmentation, embedding, clustering)</span></div>
+        <div class="leaf"><span class="name">nemotron.py · nemotron_8gb.yaml · download_nemotron.py</span><span class="tag new">미커밋</span> <span class="desc">— Nemotron CLI 어댑터, 8GB VRAM 기본 프리셋, 원본 다운로드·검증</span></div>
+        <div class="leaf"><span class="name">result_staging.py</span> <span class="desc">— 결과를 임시 폴더에 만든 뒤 한 세트로 게시</span></div>
+        <div class="leaf"><span class="name">audio_metadata.py</span> <span class="desc">— GUI 파일 검사용 단발 CLI</span></div>
+        <details>
+          <summary><span class="name">multimic/</span><span class="tag multi">다중 마이크</span> <span class="desc">— 전처리 라이브러리 (약 9.7k줄)</span></summary>
+          <div class="children">
+            <div class="leaf"><span class="name">pipeline.py</span> <span class="desc">— 디코드, 시간축 배치, 렌더링, 진단 JSON, <code>plan_multi_audio_selection()</code>, <code>run_multi_audio_preprocessing()</code></span></div>
+            <div class="leaf"><span class="name">align.py</span> <span class="desc">— 오프셋·드리프트 추정 (3,483줄, 가장 큼)</span></div>
+            <div class="leaf"><span class="name">quality.py</span> <span class="desc">— 발화 분석과 입력별 음질 점수</span></div>
+            <div class="leaf"><span class="name">select.py</span> <span class="desc">— 구간별 채널 선택과 수동 override</span></div>
+          </div>
+        </details>
+        <div class="leaf"><span class="name">multimic_alignment.py · multimic_quality.py</span> <span class="desc">— GUI 다이얼로그가 쓰는 분석 CLI (stdout에 JSON 하나)</span></div>
+        <div class="leaf"><span class="name">evaluation/ · run_multimic_evaluation.py</span> <span class="desc">— MM-DEV-017 CER/WER 비교 평가 (앱 실행 경로 밖)</span></div>
+        <div class="leaf"><span class="name">overlap_rnd/ · run_overlap_experiment.py</span> <span class="desc">— MM-DEV-018 겹침 발화 R&amp;D (앱 실행 경로 밖)</span></div>
+        <div class="leaf"><span class="name">run_multimic_acceptance.py</span> <span class="desc">— MM-DEV-016 수용 검증 실행기</span></div>
+        <div class="leaf"><span class="name">setup.bat · requirements.txt · download_models.py</span> <span class="desc">— .venv 생성, 패키지 설치, Whisper INT8/FP16과 화자 분리 모델 준비</span></div>
+        <div class="leaf"><span class="name">run*.bat · run_compare.py</span> <span class="desc">— 기존 <code>transcribe_npu.py</code> CLI 실행 (INT8/FP16, 화자 분리, 비교)</span></div>
+        <div class="leaf"><span class="name">hotwords.txt · initial_prompt.txt</span> <span class="desc">— 엔진 기본 문맥 파일</span></div>
+        <div class="leaf"><span class="name">models/</span> <span class="desc">— <code>whisper-large-v3-turbo-int8</code>, <code>-fp16</code>, <code>diarization</code>. git에는 README.txt만 있음</span></div>
+        <div class="leaf"><span class="name">tests/</span> <span class="desc">— unittest 29개 파일, <code>fixtures/backend_protocol/*.jsonl</code>(Qt 테스트와 공용)</span></div>
+      </div>
+    </details>
+    <div class="leaf"><span class="name">artifacts/ · sample/</span> <span class="desc">— 검증 산출물과 샘플 녹음. <code>.gitignore</code> 대상(녹음과 전사본 포함 가능)</span></div>
+    <div class="leaf"><span class="name">debug/ · release/</span> <span class="desc">— 빌드 출력 폴더 (현재 비어 있음)</span></div>
+  </div>
+</section>
+
+<!-- 4. 실행 흐름 -->
+<section id="flow">
+  <h2>전사 실행 흐름</h2>
+  <p class="lead">아래 칩은 Bridge가 보내는 <code>state</code> 이벤트 값이고 실제 전송 순서대로 놓았습니다. 점선 칩은 옵션을 켰을 때만 나옵니다.</p>
+
+  <div class="flow-row">
+    <div class="row-head">단일 입력 (기존 파일 또는 녹음 WAV) <span class="muted small">— <code>--input PATH</code></span></div>
+    <div class="pipe">
+      <span class="chip">preparing</span><span class="arrow">→</span>
+      <span class="chip">decoding_audio</span><span class="arrow">→</span>
+      <span class="chip opt">detecting_speech</span><span class="arrow">→</span>
+      <span class="chip">loading_model</span><span class="arrow">→</span>
+      <span class="chip">transcribing</span><span class="arrow">→</span>
+      <span class="chip opt">diarization</span><span class="arrow">→</span>
+      <span class="chip">saving_result</span><span class="arrow">→</span>
+      <span class="chip end">completed</span>
+    </div>
+    <p class="small muted">점선: <code>detecting_speech</code>는 무음 건너뛰기가 켜졌을 때, <code>diarization</code>은 <code>--diarization</code>일 때. 함수 경로: <code>run_bridge → _run_single_input → _transcribe_and_save</code></p>
+  </div>
+
+  <div class="flow-row">
+    <div class="row-head">다중 입력 (마이크 여러 개) <span class="muted small">— <code>--multi-input-manifest JSON</code></span></div>
+    <div class="pipe">
+      <span class="chip">preparing</span><span class="arrow">→</span>
+      <span class="group">
+        <span class="group-title">multimic.run_multi_audio_preprocessing() — 각 단계 progress=null</span>
+        <span class="chip multi">decoding_audio</span><span class="arrow">→</span>
+        <span class="chip multi">aligning_audio</span><span class="arrow">→</span>
+        <span class="chip multi">detecting_speech</span><span class="arrow">→</span>
+        <span class="chip multi">assessing_channels</span><span class="arrow">→</span>
+        <span class="chip multi">selecting_channels</span><span class="arrow">→</span>
+        <span class="chip multi">rendering_merged_audio</span>
+      </span>
+      <span class="arrow">→</span>
+      <span class="chip label">통합 WAV를 다시 디코드한 뒤 단일 입력과 같은 경로</span>
+      <span class="arrow">→</span>
+      <span class="chip end">completed (+3개 경로)</span>
+    </div>
+    <p class="small muted">모델·장치·프롬프트 확인은 긴 전처리 전에 <code>preparing</code>에서 끝냅니다. 통합 WAV를 디코드한 길이가 기준 시간축과 다르면 오류로 중단합니다. 함수 경로: <code>run_bridge → _run_multi_input → _run_multi_audio_preprocessing → _transcribe_and_save</code></p>
+  </div>
+
+  <h3>엔진 분기 (<code>_transcribe_and_save</code> 안)</h3>
+  <div class="grid-2">
+    <div class="card">
+      <strong>Whisper (기본)</strong> <span class="muted small">— <code>_transcribe_whisper</code></span>
+      <div class="pipe">
+        <span class="chip opt">detecting_speech (VAD)</span><span class="arrow">→</span>
+        <span class="chip">loading_model</span><span class="arrow">→</span>
+        <span class="chip">transcribing</span><span class="arrow">→</span>
+        <span class="chip opt">diarization</span>
+      </div>
+      <p class="small">무음만 있는 입력은 경고를 보내고 모델 로드와 화자 분리를 건너뜁니다. VAD를 쓰면 발화 구간별로 따로 전사하고 원래 시간축을 유지합니다.</p>
+    </div>
+    <div class="card">
+      <strong>Nemotron</strong><span class="tag new">미커밋</span> <span class="muted small">— <code>_transcribe_nemotron</code></span>
+      <div class="pipe">
+        <span class="chip">loading_model</span><span class="arrow">→</span>
+        <span class="chip">transcribing</span>
+      </div>
+      <p class="small">별도의 VAD나 <code>diarization</code> 상태가 없습니다. 화자 분리는 네이티브 CLI에 내장되어 있습니다. 요청 길이 상한(기본 29분)을 넘으면 균등 구간으로 나눠 순서대로 처리하며, 진행률은 구간이 끝날 때마다 갱신됩니다.</p>
+    </div>
+  </div>
+  <div class="note">세그먼트 이벤트는 화자 분리가 <em>끝난 뒤에만</em> 나갑니다. 화자가 없는 임시 세그먼트를 먼저 보냈다가 다시 보내는 일은 없습니다(<code>_transcribe_and_save</code> 주석에 명시된 계약).</div>
+</section>
+
+<!-- 5. 다중 마이크 -->
+<section id="multimic">
+  <h2>다중 마이크 전처리</h2>
+  <p class="lead">입력 하나를 기준으로 삼아 나머지를 그 시간축에 맞추고, 구간마다 음질이 가장 좋은 마이크를 골라 16 kHz mono WAV 하나로 이어 붙입니다. 어떤 입력도 단독으로 전사하지 않습니다. 아래 수치는 코드의 기본 설정값입니다.</p>
+  <div class="stages">
+    <div class="stage">
+      <h4>디코드·준비</h4>
+      <div class="state">decoding_audio</div>
+      <ul>
+        <li>입력마다 16 kHz mono 분석 신호와 유효 구간 마스크를 만듦</li>
+        <li>파일 지문(SHA) 기록, 입력별 실패를 모아서 한 번에 보고</li>
+        <li>입력 2개 이상. GUI 권장 상한은 8개이고 백엔드에는 상한이 없음</li>
+      </ul>
+      <div class="src">pipeline.py · prepare_multi_audio_inputs</div>
+    </div>
+    <div class="stage">
+      <h4>시간 정렬</h4>
+      <div class="state">aligning_audio</div>
+      <ul>
+        <li>기준 입력의 창(0.75 s, hop 0.25 s, 최대 8개)마다 NCC와 GCC-PHAT로 상관 피크를 찾음</li>
+        <li>±20 ms 안에서 합의한 관측치로 affine 적합 → 오프셋과 드리프트(ppm)</li>
+        <li>탐색 범위는 ±2 s이고, 실패한 입력만 ±30 s로 한 번 더 탐색</li>
+        <li>수동 오프셋이 있으면 자동 추정을 대신함(드리프트 보정 없음)</li>
+      </ul>
+      <div class="src">align.py · AlignmentConfig, apply_manual_alignment_offsets</div>
+    </div>
+    <div class="stage">
+      <h4>발화 검출</h4>
+      <div class="state">detecting_speech</div>
+      <ul>
+        <li>정렬된 모든 입력에 VAD를 실행</li>
+        <li>정렬 후 신호를 기준 시간축으로 warp한 다음 분석</li>
+      </ul>
+      <div class="src">quality.py · analyze_aligned_speech</div>
+    </div>
+    <div class="stage">
+      <h4>음질 평가</h4>
+      <div class="state">assessing_channels</div>
+      <ul>
+        <li>30 ms 프레임 단위로 SNR, 클리핑, 무효 구간, 내부 공백, 잡음을 측정</li>
+        <li>가중치: 유효성 0.15 · 발화 0.30 · SNR 0.55 (0~30 dB 정규화)</li>
+        <li>패널티: 클리핑 0.65 · 무효 0.35 · 공백 0.25 · 잡음 0.35</li>
+      </ul>
+      <div class="src">quality.py · QualityScoringConfig, score_aligned_quality</div>
+    </div>
+    <div class="stage">
+      <h4>채널 선택</h4>
+      <div class="state">selecting_channels</div>
+      <ul>
+        <li>창 3 s, hop 1 s (GUI가 매니페스트에 넣는 값)</li>
+        <li>히스테리시스 0.05, 최소 유지 2.5 s로 잦은 전환을 막음</li>
+        <li>전환 경계는 ±0.5 s 안의 발화 구간 경계로 이동</li>
+        <li>사용자 override는 해당 구간에만 적용하고 다른 구간의 자동 선택은 바꾸지 않음</li>
+      </ul>
+      <div class="src">select.py · ChannelSelectionConfig, select_channels</div>
+    </div>
+    <div class="stage">
+      <h4>합성·진단 출력</h4>
+      <div class="state">rendering_merged_audio</div>
+      <ul>
+        <li>기본은 하드 컷. 위치가 다른 마이크를 섞으면 위상 차이로 comb filtering이 생길 수 있기 때문</li>
+        <li>crossfade는 옵션이며 경계에서 샘플 정렬이 확인될 때만 적용</li>
+        <li>출력: <code>merged_16k_mono.wav</code>, <code>alignment.json</code>, <code>channel_selection.json</code></li>
+      </ul>
+      <div class="src">pipeline.py · MergedAudioConfig, write_multi_audio_outputs</div>
+    </div>
+  </div>
+  <div class="note">GUI 다이얼로그의 "음질 분석"(<code>multimic_quality.py</code>)과 실제 전사는 같은 함수 <code>plan_multi_audio_selection()</code>으로 선택 계획을 만듭니다. 따라서 같은 매니페스트라면 사용자가 검토한 계획과 전사에 쓰이는 계획이 같습니다(<code>backend_protocol.md</code> "다중 입력 실행 경로").</div>
+
+  <h3>GUI에서 다중 입력을 준비하는 순서</h3>
+  <ol class="steps">
+    <li><strong>파일 추가</strong>: <code>MultiAudioInputDialog::chooseFiles</code>를 실행하면 파일마다 <code>AudioFileInfo</code>가 <code>audio_metadata.py</code>로 검사합니다.</li>
+    <li><strong>기준 입력 지정</strong>: 기준 콤보로 고르며 매니페스트의 <code>reference_index</code>가 됩니다.</li>
+    <li><strong>정렬 분석</strong>: <code>startAlignmentAnalysis</code>가 <code>multimic_alignment.py</code>를 실행합니다. 실패한 입력에는 <code>editManualOffset</code>으로 수동 오프셋을 넣을 수 있습니다.</li>
+    <li><strong>음질 분석과 채널 검토</strong>: <code>startQualityAnalysis</code>가 <code>multimic_quality.py</code>를 실행합니다. 결과는 5 s 격자의 검토 행으로 표시되고, 행 단위 override를 적용할 수 있습니다.</li>
+    <li><strong>전사 시작</strong>: <code>MultiAudioManifestFile</code>이 임시 매니페스트 JSON을 쓰고, <code>BackendProcess</code>가 <code>--multi-input-manifest</code>로 Bridge를 실행합니다.</li>
+  </ol>
+</section>
+
+<!-- 6. 엔진 비교 -->
+<section id="engines">
+  <h2>전사 엔진 비교</h2>
+  <p class="lead">GUI는 처리 옵션에서 엔진을 고르고, <code>TranscribeOptions</code>가 <code>--engine nemotron</code> 등의 인자로 바꿉니다. 지원하지 않는 엔진 이름은 <code>isValid()</code>에서 거부합니다.</p>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>항목</th><th>Whisper (기본)</th><th>Nemotron <span class="tag new">미커밋</span></th></tr></thead>
+      <tbody>
+        <tr><td>실행 방식</td><td>Python 프로세스 안에서 <code>openvino_genai.WhisperPipeline</code></td><td>외부 <code>nemo-speech.exe</code>를 subprocess로 호출 (<code>--format json</code>)</td></tr>
+        <tr><td>모델</td><td><code>engine/models/whisper-large-v3-turbo-int8</code>(기본), FP16</td><td>IQ4_NL decoder GGUF와 대응하는 Encoder-F16 GGUF (같은 폴더)</td></tr>
+        <tr><td>장치</td><td><code>AUTO</code>(NPU → GPU → CPU 순), <code>NPU</code>/<code>GPU</code>/<code>CPU</code></td><td>YAML로 지정. 기본 <code>nemotron_8gb.yaml</code>은 GPU에 MoE expert CPU 오프로딩(<code>n_cpu_moe: 53</code>)</td></tr>
+        <tr><td>긴 입력</td><td>창 120 s, overlap 4 s로 나눠 전사</td><td>요청당 최대 29분(기본 YAML) 또는 60분(사용자 YAML). 넘으면 균등 분할하고 경계에 겹침은 없음</td></tr>
+        <tr><td>무음 건너뛰기</td><td>에너지 기반 VAD (GUI 기본 켜짐, −45 dBFS)</td><td>사용 안 함</td></tr>
+        <tr><td>화자 분리</td><td><code>diarization.py</code>: segmentation은 NPU(실패 시 CPU), embedding과 clustering은 CPU. 화자 수 Auto/2~5</td><td>CLI 내장. 화자 수는 Auto만, 요청당 최대 8명. 분할된 구간 사이에서는 같은 사람을 연결하지 않음</td></tr>
+        <tr><td>hotwords·초기 프롬프트</td><td>Whisper <code>initial_prompt</code>로 전달</td><td>지시문 문맥으로 전달. Whisper와 같은 효과는 보장되지 않음</td></tr>
+        <tr><td>검증 상태</td><td>커밋된 기존 엔진 (TICKET-017 수용 검증 대상)</td><td>15초 한국어 샘플의 실행 호환성만 확인(2026-11-05). 61분 녹음의 품질과 속도는 측정 전</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="small muted">근거: <code>engine/transcribe_npu.py:422-442</code>, <code>engine/backend_bridge.py:37-39, 1102-1207</code>, <code>gui/backend/TranscribeOptions.h</code>, <a href="Nemotron_엔진_사용_가이드.md">Nemotron 엔진 사용 가이드</a>.</p>
+</section>
+
+<!-- 7. GUI -->
+<section id="gui">
+  <h2>GUI 상태와 입력 모드</h2>
+  <p class="lead">메인 창은 6개 상태 중 하나에 있고, 상태와 "유효한 입력이 있는지"에 따라 버튼 활성화가 정해집니다(<code>gui/app/AppState.h</code>의 <code>appActionPolicy</code>).</p>
+  <figure class="diagram" style="margin:0">
+    <svg viewBox="0 0 940 268" role="img" aria-labelledby="stTitle stDesc" style="min-width:640px">
+      <title id="stTitle">AppState 상태 전이</title>
+      <desc id="stDesc">Idle에서 파일을 선택하면 InputReady, 녹음을 시작하면 Recording이 됩니다. 녹음이 끝나면 InputReady입니다. 전사를 시작하면 Processing이 되고, 결과에 따라 Completed 또는 Error가 됩니다. 취소하면 InputReady 또는 Idle로 돌아갑니다.</desc>
+      <defs>
+        <marker id="sMuted" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="fill-muted"/></marker>
+        <marker id="sWarn" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="fill-warn"/></marker>
+      </defs>
+      <!-- edges -->
+      <path d="M156 132 H392" class="line line-muted" marker-end="url(#sMuted)"/>
+      <text x="274" y="123" text-anchor="middle" class="svg-edge">파일 선택 · 검사 성공</text>
+      <path d="M86 154 Q86 228 212 228" class="line line-muted" marker-end="url(#sMuted)"/>
+      <text x="150" y="252" text-anchor="middle" class="svg-edge">녹음 시작</text>
+      <path d="M356 228 Q466 228 466 158" class="line line-muted" marker-end="url(#sMuted)"/>
+      <text x="478" y="216" class="svg-edge">녹음 완료 (WAV 저장)</text>
+      <path d="M536 132 H612" class="line line-muted" marker-end="url(#sMuted)"/>
+      <text x="574" y="123" text-anchor="middle" class="svg-edge">전사 시작</text>
+      <path d="M756 122 Q776 62 792 62" class="line line-muted" marker-end="url(#sMuted)"/>
+      <path d="M756 142 Q776 206 792 206" class="line line-muted" marker-end="url(#sMuted)"/>
+      <path d="M686 110 C686 58 466 58 466 106" class="line line-warn" marker-end="url(#sWarn)"/>
+      <text x="576" y="60" text-anchor="middle" class="svg-edge" style="fill:var(--warn)">취소 → 입력 있으면 InputReady, 없으면 Idle</text>
+      <!-- nodes -->
+      <rect x="16" y="110" width="140" height="44" rx="22" class="node node-idle"/>
+      <text x="86" y="137" text-anchor="middle" class="node-text">Idle</text>
+      <rect x="216" y="206" width="140" height="44" rx="22" class="node node-in"/>
+      <text x="286" y="233" text-anchor="middle" class="node-text">Recording</text>
+      <rect x="396" y="110" width="140" height="44" rx="22" class="node node-in"/>
+      <text x="466" y="137" text-anchor="middle" class="node-text">InputReady</text>
+      <rect x="616" y="110" width="140" height="44" rx="22" class="node node-proc"/>
+      <text x="686" y="137" text-anchor="middle" class="node-text">Processing</text>
+      <rect x="796" y="40" width="130" height="44" rx="22" class="node node-ok"/>
+      <text x="861" y="67" text-anchor="middle" class="node-text">Completed</text>
+      <rect x="796" y="184" width="130" height="44" rx="22" class="node node-err"/>
+      <text x="861" y="211" text-anchor="middle" class="node-text">Error</text>
+    </svg>
+    <figcaption>Completed와 Error 상태에서도 새 녹음이나 파일 선택이 가능하고, 입력이 유효하면 다시 전사할 수 있습니다.</figcaption>
+  </figure>
+
+  <h3>상태별 허용 동작</h3>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>상태</th><th class="c">녹음 시작</th><th class="c">파일 선택</th><th class="c">녹음 중지</th><th class="c">전사 시작</th><th class="c">취소</th></tr></thead>
+      <tbody>
+        <tr><td><code>Idle</code></td><td class="c yes">✓</td><td class="c yes">✓</td><td class="c no">–</td><td class="c no">–</td><td class="c no">–</td></tr>
+        <tr><td><code>Recording</code></td><td class="c no">–</td><td class="c no">–</td><td class="c yes">✓</td><td class="c no">–</td><td class="c no">–</td></tr>
+        <tr><td><code>InputReady</code></td><td class="c yes">✓</td><td class="c yes">✓</td><td class="c no">–</td><td class="c">유효 입력 시</td><td class="c no">–</td></tr>
+        <tr><td><code>Processing</code></td><td class="c no">–</td><td class="c no">–</td><td class="c no">–</td><td class="c no">–</td><td class="c yes">✓</td></tr>
+        <tr><td><code>Completed</code> / <code>Error</code></td><td class="c yes">✓</td><td class="c yes">✓</td><td class="c no">–</td><td class="c">유효 입력 시</td><td class="c no">–</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>입력 모드 (<code>InputMode</code>, mainwindow.h)</h3>
+  <div class="grid-2">
+    <div class="card"><strong><code>SingleFile</code></strong><p class="small">wav, mp3, m4a, aac, flac, ogg, mp4 확장자를 먼저 걸러 내고 <code>audio_metadata.py</code>로 검사합니다. 실제로 디코드할 수 있는지는 Python이 최종 판단합니다.</p></div>
+    <div class="card"><strong><code>Recording</code></strong><p class="small">녹음 파일은 <code>AppDataLocation/recordings/recording_YYYYMMDD_HHMMSS.wav</code>에 저장됩니다. WAV 헤더 마무리와 commit이 성공해야 완료로 처리됩니다.</p></div>
+    <div class="card"><strong><code>MultiAudioFiles</code></strong><p class="small">다이얼로그에서 정렬이 해결되어야 전사 시작이 허용됩니다(<code>hasResolvedMultiAudioAlignment</code>). 해결은 자동 정렬이나 수동 오프셋 중 하나로 됩니다.</p></div>
+  </div>
+</section>
+
+<!-- 8. 계약 -->
+<section id="contract">
+  <h2>GUI–Python 계약</h2>
+  <p class="lead">계약의 기준 문서는 <a href="../engine/backend_protocol.md"><code>engine/backend_protocol.md</code></a>(버전 1)입니다. GUI와 Bridge 양쪽이 스트림을 검증합니다.</p>
+  <div class="grid-2">
+    <div class="card">
+      <strong>스트림 규칙</strong>
+      <ul class="small" style="padding-left:18px;margin:6px 0 0">
+        <li>stdout: UTF-8(BOM 없음) JSON 객체를 한 줄에 하나씩 쓰고 매번 flush</li>
+        <li>stderr: 로그, traceback, 네이티브 라이브러리 출력. Bridge가 fd 1을 stderr로 돌려 섞이지 않게 함</li>
+        <li>성공하면 <code>completed</code>가 정확히 1회 마지막에 오고 종료 코드는 0</li>
+        <li>실패하면 <code>error</code>가 정확히 1회 마지막에 오고 종료 코드는 0이 아님</li>
+        <li>알 수 없는 type이나 state, 필수 필드 누락, 종료 이벤트 뒤의 데이터는 프로토콜 오류</li>
+      </ul>
+    </div>
+    <div class="card">
+      <strong>인자 전달</strong>
+      <ul class="small" style="padding-left:18px;margin:6px 0 0">
+        <li><code>QProcess::setProgram()</code>과 <code>setArguments()</code>로 개별 전달하며 shell 문자열을 조합하지 않음</li>
+        <li><code>--input</code>과 <code>--multi-input-manifest</code> 중 하나만 필수</li>
+        <li>Whisper 쪽 인자: <code>--device</code>, <code>--model-dir</code>, <code>--window-seconds</code> 등</li>
+        <li>Nemotron 쪽 인자: <code>--engine nemotron</code>, <code>--nemotron-executable</code>, <code>--nemotron-model</code>, <code>--nemotron-config</code></li>
+      </ul>
+    </div>
+  </div>
+
+  <h3>이벤트</h3>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>type</th><th>필수 필드</th><th>의미</th></tr></thead>
+      <tbody>
+        <tr><td><code>state</code></td><td><code>value</code></td><td>단계 표시. 공통 7개와 다중 전용 4개(<code>aligning_audio</code>, <code>assessing_channels</code>, <code>selecting_channels</code>, <code>rendering_merged_audio</code>). 수신기는 순서를 검증하지 않음</td></tr>
+        <tr><td><code>progress</code></td><td><code>value</code>: 0~100 또는 <code>null</code></td><td>전체 진행률. <code>null</code>이면 GUI는 진행 바를 indeterminate로 표시. <code>processed_seconds</code>와 <code>total_seconds</code>는 함께 보냄. 100은 <code>saving_result</code> 뒤에만</td></tr>
+        <tr><td><code>segment</code></td><td><code>start</code>, <code>end</code>, <code>speaker</code>, <code>text</code></td><td>확정된 전사 문장. 화자 번호는 1부터 시작(Python 내부값은 0부터이므로 Bridge가 +1), 없으면 <code>null</code></td></tr>
+        <tr><td><code>warning</code></td><td><code>message</code></td><td>실행을 멈추지 않는 사용자용 경고</td></tr>
+        <tr><td><code>completed</code></td><td><code>text_file</code>, <code>srt_file</code></td><td>절대 경로. 다중 입력이면 <code>merged_audio_file</code>, <code>alignment_file</code>, <code>selection_file</code> 세 필드가 모두 함께 추가됨(일부만 있으면 오류)</td></tr>
+        <tr><td><code>error</code></td><td><code>message</code></td><td>짧은 오류 메시지. GUI는 원문 대신 접두어로 분류한 안내를 보여 주고 원문은 로그에 남김</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>종료 코드</h3>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>코드</th><th>의미</th></tr></thead>
+      <tbody>
+        <tr><td><code>0</code></td><td>성공 (<code>completed</code>)</td></tr>
+        <tr><td><code>1</code></td><td>실행 중 오류 (디코드, 정렬, 모델 로드, 전사, 저장 등)</td></tr>
+        <tr><td><code>2</code></td><td>인자 오류, 입력 오류, 기준 시간축을 벗어난 override</td></tr>
+        <tr><td><code>3</code></td><td>모델 경로 오류</td></tr>
+        <tr><td><code>130</code></td><td>사용자 취소</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>취소 순서</h3>
+  <ol class="steps">
+    <li>GUI의 <code>BackendProcess::cancel()</code>이 stdin에 <code>cancel</code> 한 줄을 쓰고 <code>terminate()</code>를 호출합니다. Windows에서는 <code>terminate()</code>가 콘솔 프로세스에 전달되지 않으므로 stdin 경로가 실제 취소 수단입니다.</li>
+    <li>Bridge의 <code>CancellationWatcher</code>가 0.1 s 간격으로 stdin을 확인하다가 cancel을 받으면 주 스레드에 <code>KeyboardInterrupt</code>를 보냅니다. 그 뒤 staging을 정리하고 <code>error</code>와 함께 코드 130으로 끝납니다.</li>
+    <li>네이티브 추론 때문에 2 s 안에 Python으로 돌아오지 못하면, 감시 스레드가 staging을 직접 지우고 종료 이벤트 없이 130으로 끝냅니다.</li>
+    <li>GUI는 유예 시간 3 s가 지나면 <code>kill()</code>합니다. 취소를 요청한 뒤 받은 이벤트는 무시하고 결과를 취소로 처리합니다.</li>
+  </ol>
+
+  <h3>오류 분류 (<code>gui/backend/BackendFailure.h</code>)</h3>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>분류</th><th><code>error.message</code> 접두어 예</th></tr></thead>
+      <tbody>
+        <tr><td>동기화 실패</td><td><code>Time alignment is unresolved for</code>, <code>Multi-input time alignment failed</code></td></tr>
+        <tr><td>디코드 실패</td><td><code>Multi-input audio could not be prepared.</code>, <code>Audio decoding failed</code></td></tr>
+        <tr><td>변환 실패 (다중 전처리)</td><td><code>Channel quality analysis failed</code>, <code>Channel selection failed</code>, <code>Merged audio could not be created</code> 등</td></tr>
+        <tr><td>모델 오류</td><td><code>Model directory not found</code>, <code>Whisper model could not be loaded</code>, <code>Initial prompt validation failed</code></td></tr>
+        <tr><td>결과 저장 실패</td><td><code>Result files could not be saved</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- 9. 결과 게시 -->
+<section id="results">
+  <h2>결과 파일 게시</h2>
+  <p class="lead">실패하거나 취소된 작업은 최종 이름의 파일을 만들거나 덮어쓰지 않습니다. 이 동작을 <code>engine/result_staging.py</code>의 <code>ResultStaging</code>이 보장합니다.</p>
+  <div class="pipe">
+    <span class="chip">출력 폴더에 <code>.transcribe_XXXXXXXX.partial</code> 또는 <code>.multimic_XXXXXXXX.partial</code> 생성 + <code>.owner.lock</code></span><span class="arrow">→</span>
+    <span class="chip">모든 결과 파일을 그 안에서 완성</span><span class="arrow">→</span>
+    <span class="chip">정해진 순서로 최종 이름으로 이동</span><span class="arrow">→</span>
+    <span class="chip end">completed 이벤트</span>
+  </div>
+  <ul class="small" style="padding-left:18px">
+    <li>게시 순서: <code>alignment.json</code> → <code>channel_selection.json</code> → <code>merged_16k_mono.wav</code> → SRT → TXT. 사용자가 여는 TXT가 마지막입니다.</li>
+    <li>이동 중에 실패하면 이미 옮긴 파일을 되돌리고 덮어쓴 이전 파일을 복원합니다.</li>
+    <li>강제 종료로 남은 staging 폴더는 잠금이 풀려 있으므로, 같은 출력 폴더를 쓰는 다음 실행이 지웁니다.</li>
+    <li>결과 이름은 <code>&lt;입력 stem&gt;&lt;suffix&gt;.txt/.srt</code>입니다. 다중 입력이면 <code>merged_16k_mono&lt;suffix&gt;.txt/.srt</code>입니다.</li>
+  </ul>
+</section>
+
+<!-- 10. 도구 -->
+<section id="tools">
+  <h2>보조 도구와 R&amp;D 실행기</h2>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>파일</th><th>호출 주체</th><th>역할</th></tr></thead>
+      <tbody>
+        <tr><td><code>audio_metadata.py</code></td><td>GUI (<code>AudioFileInfo</code>)</td><td>파일 검사 결과를 stdout에 JSON 하나로 출력</td></tr>
+        <tr><td><code>multimic_alignment.py</code></td><td>GUI (다중 입력 다이얼로그)</td><td>매니페스트를 받아 준비와 자동 정렬만 실행</td></tr>
+        <tr><td><code>multimic_quality.py</code></td><td>GUI (다중 입력 다이얼로그)</td><td>정렬, 음질, 채널 선택 계획까지 실행하고 검토 행(5 s 격자)을 출력. 오디오 합성과 파일 쓰기는 하지 않음</td></tr>
+        <tr><td><code>run_multimic_acceptance.py</code></td><td>개발자</td><td>MM-DEV-016 다중 마이크 수용 검증 (unittest 기반, 오프셋과 드리프트 측정)</td></tr>
+        <tr><td><code>run_multimic_evaluation.py</code> + <code>evaluation/</code></td><td>개발자</td><td>MM-DEV-017: 단일 파일과 다중 입력 조건을 같은 설정으로 실행해 CER/WER 비교</td></tr>
+        <tr><td><code>run_overlap_experiment.py</code> + <code>overlap_rnd/</code></td><td>개발자</td><td>MM-DEV-018: 빔포밍, 음원 분리, 채널별 전사 병합을 V1 채널 선택과 비교</td></tr>
+        <tr><td><code>setup.bat</code> · <code>download_models.py</code></td><td>개발자·사용자</td><td>.venv 생성, 패키지 설치, OpenVINO 장치 확인, Whisper와 화자 분리 모델 준비</td></tr>
+        <tr><td><code>download_nemotron.py</code> <span class="tag new">미커밋</span></td><td>개발자·사용자</td><td>Nemotron BF16 원본(약 67.5 GB)을 고정 revision으로 내려받고 SHA-256 검증. GGUF 변환은 하지 않음</td></tr>
+        <tr><td><code>run*.bat</code> · <code>run_compare.py</code></td><td>개발자</td><td>GUI 없이 기존 <code>transcribe_npu.py</code> CLI 실행 (INT8/FP16, 화자 분리, 정밀도 비교)</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- 11. 테스트 -->
+<section id="tests">
+  <h2>테스트</h2>
+  <div class="grid-2">
+    <div class="card">
+      <strong>Python — <code>engine/tests/</code> (unittest, 29개 파일)</strong>
+      <ul class="small" style="padding-left:18px;margin:6px 0 0">
+        <li>Bridge: <code>test_backend_bridge_*</code>(cancellation, dependencies, multi_input, multi_pipeline, protocol, silence, warning, nemotron)</li>
+        <li>계약: <code>test_backend_protocol*.py</code></li>
+        <li>다중 마이크: <code>test_multimic_*</code>(align, quality, select, render, pipeline, acceptance, CLI)</li>
+        <li>기타: evaluation, overlap_rnd, result_staging, vad, audio_metadata, initial_prompt_safety, transcript_repetition, nemotron, download_nemotron</li>
+      </ul>
+    </div>
+    <div class="card">
+      <strong>Qt — <code>gui/tests/</code> (QtTest, .pro 7개)</strong>
+      <ul class="small" style="padding-left:18px;margin:6px 0 0">
+        <li><code>backend_process</code>, <code>backend_protocol</code>, <code>engine_paths</code></li>
+        <li><code>multi_audio_input_dialog</code>, <code>multi_audio_input_model</code>, <code>multi_audio_selection_model</code></li>
+        <li><code>engine_selection</code> <span class="tag new">미커밋</span></li>
+      </ul>
+    </div>
+  </div>
+  <div class="note">공용 fixture <code>engine/tests/fixtures/backend_protocol/*.jsonl</code>은 Python과 Qt 계약 테스트가 함께 읽습니다. Python 테스트는 문서의 상태 표, <code>BackendEvent.h</code>의 상태·완료 필드 목록, <code>backend_protocol.py</code>가 서로 일치하는지도 검사합니다.</div>
+</section>
+
+<!-- 12. 변경 가이드 -->
+<section id="change-guide">
+  <h2>수정 시 함께 고칠 곳</h2>
+  <p class="lead">한쪽만 고치면 계약 테스트가 실패하거나 실행 중에 프로토콜 오류가 나는 조합들입니다.</p>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>바꾸려는 것</th><th>함께 수정할 위치</th></tr></thead>
+      <tbody>
+        <tr><td>이벤트 type, state 값, completed 필드</td><td><code>engine/backend_protocol.md</code> · <code>engine/backend_protocol.py</code> · <code>gui/backend/BackendEvent.h</code> · <code>engine/tests/fixtures/backend_protocol/</code> · <code>test_backend_protocol.py</code> · <code>tst_backend_protocol.cpp</code></td></tr>
+        <tr><td>오류 메시지 접두어</td><td><code>backend_protocol.md</code>의 "실패 분류" 표 · <code>gui/backend/BackendFailure.h</code></td></tr>
+        <tr><td>Bridge 인자</td><td><code>backend_bridge.build_parser()</code> · <code>TranscribeOptions.h</code>(인자 생성과 <code>isValid</code>) · <code>Settings</code>/<code>SettingsDialog</code> · <code>backend_protocol.md</code> 인자 표</td></tr>
+        <tr><td>다중 입력 매니페스트 스키마</td><td><code>backend_bridge.validate_multi_input_manifest()</code> · <code>MultiAudioInputDialog</code>(매니페스트 작성) · <code>multimic_alignment.py</code>/<code>multimic_quality.py</code>(같은 검증기 사용) · 계약 문서</td></tr>
+        <tr><td>전사 엔진 추가</td><td><code>TranscribeOptions::isValid</code>(허용 엔진 목록) · <code>_prepare_transcription</code>/<code>_transcribe_and_save</code> 분기 · 설정 UI · <code>tst_engineselection.cpp</code></td></tr>
+        <tr><td>결과 파일 추가</td><td><code>_transcribe_and_save</code>의 <code>artifacts</code>와 게시 순서 · <code>completed</code> 필드 · <code>BackendProcess</code>의 결과 경로 getter</td></tr>
+        <tr><td>engine 폴더 배치</td><td><code>gui/app/EnginePaths.*</code> · <code>EnginePaths.pri</code> · <code>tst_enginepaths.cpp</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="note warn">1차 범위 밖(사용 가이드 9절): Streaming STT, 실시간 화자 분리, 재생·파형·타임라인, 화자 이름 편집, 회의 요약.</div>
+</section>
+
+<!-- 13. 문서 -->
+<section id="docs">
+  <h2>관련 문서</h2>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>문서</th><th>내용</th></tr></thead>
+      <tbody>
+        <tr><td><a href="Qt_Widgets_음성_녹음_전사_UI_개발_사양서.md">Qt Widgets 음성 녹음·전사 UI 개발 사양서</a></td><td>1차 GUI 기준 사양. 구현과 충돌하면 사양서가 우선(AGENTS.md)</td></tr>
+        <tr><td><a href="다중_마이크_녹음_통합_전사_기능_개발_사양서.md">다중 마이크 녹음 통합 전사 기능 개발 사양서</a></td><td>정렬, 음질 평가, 채널 선택 알고리즘과 GUI 제안</td></tr>
+        <tr><td><a href="../engine/backend_protocol.md">Backend Bridge 이벤트 및 인자 계약</a></td><td>GUI–Python 계약 원문</td></tr>
+        <tr><td><a href="사용_및_구조_가이드.md">사용 및 구조 가이드</a></td><td>설치, 빌드, 사용 절차, 오류 확인 순서</td></tr>
+        <tr><td><a href="Nemotron_엔진_사용_가이드.md">Nemotron 엔진 사용 가이드</a></td><td>런타임 빌드, 모델 변환, GUI 설정 <span class="tag new">미커밋</span></td></tr>
+        <tr><td><a href="../engine/README_KO.md">Python 엔진 실행 안내</a></td><td>setup.bat과 CLI 배치 파일</td></tr>
+        <tr><td>MM-DEV-016 ~ 019 문서</td><td>수용 검증, CER/WER 평가, 겹침 발화 보완, FGCS/CGCS 타당성</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<footer>
+  이 페이지는 코드와 문서를 읽고 정리한 것입니다. 수치는 설정 기본값과 <code>wc -l</code> 결과이고, 성능이나 품질 측정값이 아닙니다. 내용이 다르면 소스 코드와 <code>engine/backend_protocol.md</code>가 우선합니다.
+</footer>
+
+</main>
+</div>
+
+<script>
+(function () {
+  var root = document.documentElement;
+  var btn = document.getElementById('themeBtn');
+  function stored() { try { return localStorage.getItem('kt-structure-theme'); } catch (e) { return null; } }
+  function store(v) { try { localStorage.setItem('kt-structure-theme', v); } catch (e) {} }
+  function current() {
+    var t = root.getAttribute('data-theme');
+    if (t) return t;
+    return window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+  }
+  function label() { btn.textContent = current() === 'dark' ? '밝게' : '어둡게'; }
+  var s = stored();
+  if (s === 'dark' || s === 'light') root.setAttribute('data-theme', s);
+  label();
+  btn.addEventListener('click', function () {
+    var next = current() === 'dark' ? 'light' : 'dark';
+    root.setAttribute('data-theme', next);
+    store(next);
+    label();
+  });
+
+  var links = Array.prototype.slice.call(document.querySelectorAll('nav.toc a'));
+  if (!('IntersectionObserver' in window)) return;
+  var byId = {};
+  links.forEach(function (a) { byId[a.getAttribute('href').slice(1)] = a; });
+  var observer = new IntersectionObserver(function (entries) {
+    entries.forEach(function (entry) {
+      if (!entry.isIntersecting) return;
+      links.forEach(function (a) { a.classList.remove('active'); });
+      var link = byId[entry.target.id];
+      if (link) {
+        link.classList.add('active');
+        var nav = document.querySelector('nav.toc');
+        if (nav && window.innerWidth <= 860) {
+          nav.scrollLeft = link.offsetLeft - nav.clientWidth / 2 + link.offsetWidth / 2;
+        }
+      }
+    });
+  }, { rootMargin: '-20% 0px -70% 0px' });
+  document.querySelectorAll('main section[id]').forEach(function (s) { observer.observe(s); });
+})();
+</script>
+</body>
+</html>
